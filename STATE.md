@@ -16,7 +16,7 @@ is just deleted. Write entries as one or two lines, never paragraphs.
 
 ## In progress
 
-Nothing. PR #2 carries 1.4 and is green but unmerged.
+Nothing. PR #2 is merged; 1.5 is next.
 
 *One task at most. Say what is done, what is not, and where to resume. Say what
 is committed and what is only in the working tree. Say what is knowingly
