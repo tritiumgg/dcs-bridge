@@ -25,13 +25,18 @@ RUSTUP_TOOLCHAIN = ""
 [tools]
 lua = "5.1"
 
+# --no-default-features below turns the broker's dcs-lua feature off, which is
+# what the host-native build is. Leaving it on links DCS's lua.dll into every
+# binary on a Windows host, and a machine with no DCS has none to load.
+# DR-0002.
+
 [tasks.build]
 description = "Build every crate in the workspace"
-run = "cargo build --workspace --all-targets"
+run = "cargo build --workspace --all-targets --no-default-features"
 
 [tasks.test]
 description = "Run the workspace test suite"
-run = "cargo test --workspace"
+run = "cargo test --workspace --no-default-features"
 
 [tasks.fmt]
 description = "Format every crate"
@@ -41,10 +46,14 @@ run = "cargo fmt --all"
 description = "What CI gates a pull request on, against the host target"
 run = [
   "cargo fmt --all --check",
-  "cargo clippy --workspace --all-targets -- -D warnings",
-  "cargo build --workspace --all-targets",
-  "cargo test --workspace",
+  "cargo clippy --workspace --all-targets --no-default-features -- -D warnings",
+  "cargo build --workspace --all-targets --no-default-features",
+  "cargo test --workspace --no-default-features",
 ]
+
+[tasks.windows]
+description = "Cross-build the product target, linking DCS's Lua"
+run = "cargo xwin build --release --workspace --target x86_64-pc-windows-msvc"
 
 [tasks.docs]
 description = "Lint the ledgers and hold STATE.md to its budget"

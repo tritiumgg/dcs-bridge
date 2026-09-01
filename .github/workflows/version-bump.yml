@@ -56,7 +56,6 @@ jobs:
           ' Cargo.toml)
           [ -n "$cur" ] || {
             echo 'no version under [workspace.package] in Cargo.toml.'
-            echo 'Task 1.1 creates the workspace; run this after it lands.'
             exit 1
           }
           new=$(printf '%s' "$cur" | awk -F. -v lvl='${{ inputs.level }}' '{

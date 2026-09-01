@@ -1,6 +1,6 @@
 # One toolchain across macOS, Windows, Linux and CI.
 #
-# Task 1.2 gates a pull request on `clippy -D warnings` across all three hosts.
+# CI gates a pull request on `clippy -D warnings` across all three hosts.
 # A floating channel resolves per host, so a new stable release introduces a
 # lint that fails CI for a reason unrelated to the change, and a contributor
 # sees clippy pass locally and fail in CI. The channel is pinned instead.
@@ -9,7 +9,7 @@
 # mise.toml enables the idiomatic version file setting for rust and clears
 # RUSTUP_TOOLCHAIN, which would otherwise override this file and discard the
 # two lists below. rustup installs `components` and `targets` on demand, which
-# is where task 1.4's Windows target comes from.
+# is where the Windows cross-build's target comes from.
 #
 # Change the toolchain by editing `channel`, then `mise install`. Not with
 # `mise use rust@<version>`: that writes a version into mise.toml's [tools]

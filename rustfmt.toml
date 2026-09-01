@@ -1,4 +1,4 @@
-# One format across three hosts. Task 1.2 gates a pull request on
+# One format across three hosts. CI gates a pull request on
 # `cargo fmt --all --check`, so every setting here is a setting nobody argues
 # about in review.
 
