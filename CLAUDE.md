@@ -156,8 +156,29 @@ Assume nothing beyond a stock machine: no `jq`, no `python`, no `gawk`. Detect
 Leave `.gitattributes` alone. It disables line-ending conversion, without which
 every ledger stamp breaks on a Windows checkout.
 
-## Commits
+## Version control
+
+This section overrides the global rules in `~/.config/agents/AGENTS.md`, which
+are stricter.
 
 Conventional Commits: `type(scope): summary`, imperative, under 72 characters.
-You may commit as needed. Do not push or rewrite history without being asked.
+Add a body when the change needs explaining.
+
+**A branch per plan task**, named `task/<id>-<summary>`, such as
+`task/1.1-cargo-workspace`. Work that belongs to no task takes the `type` it
+would commit under: `fix/`, `docs/`, `build/`.
+
+**History is linear. Rebase, never merge-commit.** Bring a branch up to date
+with `git rebase origin/main`, and land it with `git merge --ff-only`. If the
+fast-forward is refused, fix the branch rather than reaching for a merge
+commit. Rebasing re-signs, so the commit signatures survive the rewrite.
+
+Do these without asking: branch, commit, rebase onto `main`, fast-forward
+merge, delete a merged branch, push a topic branch, force-with-lease a topic
+branch that is yours, and open a pull request with `gh`.
+
+**Ask first before pushing `main`, before rewriting history that has been
+pushed, and before tagging.** A tag is not a label here: `release.yml` fires on
+`v*` and publishes to GitHub, so tagging is a release and the maintainer makes
+it.
 
