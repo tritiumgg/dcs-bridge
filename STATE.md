@@ -1,6 +1,6 @@
 # Working state
 
-**Last updated:** 2026-09-01, the schema compiles and 1.6 waits on a merge.
+**Last updated:** 2026-09-01, 1.6 is green and waits on a merge.
 
 The handoff between sessions. Read it first; update it before a session ends,
 not only when a task finishes. Stamp the line above each time.
@@ -16,9 +16,9 @@ is just deleted. Write entries as one or two lines, never paragraphs.
 
 ## In progress
 
-**1.6** — `proto/dcs/bridge/bridge.proto` lints and compiles, and the zip
-carries `schema.pb`. All committed on `task/1.6-schema-proto`. What is left is
-CI confirming it and the merge.
+**1.6** — PR #5 is green, CI run 33545252753, and waits on a merge. The zip
+carries `schema.pb`, and the Linux runner's copy is byte-identical to a macOS
+build. All committed. What is left is the merge.
 
 *One task at most. Say what is done, what is not, and where to resume. Say what
 is committed and what is only in the working tree. Say what is knowingly
