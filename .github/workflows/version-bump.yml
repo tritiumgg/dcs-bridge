@@ -1,0 +1,155 @@
+# Bump the release version.
+#
+# No plan task creates this. PLAN §4 asks only that the README state the
+# versioning policy, and SPEC §13.3 holds the numbers themselves. Treat this
+# workflow as a convenience that arrived early rather than as scheduled work.
+#
+# SPEC §13.3 defines six version numbers. Four of them — protocol, interface,
+# GRAMMAR_VERSION and STATE_VERSION — carry their own bump rules, and the
+# section states that none of the four moves for a reason outside its own row.
+# Section 6.9 depends on that: a grammar change that also bumped STATE_VERSION
+# would drop every subscription and spot on a running server for nothing.
+#
+# So this workflow touches the release version and nothing else, and the guard
+# step below fails if the diff reaches any of the four. Bump those by hand,
+# in a commit whose reason is the one its own row names.
+#
+# The workflow opens a pull request. Merging and tagging stay manual, because
+# the tag is what publishes a release.
+
+name: Bump version
+
+on:
+  workflow_dispatch:
+    inputs:
+      level:
+        description: Which part to increment
+        required: true
+        type: choice
+        options: [patch, minor, major]
+        default: patch
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  bump:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Compute the new version
+        id: v
+        run: |
+          set -eu
+          cur=$(awk '
+            /^\[workspace\.package\]/ { in_sec = 1; next }
+            /^\[/ { in_sec = 0 }
+            in_sec && /^version[[:space:]]*=/ {
+              sub(/^version[[:space:]]*=[[:space:]]*"/, "")
+              sub(/".*$/, "")
+              print; exit
+            }
+          ' Cargo.toml)
+          [ -n "$cur" ] || {
+            echo 'no version under [workspace.package] in Cargo.toml.'
+            echo 'Task 1.1 creates the workspace; run this after it lands.'
+            exit 1
+          }
+          new=$(printf '%s' "$cur" | awk -F. -v lvl='${{ inputs.level }}' '{
+            major = $1; minor = $2; patch = $3
+            if (lvl == "major") { major++; minor = 0; patch = 0 }
+            else if (lvl == "minor") { minor++; patch = 0 }
+            else { patch++ }
+            printf "%s.%s.%s", major, minor, patch
+          }')
+          printf 'current=%s\n' "$cur" >> "$GITHUB_OUTPUT"
+          printf 'new=%s\n' "$new" >> "$GITHUB_OUTPUT"
+          printf '%s -> %s\n' "$cur" "$new"
+
+      - name: Rewrite the version
+        run: |
+          set -eu
+          cur='${{ steps.v.outputs.current }}'
+          new='${{ steps.v.outputs.new }}'
+          awk -v cur="$cur" -v new="$new" '
+            /^\[workspace\.package\]/ { in_sec = 1 }
+            /^\[/ && !/^\[workspace\.package\]/ { in_sec = 0 }
+            in_sec && $0 ~ ("^version[[:space:]]*=[[:space:]]*\"" cur "\"") {
+              printf "version = \"%s\"\n", new; next
+            }
+            { print }
+          ' Cargo.toml > Cargo.toml.new && mv Cargo.toml.new Cargo.toml
+          grep -n "$new" Cargo.toml
+
+      # rust-toolchain.toml pins the channel, so rustup installs what it names.
+      - name: Refresh Cargo.lock
+        run: |
+          rustup show
+          cargo update --workspace
+
+      # PLAN §4: the README states the release version and nothing else.
+      - name: Update the stated release version
+        run: |
+          set -eu
+          cur='${{ steps.v.outputs.current }}'
+          new='${{ steps.v.outputs.new }}'
+          if [ -f README.md ] && grep -q "$cur" README.md; then
+            awk -v cur="$cur" -v new="$new" '{ gsub(cur, new); print }' \
+              README.md > README.new && mv README.new README.md
+            echo "README updated"
+          else
+            echo "README states no version; nothing to update"
+          fi
+
+      # The rule this whole workflow exists to respect.
+      - name: The four compared versions must not move
+        run: |
+          set -eu
+          bad=0
+          for sym in GRAMMAR_VERSION STATE_VERSION; do
+            if git diff -U0 | grep -q "^[+-].*$sym"; then
+              echo "the diff touches $sym"
+              bad=1
+            fi
+          done
+          for sym in protocol interface; do
+            if git diff -U0 | grep -qE "^[+-].*\b$sym(_version)?[[:space:]]*[:=]"; then
+              echo "the diff touches the $sym version"
+              bad=1
+            fi
+          done
+          if [ "$bad" = 1 ]; then
+            echo
+            echo 'SPEC 13.3: none of the four compared versions moves for a'
+            echo 'reason outside its own row. Bump them by hand.'
+            exit 1
+          fi
+          echo 'the diff touches the release version only'
+
+      - name: Open a pull request
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          new='${{ steps.v.outputs.new }}'
+          branch="bump/v$new"
+          git config user.name 'github-actions[bot]'
+          git config user.email 'github-actions[bot]@users.noreply.github.com'
+          git switch -c "$branch"
+          git add -A
+          git commit -m "chore(release): bump version to $new"
+          git push -u origin "$branch"
+          cat > /tmp/pr-body.md <<BODY
+          Release version only. SPEC 13.3's four compared versions are untouched.
+
+          Merge, then tag \`v$new\` to publish. A hyphenated tag such as
+          \`v$new-rc1\` publishes as a prerelease.
+          BODY
+          sed 's/^          //' /tmp/pr-body.md > /tmp/pr-body.txt
+          gh pr create \
+            --title "chore(release): bump version to $new" \
+            --body-file /tmp/pr-body.txt

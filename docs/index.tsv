@@ -1,0 +1,5 @@
+code	path	frozen
+SPEC	docs/specs/bridge/spec.md	yes
+SIM	docs/specs/sim-driver-builtins/spec.md	yes
+HOOK	docs/specs/hook-driver-builtins/spec.md	yes
+PLAN	docs/plan/plan.md	no

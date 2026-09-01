@@ -1,0 +1,130 @@
+# Plan task 1.5.
+#
+# Tag-triggered. Cross-builds the Windows target, assembles the write-directory
+# zip, publishes checksums, and attaches the broker, the CLI and the zip.
+#
+# A tag carrying a hyphenated suffix, such as v0.2.0-rc1, publishes as a
+# prerelease. That is the development channel the task asks for.
+#
+# Task 10.1 extends the zip to the full write-directory tree. Until then the
+# staging step ships whatever dist/write-directory holds and says so.
+
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: An existing tag to build
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+          fetch-depth: 0
+
+      - name: Resolve the tag
+        id: tag
+        run: |
+          set -eu
+          tag="${{ inputs.tag }}"
+          [ -n "$tag" ] || tag="${GITHUB_REF#refs/tags/}"
+          case "$tag" in
+            *-*) channel=prerelease ;;
+            *)   channel=release ;;
+          esac
+          printf 'tag=%s\n' "$tag" >> "$GITHUB_OUTPUT"
+          printf 'channel=%s\n' "$channel" >> "$GITHUB_OUTPUT"
+          printf 'version=%s\n' "${tag#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Toolchain
+        run: rustup show
+
+      - name: LLVM
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends llvm clang lld
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.cargo/bin/cargo-xwin
+            ~/.cache/cargo-xwin
+          key: release-xwin-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: release-xwin-
+
+      - name: cargo-xwin
+        run: command -v cargo-xwin || cargo install --locked cargo-xwin
+
+      - name: Import library from the checked-in .def
+        run: sh tools/mkimplib.sh
+
+      - name: Build
+        run: cargo xwin build --release --workspace --target x86_64-pc-windows-msvc
+
+      - name: Stage the artifacts
+        run: |
+          set -eu
+          bin=target/x86_64-pc-windows-msvc/release
+          mkdir -p dist
+          find "$bin" -maxdepth 1 \( -name '*.dll' -o -name '*.exe' \) \
+               -exec cp {} dist/ \;
+          if [ -f dist/lua_dcsbridge.dll ]; then
+            mv dist/lua_dcsbridge.dll dist/lua-dcsbridge.dll
+          fi
+          test -n "$(ls -A dist)" || { echo 'no artifacts produced'; exit 1; }
+
+      # The zip mirrors the write directory, so installing is one extraction.
+      # Task 10.1 fills the tree out; this step ships what exists.
+      - name: Assemble the write-directory zip
+        run: |
+          set -eu
+          v='${{ steps.tag.outputs.version }}'
+          stage="writedir"
+          mkdir -p "$stage"
+          if [ -d dist/write-directory ]; then
+            cp -R dist/write-directory/. "$stage"/
+          else
+            echo 'dist/write-directory does not exist yet; the zip carries the'
+            echo 'binaries only. Task 10.1 extends it to the full tree.'
+            cp dist/*.dll dist/*.exe "$stage"/ 2>/dev/null || true
+          fi
+          (cd "$stage" && zip -qr "../dist/write-directory-$v.zip" .)
+          ls -l dist
+
+      - name: Checksums
+        run: |
+          set -eu
+          cd dist
+          : > SHA256SUMS
+          for f in *; do
+            [ "$f" = SHA256SUMS ] && continue
+            sha256sum "$f" >> SHA256SUMS
+          done
+          cat SHA256SUMS
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          tag='${{ steps.tag.outputs.tag }}'
+          flags=""
+          case '${{ steps.tag.outputs.channel }}' in
+            prerelease) flags="--prerelease" ;;
+          esac
+          gh release create "$tag" dist/* \
+            --title "$tag" \
+            --generate-notes \
+            $flags

@@ -1,0 +1,6 @@
+# Cargo build output. tools/mkimplib.sh writes the generated import library
+# here too, so this is needed from the first run rather than from task 1.1.
+/target/
+
+# Local Claude Code settings. .claude/settings.json is shared; this is not.
+.claude/settings.local.json

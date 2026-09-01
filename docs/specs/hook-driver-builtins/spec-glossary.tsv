@@ -1,0 +1,19 @@
+# spec: spec.md
+# sha256: c3916bb9fd9477d0112585a26b5fc47510b6370507601878369e155724fa85d4
+# generated: 2026-08-31
+term	subject	defined_in	note
+DCS-Bridge	product name	DCS-Bridge — The hook driver built-ins	The product this document is part of.
+the hook driver built-ins	hook driver built-ins	1. What the hook driver built-ins are	The document's own subject.
+the built-ins	hook driver built-ins	1. What the hook driver built-ins are	Short form used throughout.
+SIM	sibling document prefix	DCS-Bridge — The hook driver built-ins	The sim driver built-ins document.
+SPEC	external-spec	DCS-Bridge — The hook driver built-ins	The DCS-Bridge specification. Referenced, never defined here.
+PLAN	external-plan	12. Open questions	The project plan. Referenced, never defined here.
+HookDriver.builtin.lua	handler file	DCS-Bridge — The hook driver built-ins	The file the built-in handlers ship in.
+hookdriver.d	registration keys	1. What the hook driver built-ins are	The operator's hook-side extension directory.
+harvest	harvest rule	3. Player identity	Parking values from a veto callback for the sibling to emit.
+the guard	get_player_info guard	3.1 The `net.get_player_info` guard	The net.get_player_info nil rule.
+the bounce	bounce suppression	8. The bounce	A forced slot move and its self-caused callback.
+veto callback	veto policy	2. Act, do not veto	An onPlayerTry* callback whose return value ends the hook chain.
+hook-targeted	hook targeting	DCS-Bridge — The hook driver built-ins	Routed to the hook ring by SPEC §8.2's target option.
+verification point	verification points	10.2 Verification points and the family check	A published point a consumer checks the projection against.
+declination	declination route	10.3 Magnetic declination	The angle from true north to magnetic north at a point.

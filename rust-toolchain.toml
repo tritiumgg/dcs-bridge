@@ -1,0 +1,14 @@
+# One toolchain across macOS, Windows, Linux and CI.
+#
+# Task 1.2 gates a pull request on `clippy -D warnings` across all three hosts.
+# Without this file each host resolves its own stable, so a new stable release
+# introduces a lint that fails CI for a reason unrelated to the change, and a
+# contributor sees clippy pass locally and fail in CI.
+#
+# Change `channel` to a pinned version such as "1.89.0" when you want the
+# toolchain to move only when you move it.
+
+[toolchain]
+channel = "stable"
+components = ["rustfmt", "clippy"]
+targets = ["x86_64-pc-windows-msvc"]

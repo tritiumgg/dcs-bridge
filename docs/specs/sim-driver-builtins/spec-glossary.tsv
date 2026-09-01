@@ -1,0 +1,66 @@
+# spec: spec.md
+# sha256: 47d0d4b9854969bef09dafd610ced56d22c3cc36a8b26975fd3e283008c0020a
+# generated: 2026-08-31
+term	subject	defined_in	note
+built-ins	builtins	1. What the built-ins are	The record set and command set the sim driver ships with, in SimDriver.builtin.lua. What this document specifies.
+the built-ins	builtins	1. What the built-ins are	Short form, used throughout.
+built-in set	builtins	1. What the built-ins are	Same thing. A replacement set may be substituted; DCS-Bridge carries records with the set gone.
+sim driver	builtins	UNDEFINED	The component the built-ins run in: DCS-Bridge's Lua half in the mission-scripting state. Specified in SPEC 6, not here.
+hook driver	hook-driver-boundary	1. What the built-ins are	The other DCS-side component, in the GameGUI hook state. Its own built-ins are HOOK. Owns player identity and lifecycle, chat, roster, kick, slot, bans, server control, the projection derivation and magnetic declination.
+SimDriver.builtin.lua	builtin-files	1. What the built-ins are	The single DCS-Bridge-owned file holding every built-in handler. A release overwrites it.
+sim_driver_disabled_files	builtin-files	1. What the built-ins are	SPEC 13.1 key that skips a shipped file at a mission reload. The durable way to disable a built-in.
+scope rule	scope-rule	1. What the built-ins are	Tier 1 is sized on demand shown by existing tooling, Tier 2 on need it does not cover, Tier 3 on stated refusals. A gap is weaker evidence than a covered case.
+Tier 1	tier1-mission-events	2. Tier 1 — first release	The first-release record and command set: proven demand, low cost, nothing that is a research problem.
+Tier 2	tier2-addgroup	3. Tier 2 — what the catalogue's gaps ask for	What existing tooling has left unbuilt after five years, led by complete coalition.addGroup.
+Tier 3	tier3-tts-srs	7. Tier 3 — deliberately excluded	Deliberate exclusions with a stated reason each: text-to-speech and SRS, env logging, dostring_in exposure, weapon static descriptors.
+state boundary	state-boundary	2. Tier 1 — first release	Every built-in runs in the mission-scripting state and declares no target option. The division from the hook driver is by Lua state, not by taste.
+sim driver ring	state-boundary	UNDEFINED	SPEC 5.2 inbound ring for mission-scripting-targeted topics. Every built-in topic routes here.
+coordinate convention	coord-convention	4. Coordinate conversion	Every position a built-in emits is DCS-local: +x north, +z east, +y up. SPEC 8.2 pins it.
+the projection	projection-publication	4. Coordinate conversion	Transverse Mercator on WGS84, k_0 = 0.9996, a central meridian at one of sixty UTM zone values, and a per-terrain false easting and northing. DCS-Bridge derives and publishes it; the built-ins only obey the convention it reads.
+the derivation	projection-derivation	4. Coordinate conversion	The hook driver identifying the projection each epoch: one converted point, a sixty-way meridian search, one checked point. Not a least-squares fit.
+PROJ string	projection-publication	4. Coordinate conversion	The textual encoding CoordinateCalibration carries, +proj=tmerc with the derived meridian and origin. Never an EPSG code: a re-origined UTM zone cannot have one.
+verification points	projection-publication	4. Coordinate conversion	Three or four point-pairs a consumer checks the published parameters against, rather than fits them from. They also carry the declination.
+CoordinateCalibration	calibration-ownership	4. Coordinate conversion	DCS-Bridge's own LIFECYCLE record, emitted by the hook driver. Carries the projection parameters, the PROJ string, the verification points and their declination. No built-in contributes to it.
+grid north	three-norths	4. Coordinate conversion	DCS +x. The reference for any heading derived from carried data.
+true north	three-norths	4. Coordinate conversion	Differs from grid north by the projection's convergence angle, which the published parameters give a consumer at no cost.
+convergence angle	three-norths	4. Coordinate conversion	The grid-to-true difference, recoverable from the published projection.
+declination	declination	4. Coordinate conversion	Magnetic declination, optional per verification point on CoordinateCalibration. The hook driver's from end to end: magvar lives in the gui state, which no built-in can reach.
+ConvertCoords	convertcoords	4. Coordinate conversion	The built-in batch conversion command. Wraps LLtoMGRS and MGRStoLL only; LOtoLL and LLtoLO are redundant once the projection is published.
+convert_max_points_per_command	convertcoords	UNDEFINED	SPEC 13.1 cap on one ConvertCoords request. Above it, a CommandAck with outcome REFUSED.
+MGRS parity	convertcoords	4. Coordinate conversion	Measured approximate, not exact: coord.LLtoMGRS and the map's own routine agree on zone, band, digraph and easting and differ by a metre in the northing at four of six sampled points.
+float32 grid	guard-lltolo-shape	9. Required guards	DCS carries positions as single-precision floats, so a coordinate round-tripped through coord.* comes back quantised. The precision floor under every derived parameter.
+instance state	weapon-instance-state	5. Weapons	The per-weapon data that exists only while the weapon flies: launcher, target, position, velocity, type name. Carried.
+static descriptor fields	weapon-class-split	5. Weapons	Weapon type constants — warhead, calibre, guidance, envelopes. Not carried per weapon, and no bulk export replaces them.
+weapon tracking	weapon-tracking-optin	5. Weapons	An opt-in subscription with a three-term filter, sampling weapons in flight under max_tracked_weapons.
+max_tracked_weapons	weapon-tracking-optin	UNDEFINED	SPEC 13.1 resource cap on weapons held. weapon_max_samples throttles at half its depth.
+max_subscriptions	weapon-tracking-optin	UNDEFINED	SPEC 6.7 cap. A weapon-tracking subscription counts against it; the weapons it holds do not.
+Unit.getAmmo	weapon-class-split	5. Weapons	The only binding reaching weapon descriptor data without a live weapon object. Returns nil, not an empty table, on a unit carrying nothing.
+spot	spot-managed-resource	6. Laser and infrared spots	A managed laser or infrared designation resource with a driver-side tracking loop, rather than a create/update/destroy primitive triple.
+LaserOn	laseron	6. Laser and infrared spots	Creates a laser spot and returns its handle in a typed reply. Declares reply_to and carries both request_id and idempotency_key.
+LaserOff	laseroff	6. Laser and infrared spots	Destroys a laser spot by handle.
+IrOn	iron-iroff	6. Laser and infrared spots	The infrared twin of LaserOn, identical in shape minus the code.
+IrOff	iron-iroff	6. Laser and infrared spots	The infrared twin of LaserOff.
+max_spots	spot-subscription-machinery	UNDEFINED	SPEC 13.1 resource cap. Above it, a CommandAck with outcome REFUSED.
+laser code	laser-code-validation	6. Laser and infrared spots	Validated as an integer in 0 to 9999, with no band enforced. Nothing on the scripted path validates it: the engine accepted 10000, wrapped -1 to 4294967295 and truncated 1.5 to 1.
+the ten ranges	laser-code-bands	6. Laser and infrared spots	The AH-64D cockpit's code-range list. A display table, not a validator.
+spot lifetime	spot-lifetime	6. Laser and infrared spots	A spot outlives the destruction of its source unit — code, point and category all still answer, and setPoint still moves the beam. The driver must detect that itself.
+the crasher register	crasher-bindings	8. Bindings that must not ship unguarded	The five mission-scripting bindings that terminate the process despite pcall. SPEC 4.2 holds the full register, which also carries an unattributed sixth and a hook-state seventh.
+getDescByName family	getdescbyname-family	8. Bindings that must not ship unguarded	Four static members on SceneryObject, Unit, StaticObject and Airbase. The three usable ones are one lookup under three names and ignore the class called on; only the SceneryObject member crashes.
+unsafe_bindings_enabled	crasher-gate	UNDEFINED	SPEC 13.1 key, default false, gating a handler that reaches a crasher-register binding.
+required guard	guard-provenance	9. Required guards	A defensive check against a binding that answers with something unexpected rather than raising, which no blacklist probe finds. Binds any handler in this state, not only the built-ins.
+record class	class-capability-policy	11. Classes and capabilities	SPEC 8.1 transport drop policy. Built-in records are DURABLE or COMMAND; none is LIFECYCLE.
+required capability	class-capability-policy	11. Classes and capabilities	SPEC 14.4 per-topic gate. The built-ins use read and command, and define none of their own.
+records mirror DCS	records-mirror-dcs	10. Record-set philosophy	Built-in records forward S_EVENT_* payloads as DCS defines them, with no smoothed abstractions.
+SPEC	cross-reference	1. What the built-ins are	The DCS-Bridge core specification: the broker, both driver runtimes, the interfaces and the broker.
+HOOK	cross-reference	1. What the built-ins are	The hook driver's built-ins, the other half of what ships in the box.
+DCS-Bridge	cross-reference	1. What the built-ins are	The product: a broker, two drivers into DCS, and a generator that writes the code between them.
+broker	cross-reference	UNDEFINED	The Rust DLL. Moves records and knows nothing about DCS. SPEC 1.1 and 5.2.
+record	record	UNDEFINED	Defined in the core specification's preamble.
+consumer	consumer	UNDEFINED	Defined in the core specification's preamble.
+epoch	epoch	UNDEFINED	Defined in the core specification's preamble; SPEC 9.4.
+EpochOpened	epoch	UNDEFINED	DCS-Bridge-owned lifecycle record, SPEC 6.3. Seven fields, emitted before the sim driver loads. No built-in adds to it.
+EpochClosed	epoch	UNDEFINED	DCS-Bridge-owned lifecycle record, SPEC 6.3 and 9.4. Voids every spot and unit handle.
+CommandAck	commandack	UNDEFINED	SPEC 8.5.3. The answer to a command with no typed reply, and the failure channel for one with a reply.
+reply_to	commandack	UNDEFINED	SPEC 8.2 message option naming a request message's typed reply.
+subscription	subscription	UNDEFINED	SPEC 6.7. A locally evaluated predicate and the record it emits.
+PROBE-An	open-questions	13. Open questions	This document's probe register, numbered from A1 to stay clear of SPEC 16's PROBE-n. A retired number is not reused; nothing is open on the sim side.
