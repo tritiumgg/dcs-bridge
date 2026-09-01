@@ -1,14 +1,21 @@
 # One toolchain across macOS, Windows, Linux and CI.
 #
 # Task 1.2 gates a pull request on `clippy -D warnings` across all three hosts.
-# Without this file each host resolves its own stable, so a new stable release
-# introduces a lint that fails CI for a reason unrelated to the change, and a
-# contributor sees clippy pass locally and fail in CI.
+# A floating channel resolves per host, so a new stable release introduces a
+# lint that fails CI for a reason unrelated to the change, and a contributor
+# sees clippy pass locally and fail in CI. The channel is pinned instead.
 #
-# Change `channel` to a pinned version such as "1.89.0" when you want the
-# toolchain to move only when you move it.
+# This is the only file that names the Rust toolchain, and mise reads it.
+# mise.toml enables the idiomatic version file setting for rust and clears
+# RUSTUP_TOOLCHAIN, which would otherwise override this file and discard the
+# two lists below. rustup installs `components` and `targets` on demand, which
+# is where task 1.4's Windows target comes from.
+#
+# Change the toolchain by editing `channel`, then `mise install`. Not with
+# `mise use rust@<version>`: that writes a version into mise.toml's [tools]
+# and mise stops reading this file.
 
 [toolchain]
-channel = "stable"
+channel = "1.98.0"
 components = ["rustfmt", "clippy"]
 targets = ["x86_64-pc-windows-msvc"]

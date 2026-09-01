@@ -1,8 +1,10 @@
-# <!-- FILL: project name -->
+# DCS-Bridge
 
-<!-- FILL: one or two sentences on what this project does. Everything below
-     refers to it as "the project", so this is the only place the description
-     lives. -->
+A bridge between DCS World and external applications, allowing them to
+interact with and receive from the simulation state through events,
+subscriptions, and commands. The bridge is comprised of three parts:
+A message broker that acts as the data transport, and two scripts that
+interact with DCS World inside and outside of the simulation.
 
 ## Layout
 
@@ -54,19 +56,18 @@ from it. Do not edit it, and do not offer to bring it up to date. Where the
 build needs to go somewhere the specifications did not anticipate, write a
 decision record: copy `docs/decisions/TEMPLATE.md` and number it next.
 
-The plan is not frozen. It states build order, build order changes, and its own
-first paragraph says the plan changes weekly while the specifications do not.
-Edit it when the order changes. Its ledger then reports `STALE`, which fails
-nothing; regenerate those rows when convenient.
+The plan is not frozen. It states build order. Edit it when the order changes.
+Its ledger then reports `STALE`, which fails nothing; regenerate those rows
+when convenient.
 
 `docs/index.tsv` has a `frozen` column and the tooling reads it.
 
 ## Never read a specification whole
 
-The largest is 4,887 lines. The ledger beside each document holds a row per
-claim with an anchor that locates the prose, so retrieval happens in `grep` and
-`awk` rather than in a context window. A `PreToolUse` hook refuses an unbounded
-`Read` of a specification.
+The ledger beside each document holds a row per claim with an anchor that
+locates the prose, so retrieval happens in `grep` and `awk` rather than in
+a context window. A `PreToolUse` hook refuses an unbounded `Read` of a
+specification.
 
 ```
 tools/ledger.sh codes                     document codes and paths
@@ -94,6 +95,31 @@ a person watching. Before starting a task, decide whether an agent can observe
 the result itself, whether it needs a maintainer reading a CI result, or whether
 only somebody at a live install can see it. Write it in `STATE.md` under the
 task. An agent that skips this declares victory on something it never observed.
+
+## Toolchain
+
+Tool versions come from `mise.toml`. Do not install toolchains globally, and do
+not use a language's own version manager (`rustup` and similar) directly.
+
+Run every project command through mise, because a non-interactive shell does not
+pick up mise's PATH activation:
+
+```sh
+mise exec -- cargo test
+mise exec -- lua5.1 script.lua
+mise run test  # preferred, see [tasks] in mise.toml
+```
+
+Change tool versions with `mise use <tool>@<version>`, not by editing the
+`mise.toml` by hand. Commit both `mise.toml` and `mise.lock`.
+
+**Rust is the exception, and `mise use rust@<version>` breaks it.** The version
+lives in `rust-toolchain.toml`, which also carries the components and the
+Windows target, and mise reads that file. `mise use` writes a second version
+into `[tools]` and mise stops reading it. Edit `channel`, then `mise install`.
+
+On a fresh checkout, run `mise install` before anything else. If a command
+reports the config is untrusted, run `mise trust`.
 
 ## Building for Windows
 
@@ -133,4 +159,5 @@ every ledger stamp breaks on a Windows checkout.
 ## Commits
 
 Conventional Commits: `type(scope): summary`, imperative, under 72 characters.
-Do not commit unless asked.
+You may commit as needed. Do not push or rewrite history without being asked.
+
