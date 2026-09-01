@@ -1,0 +1,100 @@
+# spec: spec.md
+# sha256: 783dbd696c816cc3df12d18e97efc902c386cc0ad3c3221bc27f91e7dfd4b838
+# generated: 2026-08-31
+term	subject	defined_in	note
+record	record	Terms	One typed message.
+consumer	consumer	Terms	An external program connected to the bridge.
+logic thread	logic-thread	Terms	The DCS thread that runs the sim and all Lua.
+epoch	epoch	Terms	One mission's lifetime on the wire. Also 9.4.
+drain	drain	Terms	The once-per-frame transfer of buffered sim driver records to the broker.
+Route A	route-a	UNDEFINED	Bootstrap injection through net.dostring_in.
+bootstrap injection	route-a	UNDEFINED	Synonym for Route A.
+Route B	route-b	UNDEFINED	dofile from MissionScripting.lua at bootstrap.
+record class	record-class	UNDEFINED	Transport drop policy. Four members.
+DURABLE	record-class	UNDEFINED	Never discard silently while a consumer is connected.
+LOSSY	record-class	UNDEFINED	Discard freely under pressure.
+COMMAND	record-class	UNDEFINED	Consumer to mission. Retry with an idempotency key.
+LIFECYCLE	record-class	UNDEFINED	Never discard. Retained and replayed.
+target	target	UNDEFINED	Sim driver or hook. Names which component owns a topic.
+doctor	doctor	UNDEFINED	The diagnostic verb of the CLI. Terms points at PLAN 2 instead.
+topic id	topic-id	UNDEFINED	The payload's fully-qualified type name, carried as an Any type URL.
+server state	server-state	UNDEFINED	The mission-scripting Lua state. The spec spells it with quotes as the "server" state.
+scripting state	server-state	UNDEFINED	ED's name for the same state.
+mission state	mission-state	UNDEFINED	A different state holding editor trigger-action wrappers.
+hook state	hook-state	UNDEFINED	The Lua state a Scripts Hooks script runs in. Not the hook driver.
+sim driver	sim-driver	UNDEFINED	Lua injected into the "server" state. Lives one mission.
+hook driver	hook-driver	UNDEFINED	Lua loaded at DCS start. Loader plus payload.
+broker	broker	UNDEFINED	The Rust DLL. Also called the broker.
+shim	interface-a	UNDEFINED	The Lua-side name of the Interface A table.
+Interface A	interface-a	UNDEFINED	Transport to Lua. The put-call surface.
+Interface B	interface-b	UNDEFINED	Transport to consumer. Framed protobuf over TCP.
+Interface C	interface-c	UNDEFINED	Hook to sim driver. net.dostring_in.
+seam	seam	UNDEFINED	Interface A as a replaceable boundary.
+STATE_VERSION	state-version	UNDEFINED	Versions the shape of DCSBridge.state and nothing else. Section 13.3.
+warm reload	reload	UNDEFINED	Keeps DCSBridge.state.
+cold reload	reload	UNDEFINED	Discards DCSBridge.state.
+resync	resync	UNDEFINED	A live scan answering a consumer that joins mid-mission.
+subscription	subscription	UNDEFINED	A locally evaluated predicate and the record it emits.
+spot	spot	UNDEFINED	A subscription owning a DCS handle that must be released.
+sim driver built-ins	builtins	UNDEFINED	What ships in SimDriver.builtin.lua.
+adopter	adopter	UNDEFINED	Someone extending the bridge with their own files and messages.
+operator	operator	UNDEFINED	The person running the server. Trusted. Authors the missions.
+extension file	extension-model	UNDEFINED	An adopter file under sim driver.d or hook.d.
+registration surface	registration-surface	UNDEFINED	on, command, send, off, replace, wrap.
+registrar	registration	UNDEFINED	The hook driver or the sim driver, registering topic tables.
+blackout	load-blackout	UNDEFINED	The mission-load window. Measured as a total absence of frames, not slow frames.
+point-to-point	point-to-point	UNDEFINED	A record addressed to one connection.
+fan-out	fan-out	UNDEFINED	Delivery of a record to every connection.
+write directory	write-directory	UNDEFINED	Saved Games DCS folder, resolved from lfs.writedir.
+type URL	topic-id	UNDEFINED	type.googleapis.com/<package>.<Message>. The topic, and protobuf's own type identity.
+Any	envelope	UNDEFINED	google.protobuf.Any. Carries the payload opaquely plus its type URL.
+google.protobuf.Any	envelope	UNDEFINED	Full name of the same.
+envelope	envelope	UNDEFINED	The framed outer message: seq, epoch, mission_time and an Any payload.
+send_to	registration-surface	UNDEFINED	Buffered emission addressed to one connection. How a handler answers a command.
+GRAMMAR_VERSION	grammar-version	UNDEFINED	Versions the Interface C payload grammar. Deliberately not STATE_VERSION.
+CoordinateCalibration	calibration-set	UNDEFINED	The bridge's LIFECYCLE record carrying this theatre's DCS-local to lat/lon conversion.
+calibration set	calibration-set	UNDEFINED	Informal name for the same.
+frame gap	frame-gap	Provenance	The interval between onSimulationFrame callbacks. Measured as a distribution per phase.
+phase transition	frame-gap	Provenance	A load or teardown blackout, credited to the phase in force when it began. Not a transition record.
+transition record	resync	UNDEFINED	A record describing a change rather than a state: a destruction, a capture, a slot change. Must be idempotent at the consumer.
+transition (phase)	frame-gap	UNDEFINED	A change of lifecycle phase. Sections 5.2 and 9.
+transition (record)	resync	UNDEFINED	A record reporting a world change, which must be idempotent at the consumer. Section 6.8.
+structural cap	agent-loop	UNDEFINED	A per-frame cap held non-binding by invariant, kept so Section 6.4's rule has no exception.
+mission identity	mission-identity	Provenance	Theatre, name and filename, all readable from the hook driver at onMissionLoadBegin.
+mission filename	mission-identity	UNDEFINED	DCS.getMissionFilename(). The real path, and the value to scope a file on.
+filename	mission-identity	UNDEFINED	Short for the same.
+mission name	mission-identity	UNDEFINED	DCS.getMissionName(). For showing a human, never for identity.
+tempMission	mission-identity	Provenance	What getMissionName returns for a mission flown from the Mission Editor, whatever the .miz is called.
+onMissionLoadBegin	epoch-ownership	UNDEFINED	Hook callback opening the load blackout. Mission identity already reads here.
+onMissionLoadEnd	epoch-ownership	UNDEFINED	Hook callback closing the blackout. The hook driver allocates the epoch and emits EpochOpened here.
+onSimulationStop	epoch-ownership	UNDEFINED	Hook callback where the hook driver emits EpochClosed. The theatre reads nil by this point.
+bait file	mods-directory	UNDEFINED	A file planted under a plausible auto-load name to test whether anything runs it. None did.
+PROBE-n	probe	UNDEFINED	An open question with a named measurement.
+PLAN	external-plan	UNDEFINED	An external document. Referenced, never defined here.
+built-ins	builtins	UNDEFINED	The record and command set shipped in a driver .builtin.lua file.
+hook driver built-ins	builtins	UNDEFINED	What ships in HookDriver.builtin.lua.
+count hook	count-hook	UNDEFINED	Lua debug.sethook instruction hook. Not the hook driver.
+submessage	submessage	UNDEFINED	A nested message opened with shim.message and closed with shim.end_message.
+PROJ string	projection	UNDEFINED	The transverse Mercator parameter string CoordinateCalibration carries.
+verification point	projection	UNDEFINED	A point a consumer checks the published projection against.
+declination	declination	UNDEFINED	Magnetic declination, optional per verification point, read from magvar in the GUI state.
+dcsb	cli	UNDEFINED	The CLI binary.
+SIM	external-sim	UNDEFINED	An external document, the sim driver built-ins. Referenced, never defined here.
+HOOK	external-hook	UNDEFINED	An external document, the hook driver built-ins. Referenced, never defined here.
+mission date	mission-date	UNDEFINED	env.mission.date, the simulated date. Carried on CoordinateCalibration. Not the os.time() value on EpochOpened.
+cache scope	calibration-set	UNDEFINED	The projection keys on terrain; the declination keys on terrain and mission date.
+BUSY	rejected	UNDEFINED	Rejected reason for a command the inbound ring had no room for. Capped by busy_max_per_sec.
+SetTopicFilter	topic-filter	UNDEFINED	The broker-answered request that narrows what a connection is sent. Not Section 6.7.
+subscription filter	topic-filter	UNDEFINED	The per-connection topic set applied at fan-out beside the capability filter.
+ALL	topic-filter	UNDEFINED	TopicFilterMode member. The default: every fan-out record the capability set permits.
+ONLY	topic-filter	UNDEFINED	TopicFilterMode member. The named topics plus every LIFECYCLE topic.
+topic_filter_max_topics	topic-filter	UNDEFINED	Topic ids one SetTopicFilter may name.
+admissible	topic-filter	UNDEFINED	A topic the class table holds. What a topic filter may admit.
+unknown	topic-filter	UNDEFINED	TopicFilterResult field. Covers unregistered and capability-uncovered alike, deliberately.
+busy_max_per_sec	rejected	UNDEFINED	The BUSY rate cap, separate from rejected_max_per_sec.
+declination status	calibration-set	UNDEFINED	Why a declination is absent: policy, Route B, or a failed call.
+MissionDate	calibration-set	UNDEFINED	Proleptic Gregorian year, month and day from env.mission.date. No timezone.
+retained replay	lifecycle-retention	UNDEFINED	The LIFECYCLE set delivered to each newly authenticated connection, in emit order, before any live record. How a reconnecting consumer gets the calibration.
+GetTopics	topic-discovery	UNDEFINED	The broker-answered request listing the topics a connection can see. Not GetSchema, which serves the build.
+broker answer	drop-policy	UNDEFINED	A point-to-point reply the broker produces. Classless, treated as DURABLE by the drop rule.
+answer queue	broker-threads	UNDEFINED	The per-connection single-producer queue by which the reader thread hands a broker answer to the writer thread.

@@ -1,0 +1,38 @@
+# spec: plan.md
+# sha256: d65924bf7ceb15a8217955e4d9390251660382cc23a908de24e0a9a5cc41cece
+# generated: 2026-08-31
+term	subject	defined_in	note
+PLAN	plan-role	DCS-Bridge — Project plan	This document. Build order, what ships, probe method, and the four documents' conventions.
+project plan	plan-role	DCS-Bridge — Project plan	Synonym for PLAN.
+SPEC	document-split	4. Project conventions	The bridge specification. Cited but never depended on for a requirement by the other three.
+SIM	document-split	4. Project conventions	The sim driver built-ins' record and command set.
+HOOK	document-split	4. Project conventions	The hook driver built-in set that ships beside SIM.
+task ID	task-id	1. Task breakdown	A name that identifies a task across revisions. Not a position in the build order.
+done-when	phase-order	1. Task breakdown	The condition that closes a task. Every phase orders its tasks so each done-when is satisfiable when it runs.
+phase	phase-order	1. Task breakdown	A numbered group of tasks. Ten of them.
+dcsb	cli-verbs	1.1 CLI increments	The CLI binary, built in lock-step with the broker rather than after it.
+doctor	cli-doctor-increments	1.1 CLI increments	The CLI's diagnostic verb. SPEC 15 specifies it; it grows across four plan increments.
+walking skeleton	walking-skeleton	Phase 1 — Repository, CI, release and schema	Phase 1's stub crates and pipeline, built so a tag produces a build before any behaviour exists.
+broker	broker-handled-set	UNDEFINED	The compiled module. Defined in SPEC 1.4 and 5.2.
+hook driver	hook-dispatch-loop	UNDEFINED	The GameGUI hook payload. Defined in SPEC 2 and 6.
+sim driver	bounded-work-model	UNDEFINED	The mission-scripting-state runtime. Defined in SPEC 6.
+consumer	cli-lockstep	UNDEFINED	An external program connected to the broker. Defined in SPEC's preamble.
+epoch	epoch-ownership	UNDEFINED	One mission's lifetime on the wire. Defined in SPEC 9.4.
+EpochOpened	epoch-opened-fields	UNDEFINED	The hook driver's epoch-open record. SPEC 6.3 fixes its seven fields.
+EpochClosed	epoch-ownership	UNDEFINED	The hook driver's epoch-close record, emitted at onSimulationStop. SPEC 6.3.
+CoordinateCalibration	calibration-emitter	UNDEFINED	The bridge's own LIFECYCLE record carrying the projection. SPEC 6.3; HOOK 10 fixes the derivation.
+LIFECYCLE	lifecycle-topic-count	UNDEFINED	The retained record class. SPEC 8.1.
+RejectedReason	rejected-reason	UNDEFINED	The enum a Rejected record carries. SPEC 8.2 defines its members.
+Rejected	rejected-reason	UNDEFINED	The broker's refusal record for a command that never reached Lua. SPEC 5.2.
+Route A	route-parity	UNDEFINED	The default injection route, through net.dostring_in. SPEC 5.4.1.
+Route B	route-parity	UNDEFINED	The framework-integration injection route, from MissionScripting.lua. SPEC 5.4.1.
+ReloadSimDriver	reload-route	UNDEFINED	The Route A only reload command. SPEC 6.9.
+PROBE-3	probe3-method	3.1 PROBE-3 in detail	Put-call crossing cost. Registered in SPEC 16; the method is here.
+PROBE-7	ring-sizing-probe	3. Probe method	Ring sizing. Registered in SPEC 16; runs at task 9.7.
+probe	probe-register-location	3. Probe method	An open measurement question. The register is in the specifications; the method is here.
+coverage document	coverage-document	4. Project conventions	One file listing every record type and command that ships.
+built-ins	builtin-sets	UNDEFINED	The shipped sim driver and hook driver record and command sets. SIM 1 and HOOK 1.
+accessor table	accessor-table	UNDEFINED	The hook driver's single table for every DCS.* call. SPEC 4.4.
+SetTopicFilter	topic-filter	UNDEFINED	The per-connection topic narrowing request. SPEC 5.2 gives its eleven rules and four refused shapes.
+GetTopics	topic-filter	UNDEFINED	The topic discovery request. Lists what a token's capability set covers. SPEC 5.2.
+topic filter	topic-filter	Phase 2 — The broker, and the CLI beside it	A connection's own choice of which fan-out records it is sent. Narrows, never widens.

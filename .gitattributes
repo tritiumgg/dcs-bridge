@@ -1,0 +1,10 @@
+# A ledger stamp is the SHA-256 of the specification's bytes. Git's automatic
+# line-ending conversion rewrites those bytes on checkout, so a Windows working
+# tree would report every stamp MISMATCH against a file nobody edited.
+#
+# Turn conversion off for everything. Files stay exactly as committed, on both
+# platforms, and a stamp means what it says.
+* -text
+
+# Shell scripts need LF whatever an editor does to them.
+*.sh text eol=lf

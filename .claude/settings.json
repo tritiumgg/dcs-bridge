@@ -1,0 +1,18 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Read",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh",
+            "args": ["${CLAUDE_PROJECT_DIR}/.claude/hooks/guard-spec-reads.sh"],
+            "timeout": 10,
+            "statusMessage": "Checking the read is bounded"
+          }
+        ]
+      }
+    ]
+  }
+}

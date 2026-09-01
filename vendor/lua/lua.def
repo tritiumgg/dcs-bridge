@@ -1,0 +1,132 @@
+; Import library definition for DCS's Lua.
+; DCS ships its Lua as bin\lua.dll, not lua51.dll, so the import
+; library must carry that name. SPEC 5.1.1.
+;
+; Generated from the export table of bin/lua.dll, DCS 2.9.29.27278,
+; md5 8e927c721a3417ecb34a69f4c2cf1019 (bin/ and bin-mt/ are identical).
+; 130 named exports, undecorated: 114 public API, 9 library openers,
+; 7 internal. Only the 114 are listed here.
+;
+; Excluded, deliberately:
+;   luaopen_* (9)  - SPEC 4 forbids calling the standard-library openers.
+;   luaD_growstack, luaF_newproto, luaM_realloc_, luaM_toobig,
+;   luaS_newlstr, luaU_dump, luaU_print - private in a stock build.
+;
+; Re-measure after a DCS update.
+
+LIBRARY lua.dll
+EXPORTS
+luaL_addlstring
+luaL_addstring
+luaL_addvalue
+luaL_argerror
+luaL_buffinit
+luaL_callmeta
+luaL_checkany
+luaL_checkinteger
+luaL_checklstring
+luaL_checknumber
+luaL_checkoption
+luaL_checkstack
+luaL_checktype
+luaL_checkudata
+luaL_error
+luaL_findtable
+luaL_getmetafield
+luaL_gsub
+luaL_loadbuffer
+luaL_loadfile
+luaL_loadstring
+luaL_newmetatable
+luaL_newstate
+luaL_openlib
+luaL_openlibs
+luaL_optinteger
+luaL_optlstring
+luaL_optnumber
+luaL_prepbuffer
+luaL_pushresult
+luaL_ref
+luaL_register
+luaL_typerror
+luaL_unref
+luaL_where
+lua_atpanic
+lua_call
+lua_checkstack
+lua_close
+lua_concat
+lua_cpcall
+lua_createtable
+lua_dump
+lua_equal
+lua_error
+lua_gc
+lua_getallocf
+lua_getfenv
+lua_getfield
+lua_gethook
+lua_gethookcount
+lua_gethookmask
+lua_getinfo
+lua_getlocal
+lua_getmetatable
+lua_getstack
+lua_gettable
+lua_gettop
+lua_getupvalue
+lua_insert
+lua_iscfunction
+lua_isnumber
+lua_isstring
+lua_isuserdata
+lua_lessthan
+lua_load
+lua_newstate
+lua_newthread
+lua_newuserdata
+lua_next
+lua_objlen
+lua_pcall
+lua_pushboolean
+lua_pushcclosure
+lua_pushfstring
+lua_pushinteger
+lua_pushlightuserdata
+lua_pushlstring
+lua_pushnil
+lua_pushnumber
+lua_pushstring
+lua_pushthread
+lua_pushvalue
+lua_pushvfstring
+lua_rawequal
+lua_rawget
+lua_rawgeti
+lua_rawset
+lua_rawseti
+lua_remove
+lua_replace
+lua_resume
+lua_setallocf
+lua_setfenv
+lua_setfield
+lua_sethook
+lua_setlocal
+lua_setmetatable
+lua_settable
+lua_settop
+lua_setupvalue
+lua_status
+lua_toboolean
+lua_tocfunction
+lua_tointeger
+lua_tolstring
+lua_tonumber
+lua_topointer
+lua_tothread
+lua_touserdata
+lua_type
+lua_typename
+lua_xmove
+lua_yield

@@ -1,0 +1,163 @@
+# Plan tasks 1.2 and 1.4.
+#
+# 1.2 gates a pull request on build, test, rustfmt and clippy across all three
+#     hosts, against host-native targets.
+# 1.4 cross-builds the Windows target from a Linux runner.
+#
+# Action versions were current on 2026-09-01. Pin them to commit SHAs before
+# this repository has anything worth attacking.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  # Cheap checks that need no toolchain. They run first so a broken document or
+  # a broken .def fails in seconds rather than after three host builds.
+  documents:
+    name: Documents
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      # docs/ is frozen, so this is tamper detection rather than maintenance:
+      # a failure means somebody edited a document that should not change.
+      - name: The frozen documents are unchanged
+        run: sh tools/ledger.sh lint
+      - name: STATE.md is within budget
+        run: sh tools/statecheck.sh
+
+      - name: The .def yields an import library
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends llvm
+          sh tools/mkimplib.sh
+
+  # SPEC 14.2: a fault must drop one connection, not the process. In Rust that
+  # means the broker is never built with panic = "abort". A workspace profile
+  # setting would apply to it silently, so fail the build instead.
+  guards:
+    name: Guards
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: No panic = "abort" in any profile
+        run: |
+          if grep -rn 'panic[[:space:]]*=[[:space:]]*"abort"' --include='Cargo.toml' . ; then
+            echo
+            echo 'SPEC 14.2 forbids building the broker with panic = "abort".'
+            echo 'A fault must drop one connection and continue.'
+            exit 1
+          fi
+          echo 'no panic = "abort" found'
+
+  check:
+    name: ${{ matrix.os }}
+    needs: [documents, guards]
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v6
+
+      # rust-toolchain.toml pins the channel, components and targets, so
+      # rustup installs exactly what it names on first use.
+      - name: Toolchain
+        run: |
+          rustup show
+          rustc -Vv
+          cargo -V
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ matrix.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ matrix.os }}-cargo-
+
+      - name: Format
+        run: cargo fmt --all --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets
+
+      - name: Build
+        run: cargo build --workspace --all-targets
+
+      - name: Test
+        run: cargo test --workspace
+
+  # Task 1.4. The product target is x86_64 Windows and it is cross-compiled, so
+  # no contributor needs a Windows machine to produce a release artifact.
+  windows-cross:
+    name: Windows cross-build from Linux
+    needs: [documents, guards]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Toolchain
+        run: rustup show
+
+      # llvm-dlltool turns vendor/lua/lua.def into the import library the
+      # broker links against. clang and lld back cargo-xwin.
+      - name: LLVM
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends llvm clang lld
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.cargo/bin/cargo-xwin
+            ~/.cache/cargo-xwin
+            target
+          key: xwin-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: xwin-
+
+      - name: cargo-xwin
+        run: command -v cargo-xwin || cargo install --locked cargo-xwin
+
+      - name: Import library from the checked-in .def
+        run: sh tools/mkimplib.sh
+
+      - name: Build
+        run: cargo xwin build --release --workspace --target x86_64-pc-windows-msvc
+
+      # Cargo replaces a hyphen with an underscore in a library artifact name,
+      # so the file on disk may not match the name the plan uses. Collect by
+      # extension and rename, rather than guessing which form landed.
+      - name: Collect artifacts
+        run: |
+          set -eu
+          out=dist
+          mkdir -p "$out"
+          find target/x86_64-pc-windows-msvc/release -maxdepth 1 \
+               \( -name '*.dll' -o -name '*.exe' \) -exec cp {} "$out"/ \;
+          if [ -f "$out/lua_dcsbridge.dll" ]; then
+            mv "$out/lua_dcsbridge.dll" "$out/lua-dcsbridge.dll"
+          fi
+          ls -l "$out"
+          test -n "$(ls -A "$out")" || { echo 'no artifacts produced'; exit 1; }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-x86_64
+          path: dist/
+          if-no-files-found: error

@@ -1,0 +1,82 @@
+# spec: spec.md
+# sha256: c3916bb9fd9477d0112585a26b5fc47510b6370507601878369e155724fa85d4
+# generated: 2026-08-31
+subject	kind	status	claim	section	anchor
+product name	definition		The document names the product DCS-Bridge.	DCS-Bridge — The hook driver built-ins	# DCS-Bridge — The hook driver built-ins
+sibling document prefix	definition		SIM §N cites the sim driver's built-ins, the other half of what ships in the box.	DCS-Bridge — The hook driver built-ins	refers to the sim driver's built-ins, the other half of what ships in the box.
+hook targeting	constraint		Every topic in the document is hook-targeted under SPEC §8.2.	DCS-Bridge — The hook driver built-ins	**Every topic in this document is hook-targeted** (SPEC §8.2), so the whole set
+handler file	definition		The set's handlers live in HookDriver.builtin.lua.	DCS-Bridge — The hook driver built-ins	runs with no sim driver loaded. Its handlers live in `HookDriver.builtin.lua`
+cost tier	constraint		The set sits at the hook tier of SPEC §3.1, a DCS restart.	DCS-Bridge — The hook driver built-ins	hook tier of SPEC §3.1 — a DCS restart — where the sim driver built-ins' is a
+external-spec	dependency		The DCS-Bridge specification governs terms, sections and rules this document cites as SPEC.	DCS-Bridge — The hook driver built-ins	Companion to the DCS-Bridge specification. `SPEC §N` refers to it; `SIM §N`
+hook driver built-ins	definition		The hook driver built-ins are DCS-Bridge's administrative surface plus the coordinate calibration.	1. What the hook driver built-ins are	The hook driver built-ins are DCS-Bridge's administrative surface: the player
+state boundary	constraint		Every built-in here runs in the GameGUI hook state and mission-scripting surface belongs to the sim driver.	1. What the hook driver built-ins are	**Every built-in here runs in the GameGUI hook state.** Mission-scripting
+registration keys	interface		Handlers register as builtin.* keys through the SPEC §6.10 surface.	1. What the hook driver built-ins are	Its handlers live in `HookDriver.builtin.lua` and register as `builtin.*` keys
+file ownership	constraint		HookDriver.builtin.lua is DCS-Bridge-owned and a release overwrites it.	1. What the hook driver built-ins are	`HookDriver.builtin.lua` is DCS-Bridge-owned: a release overwrites it, so an
+veto policy	behavior		Every handler in the set returns nothing and never vetoes.	2. Act, do not veto	state. SPEC §4 permits a deliberate veto; this set never uses one. **Every
+correction latency	behavior	UNVERIFIED	The script-side correction measures 1 to 2.5 ms against a 2.1 to 2.8 s slot-to-Fly; the full round trip is unmeasured.	2. Act, do not veto	2.1 to 2.8 s slot-to-Fly; the full consumer round trip is unmeasured
+player identity map	behavior		The hook driver keeps a map of player id to ucid.	3. Player identity	**The hook driver keeps a map of player id to ucid.** A command travels a round
+command addressing	constraint		A command that names a player names it by ucid; five commands do and eleven name none.	3. Player identity	**A command that names a player names it by ucid.** Five commands do
+ucid resolution	behavior		The hook driver resolves a ucid to a session id only where the underlying call takes one.	3. Player identity	**The hook driver resolves a ucid to a session id only where the underlying call
+CommandAckOutcome extension	interface		The set adds NO_MATCH 50 and AMBIGUOUS 51 in the hook driver built-ins' range.	3. Player identity	COMMAND_ACK_OUTCOME_NO_MATCH  = 50;   // the ucid names nobody connected
+harvest rule	behavior		Harvest the delta from the veto callback and emit from the sibling callback.	3. Player identity	**Harvest the delta from the veto callback. Emit from the sibling.** The
+slot harvest preemption	dependency		ED's multislot.lua registers onPlayerTryChangeSlot and returns on every path, so the slot harvest normally does not arrive.	3. Player identity	**The slot harvest normally does not arrive.** ED's
+map rebuild	behavior		The hook driver rebuilds the id-to-ucid map at onMissionLoadEnd and reports its size as roster_entries.	3. Player identity	**Rebuild the map at `onMissionLoadEnd`.** Iterate `net.get_player_list` and
+get_player_info guard	constraint		net.get_player_info can return nil inside a hook callback and both forms are guarded.	3.1 The `net.get_player_info` guard	**`net.get_player_info` can return nil inside a hook callback.** Guard the
+onPlayerConnect name argument	dependency	UNVERIFIED	onPlayerConnect carries a second argument, the player name, measured in ED's GUI handler.	3.2 Three ED facts this document rests on	**`onPlayerConnect` carries a second argument, the player name.** ED's
+local player callbacks	dependency		onPlayerDisconnect, onPlayerStart and onPlayerStop never fire for a listen server's own player.	3.2 Three ED facts this document rests on	**`onPlayerDisconnect`, `onPlayerStart` and `onPlayerStop` never fire for a
+onPlayerTryConnect definition	dependency	UNVERIFIED	onPlayerTryConnect is documented in ED's reference and defined in no shipped file and no state index.	3.2 Three ED facts this document rests on	**`onPlayerTryConnect` is documented but defined in no shipped file.** It
+record count	definition		The set defines eleven records, all hook-targeted and all DURABLE.	4. Records	Fourteen. All hook-targeted. All `DURABLE`. **None is `LIFECYCLE`**, so the
+typed replies	interface		Roster and MissionList are typed replies delivered with begin_to.	4. Records	`Roster`, `MissionList`, `ServerStatus` and `MissionBriefing` are typed
+slot event gaps	dependency		A manual move to spectators fires no onPlayerChangeSlot and a dynamic-slot join fires it twice.	4. Records	**Two slot-event gaps are measured on 2.9.29.27278.** A manual move to
+getAvailableSlots argument	dependency		DCS.getAvailableSlots takes a coalition name string and returns nil for an id.	4. Records	and an id returns nil rather than raising** (measured, 2.9.29.27278):
+address disclosure	constraint		Banlist and Roster carry no address; PlayerAddress is the only record that carries one.	4. Records	**`Banlist` and `Roster` carry no address.** `net.banlist_get` returns
+chat source	behavior		PlayerChatted comes from onPlayerTrySendChat, harvested, and the handler returns nothing.	5. Chat	**`PlayerChatted` comes from `onPlayerTrySendChat`, harvested.** The
+chat source enum	interface		ChatTarget and ChatSource live in the hook driver built-ins' own schema file.	5. Chat	The two enums below are new enums in that package, not extensions of a bridge
+onChatMessage arity	dependency	UNVERIFIED	ED's reference documents onChatMessage with two arguments; ED's GUI handler takes three and reads the third.	5. Chat	`onChatMessage` under GUI callbacks. The shipped reference documents it as
+chat target sentinel	dependency		net.CHAT_ALL is -1 and net.CHAT_TEAM is -2 in the hook state, which fixes the ChatTarget mapping.	5. Chat	**`to` is an enum and not a boolean.** DCS passes a target id. ED compares
+command count	definition		The set defines eighteen commands, all hook-targeted and all class COMMAND.	6. Commands	Eighteen. All hook-targeted. All class `COMMAND`.
+one capability per command	constraint		Each command requires exactly one capability.	6. Commands	**Each command requires exactly one capability.** SPEC §8.2's
+correlation fields	constraint		Reads carry request_id and mutations carry idempotency_key; the recent-key set is bounded at recent_admin_keys.	6. Commands	**Reads carry `request_id`. Mutations carry `idempotency_key`.** SPEC §8.5.2
+byte cap failure	behavior		A consumer string above its byte cap fails the whole command with outcome FAILED.	6. Commands	**A consumer string above its byte cap fails the whole command**,
+ban period validation	constraint		The ban period is a non-negative integer of seconds and no field carrying it may be 32-bit.	6. Commands	**Validate the ban period as a non-negative integer of seconds.** SPEC §13.1
+DCS accessor table	constraint		Every DCS.* call routes through the hook driver's accessor table, one call at a time.	6. Commands	**Route every `DCS.*` call through the hook driver's accessor table**, one
+ban function choice	behavior		BanPlayer uses net.banlist_add_by_ucid and kicks separately.	6. Commands	**Use the by-ucid form. Kick separately.** ED does the same in
+ban period units	dependency		banlist_add_by_ucid period is seconds and no permanent-ban sentinel exists.	6. Commands	**`banlist_add_by_ucid` is measured on 2.9.29.27278.** `period` is seconds:
+chat broadcast rejection	behavior		SendChatTo rejects net.CHAT_ALL and net.CHAT_TEAM.	6. Commands	**Chat output.** **`SendChatTo` rejects `net.CHAT_ALL` and
+mission reload argument	dependency	UNVERIFIED	ReloadCurrentMission takes no argument and net.load_mission's arity is unmeasured.	6. Commands	**`ReloadCurrentMission` takes no argument.** It reloads
+file path exclusion	constraint		No command carries a file path, and the missionlist mutators are never exposed.	6. Commands	**What is not exposed.** **No command carries a file path.** SPEC §14.6
+ExitProcess capability	constraint		ExitProcess requires the process capability, which no grant in the table includes.	6. Commands	**`ExitProcess` is exposed, and deliberately not under `mission`.** Ending
+capability members	interface		The set defines five capability members numbered 50 to 54 in the hook driver built-ins' range.	7. Capabilities	The built-ins define five capability members in the built-ins' range of 50 to
+capability split rule	constraint		Split a capability when the two halves can hurt different things.	7. Capabilities	**Split a capability when the two halves can hurt different things.**
+capability additivity	constraint		The capability set is additive and no capability implies another.	7. Capabilities	**The set is additive. No capability implies another.** Token grants for
+bounce re-trigger	dependency		A forced move re-fires onPlayerChangeSlot 1 to 2 ms later reporting side 0 and an empty slot.	8. The bounce	**A bounce can re-trigger itself.** `ForceSlot` changes a slot. Changing a
+bounce suppression	behavior		The hook driver suppresses the bounce it caused and refuses a second bounce inside bounce_min_interval_ms.	8. The bounce	**Suppress the bounce you caused.** Record the ucid and the target slot
+re-check trigger	constraint		The re-check is consumer-triggered rather than timed.	8. The bounce	**Re-check on demand, not on a timer.** SPEC §8.5.2 ends with the rule:
+audit file	interface		Every command appends one line to Logs\DCSBridge\admin-audit.log before its acknowledgement.	9. Audit	Every Section 6 command appends one line to
+audit token id	behavior		The hook driver resolves the token id from the connection_token_id.<conn> key in stats.	9. Audit	The hook driver resolves the token id from the `connection_token_id.<conn>` key
+audit coverage	behavior		Every command is logged and counted in admin_commands_total by command and outcome.	9. Audit	**Log every command, not only the `moderate` ones.** `SendChatAll` puts a
+audit failure policy	behavior		A failed audit write does not block the command.	9. Audit	**A failed audit write does not block the command.** An audit that can
+audit tamper evidence	constraint		A size-bounded local file is not tamper-evident.	9. Audit	**A size-bounded local file is not tamper-evident.** An operator needing a
+coordinate calibration	definition		The hook driver derives the projection and samples declination because only the hook state can.	10. Coordinate calibration	**The hook driver does this work because only the hook state can.**
+projection family	dependency		Every measured DCS terrain projects with transverse Mercator on WGS84, k_0 0.9996, a meridian at an odd multiple of 3 degrees.	10.1 The derivation	Every measured DCS terrain projects with one family: transverse Mercator on
+meridian search	behavior		The hook driver derives the parameter set in three steps without a least-squares fit.	10.1 The derivation	**The central meridian is a choice among sixty, not a fitted quantity.** Odd
+caucasus derivation	dependency		On Caucasus the derivation selects meridian 33 and origin -99517, -4998115 from nine points.	10.1 The derivation	**The derivation is measured, on Caucasus, 2.9.29.27278.** Step 2 selected
+float32 cost	dependency		coord.LLtoLO returns float32 and the residual belongs to the reverse conversion.	10.1 The derivation	**The float32 cost belongs to the reverse conversion, not to the derivation.**
+verification points	interface		The verification points are published for checking, chosen for coverage and never from the derivation set.	10.2 Verification points and the family check	**The verification points are published for checking, not for fitting.** A
+family check	behavior		A terrain failing the third-point check yields verification points, no projection and one logged residual.	10.2 Verification points and the family check	**A terrain outside the family is detected, not assumed away.** Where the third
+residual threshold	constraint		The residual threshold is 1 mm in both easting and northing.	10.2 Verification points and the family check	**The residual threshold is 1 mm, in both easting and northing.** Step 3's
+declination route	dependency		magvar lives in the gui state only and is reached with net.dostring_in('gui', ...).	10.3 Magnetic declination	**The declination is the hook driver's end to end.** `magvar` lives in the gui
+declination units	dependency		magvar.get_mag_decl takes degrees and returns radians, both units ED's own.	10.3 Magnetic declination	**Degrees in, radians out**, and both units are ED's own. At
+declination seeding	behavior		The hook driver seeds magvar explicitly from the mission month and year rather than trusting the default.	10.3 Magnetic declination	**Seed explicitly and do not depend on the default.** Called with no `init` of
+worked example	behavior		A consumer links a Discord account before a player takes a slot.	11. Worked example	A consumer links a Discord account before a player takes a slot.
+open questions	goal	UNVERIFIED	Four probes are this document's own and four arrived with the coordinate work.	12. Open questions	PLAN §3 holds the method for this document's own four. The four inherited below carry their own.
+external-plan	dependency		The project plan holds the probe method this document cites as PLAN.	12. Open questions	**Four probes arrived with the coordinate work and the server-control rows.**
+mission briefing	interface		GetMissionBriefing is a read command that truncates on a UTF-8 boundary and flags it.	6. Commands	**`GetMissionBriefing` is a command rather than a field on any record**, and
+test method	behavior		Every test row needs the sim, so none of it runs in CI.	13. Test method	bind here too. Every row here needs the sim, so none of it runs in CI.
+fourth veto callback	dependency		onPlayerTryChangeCoalition is a fourth onPlayerTry* callback ED's reference omits.	2. Act, do not veto	**There are four `onPlayerTry*` callbacks, not the three ED's reference
+coalition record	interface		PlayerChangedCoalition is emitted from onPlayerChangeCoalition and needs no harvest.	4. Records	**`PlayerChangedCoalition` needs no harvest, and its `Try` sibling is
+server status command	interface		GetServerStatus answers the real time and the pause state on request under the read capability.	6. Commands	**`GetServerStatus` answers what a consumer asks for rather than subscribes
+record package	interface		Every record and command here lives in the dcs.builtin package, shared with the sim driver built-ins.	5. Chat	**Every record and command here lives in `dcs.builtin`**, the package the sim
+verification point selection	behavior		The four published points are the corners of the terrain's SW_bound and NE_bound box.	10.2 Verification points and the family check	**Publish four points, at the corners of the terrain's own declared bounds.**
+bounds call axis order	dependency		GetTerrainConfig answers in the hook state and index 1 is x north, index 3 is z east, in kilometres.	10.2 Verification points and the family check	**The call and its axis order are measured** (2.9.29.27278, Caucasus).
+declination variation	dependency		Declination varies by 3.84 degrees across Caucasus, 4.957 at the south-west corner against 8.797 at the north-east.	10.3 Magnetic declination	**Declination varies by 3.84 degrees across Caucasus** (measured,
