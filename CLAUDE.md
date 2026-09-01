@@ -179,16 +179,22 @@ Add a body when the change needs explaining.
 would commit under: `fix/`, `docs/`, `build/`.
 
 **History is linear. Rebase, never merge-commit.** Bring a branch up to date
-with `git rebase origin/main`, and land it with `git merge --ff-only`. If the
-fast-forward is refused, fix the branch rather than reaching for a merge
-commit. Rebasing re-signs, so the commit signatures survive the rewrite.
+with `git rebase origin/main`; the maintainer lands it with `git merge
+--ff-only`. If the fast-forward is refused, fix the branch rather than reaching
+for a merge commit. Rebasing re-signs, so the commit signatures survive the
+rewrite.
 
-Do these without asking: branch, commit, rebase onto `main`, fast-forward
-merge, delete a merged branch, push a topic branch, force-with-lease a topic
-branch that is yours, and open a pull request with `gh`.
+**Work reaches `main` through a pull request the maintainer reviews.** Open it,
+report it as waiting, and stop there.
 
-**Ask first before pushing `main`, before rewriting history that has been
-pushed, and before tagging.** A tag is not a label here: `release.yml` fires on
+Do these without asking: branch, commit, rebase onto `main`, push a topic
+branch, force-with-lease a topic branch that is yours, delete a branch that is
+already merged, and open a pull request with `gh`.
+
+**Ask first before merging a pull request, before pushing `main`, before
+rewriting history that has been pushed, and before tagging.** A small diff and
+a green CI run are not permission, and permission given for one pull request
+does not carry to the next. A tag is not a label here: `release.yml` fires on
 `v*` and publishes to GitHub, so tagging is a release and the maintainer makes
 it.
 
