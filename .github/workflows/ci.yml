@@ -40,6 +40,13 @@ jobs:
           sudo apt-get install -y --no-install-recommends llvm
           sh tools/mkimplib.sh
 
+      # SPEC 8.2 names buf lint as what enforces snake_case fields, the
+      # enum-name value prefix and the _UNSPECIFIED zero value. ADR 0004 says
+      # why one standard rule is excepted.
+      - uses: ./.github/actions/buf
+      - name: The schema lints
+        run: buf lint
+
   # SPEC 14.2: a fault must drop one connection, not the process. In Rust that
   # means the broker is never built with panic = "abort". A workspace profile
   # setting would apply to it silently, so fail the build instead.
@@ -140,6 +147,13 @@ jobs:
 
       - name: Import library from the checked-in .def
         run: sh tools/mkimplib.sh
+
+      # schema.pb ships inside the write-directory zip, so the staging below
+      # needs it. It comes from the .proto tree rather than from the Windows
+      # build, and nothing about it is platform-specific.
+      - uses: ./.github/actions/buf
+      - name: Schema
+        run: sh tools/mkschema.sh
 
       # Default features, so the broker's build.rs generates its own copy of
       # the import library and links the DLL against DCS's Lua.

@@ -1,0 +1,11 @@
+version: v2
+modules:
+  - path: proto
+lint:
+  use:
+    - STANDARD
+  except:
+    # A topic id is its payload's fully-qualified type name, so the package
+    # name is part of the wire contract. dcs.bridge cannot carry a version
+    # suffix without renaming every topic. ADR 0004.
+    - PACKAGE_VERSION_SUFFIX

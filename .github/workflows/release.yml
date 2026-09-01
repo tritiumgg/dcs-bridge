@@ -83,6 +83,12 @@ jobs:
       - name: Import library from the checked-in .def
         run: sh tools/mkimplib.sh
 
+      # schema.pb ships inside the write-directory zip, so the staging below
+      # needs it.
+      - uses: ./.github/actions/buf
+      - name: Schema
+        run: sh tools/mkschema.sh
+
       - name: Build
         run: cargo xwin build --release --workspace --target x86_64-pc-windows-msvc
 

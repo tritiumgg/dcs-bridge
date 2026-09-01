@@ -90,6 +90,30 @@ check` and CI's three-host matrix pass `--no-default-features` for it, which is
 what a plain `cargo test` on a Windows host needs too. ADR 0002 says why the
 default points that way.
 
+### Schema
+
+`proto/` holds the record schema, and `mise run schema` lints it and compiles
+`target/schema.pb`:
+
+```sh
+mise run schema
+```
+
+The output is a `FileDescriptorSet`. It ships inside the write-directory zip at
+`Mods\services\DCSBridge\schema.pb`, where the hook driver reads it at DCS start
+and hands the bytes to the broker; the broker hashes them and serves them back,
+and a consumer compares that hash against the one its handshake carries.
+
+So the bytes are part of the wire contract, and two builds of the same tree have
+to produce the same ones. `mise.toml` pins buf for that reason and CI reads the
+version from there rather than naming its own. buf vendors its own
+`google/protobuf/descriptor.proto`, which is in the set, so a buf bump can move
+the hash on its own; `tools/mkschema.sh` says what else it holds fixed.
+
+`buf lint` runs in CI with one standard rule excepted, because a topic id is its
+payload's fully-qualified type name and the `dcs.bridge` package cannot take a
+version suffix without renaming every topic. ADR 0004 has the argument.
+
 ## Versioning
 
 The release version is `0.1.0`, and it is the only version this README states.
@@ -108,8 +132,9 @@ touches the release version and fails if a bump reaches any of the four.
 A tag carries four assets: `lua-dcsbridge.dll`, `dcsb.exe`,
 `write-directory-<version>.zip` and `SHA256SUMS` over the three. The zip
 mirrors the write directory described in SPEC §13, so installing it is one
-extraction over `Saved Games\<write dir>\`. `dcsb` runs outside DCS and has no
-home in that tree, so it ships beside the zip rather than inside it.
+extraction over `Saved Games\<write dir>\`, and it carries the broker and
+`schema.pb`. `dcsb` runs outside DCS and has no home in that tree, so it ships
+beside the zip rather than inside it.
 
 The tag names the version, and the part before any `-rc` suffix must match
 `[workspace.package]` in `Cargo.toml`. Staging fails on a mismatch, so bump the
@@ -121,6 +146,7 @@ it on every pull request and `.github/workflows/release.yml` runs it on a tag,
 so publishing is the only step a tag reaches first:
 
 ```sh
+mise run schema
 cargo xwin build --release --workspace --target x86_64-pc-windows-msvc
 sh tools/stage-release.sh target/x86_64-pc-windows-msvc/release
 ```

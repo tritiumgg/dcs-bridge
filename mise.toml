@@ -23,6 +23,7 @@ idiomatic_version_file_enable_tools = ["rust"]
 RUSTUP_TOOLCHAIN = ""
 
 [tools]
+buf = "1.72.0"
 lua = "5.1"
 
 # --no-default-features below turns the broker's dcs-lua feature off, which is
@@ -49,6 +50,13 @@ run = [
   "cargo clippy --workspace --all-targets --no-default-features -- -D warnings",
   "cargo build --workspace --all-targets --no-default-features",
   "cargo test --workspace --no-default-features",
+]
+
+[tasks.schema]
+description = "Lint the .proto tree and compile target/schema.pb"
+run = [
+  "buf lint",
+  "sh tools/mkschema.sh",
 ]
 
 [tasks.windows]

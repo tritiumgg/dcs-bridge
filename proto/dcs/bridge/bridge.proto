@@ -1,0 +1,94 @@
+syntax = "proto3";
+
+package dcs.bridge;
+
+import "google/protobuf/any.proto";
+import "google/protobuf/descriptor.proto";
+
+// One frame on the broker-to-consumer interface is one Envelope, behind a
+// little-endian u32 length prefix.
+//
+// The Envelope names no payload type. A record type is added by writing its
+// message and nothing else, because the type URL protobuf already writes into
+// the Any is the topic id: type.googleapis.com/<package>.<Message>. No topic
+// number is allocated, no registry is coordinated, and no shared file changes.
+//
+// epoch and mission_time are optional because zero is a wrong answer for both
+// rather than a meaningful one. A record emitted outside any epoch omits them.
+// A consumer reads an absent epoch as "not epoch-scoped" and keeps the record,
+// and an absent mission time as "the sim is not running".
+message Envelope {
+  uint64 seq = 1;
+  optional uint32 epoch = 2;
+  optional double mission_time = 3;
+  google.protobuf.Any payload = 4;
+}
+
+// The drop policy the broker applies to a record under pressure.
+//
+// Not extensible: the broker implements each member, so a new class is a
+// broker change rather than a schema one.
+enum RecordClass {
+  RECORD_CLASS_UNSPECIFIED = 0;
+  RECORD_CLASS_DURABLE = 1;
+  RECORD_CLASS_LOSSY = 2;
+  RECORD_CLASS_COMMAND = 3;
+  RECORD_CLASS_LIFECYCLE = 4;
+}
+
+// The Lua state a message routes to.
+//
+// EMITTED at 0: an unspecified target is generated into the sim driver route
+// set. Not extensible: the broker implements each target.
+enum Target {
+  TARGET_UNSPECIFIED = 0;
+  TARGET_SIM_DRIVER = 1;
+  TARGET_HOOK_DRIVER = 2;
+}
+
+// The permission a connection needs before the broker accepts a message.
+//
+// NEVER EMITTED at 0: the generator refuses a message that names no
+// capability. Extensible, so its numbers are partitioned: the bridge takes 1
+// to 49 and defines three members and no more, the built-in sets share 50 to
+// 99, and an adopter numbers from 100 upward.
+enum Capability {
+  CAPABILITY_UNSPECIFIED = 0;
+  CAPABILITY_READ = 1;
+  CAPABILITY_COMMAND = 2;
+  CAPABILITY_RELOAD = 3;
+}
+
+// Why the broker refused a message it otherwise understood.
+//
+// NEVER EMITTED at 0. Not extensible: the broker produces every member.
+enum RejectedReason {
+  REJECTED_REASON_UNSPECIFIED = 0;
+  REJECTED_REASON_UNKNOWN_TOPIC = 1;
+  REJECTED_REASON_NO_CAPABILITY = 2;
+  REJECTED_REASON_RATE_LIMITED = 3;
+  REJECTED_REASON_BUSY = 4;
+}
+
+// The four options every record carries. The generator reads them and writes
+// the class, route and capability tables the broker registers, which is how a
+// broker that holds no schema still applies drop policy, routes by target and
+// enforces capabilities.
+//
+// Protobuf reserves extension numbers 50000 to 99999 for internal use.
+extend google.protobuf.MessageOptions {
+  RecordClass record_class = 50001;
+  // On a request message, names the reply message.
+  string reply_to = 50002;
+  Target target = 50003;
+  Capability required_capability = 50004;
+}
+
+// A unit left the mission. The first record, and the shape every other one
+// follows.
+message UnitDestroyed {
+  option (record_class) = RECORD_CLASS_DURABLE;
+
+  string unit_name = 1;
+  int32 coalition = 2;
+}

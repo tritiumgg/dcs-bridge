@@ -1,0 +1,27 @@
+# mise.toml pins every tool version, and a workflow that named buf's own would
+# be a second place to bump. This reads it from the file instead, so a
+# contributor's buf and CI's buf cannot drift apart.
+#
+# The version matters more than it looks: buf vendors google/protobuf/
+# descriptor.proto, that file is in schema.pb, and schema.pb is hashed and
+# compared across a handshake. See tools/mkschema.sh.
+
+name: buf
+description: Install the buf version mise.toml pins
+
+runs:
+  using: composite
+  steps:
+    - name: Read the version from mise.toml
+      id: version
+      shell: sh
+      run: |
+        set -eu
+        v=$(awk -F'"' '/^buf[[:space:]]*=/ { print $2; exit }' mise.toml)
+        [ -n "$v" ] || { echo 'mise.toml names no buf version' >&2; exit 1; }
+        printf 'version=%s\n' "$v" >> "$GITHUB_OUTPUT"
+
+    - uses: bufbuild/buf-setup-action@v1
+      with:
+        version: ${{ steps.version.outputs.version }}
+        github_token: ${{ github.token }}
