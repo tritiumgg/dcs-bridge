@@ -1,0 +1,54 @@
+# Rust is configured in rust-toolchain.toml, not here.
+#
+# mise's rust tool is a symlink to rustup's shims plus three environment
+# variables, one of which is RUSTUP_TOOLCHAIN. That variable overrides
+# rust-toolchain.toml outright, and an override discards the file's
+# `components` and `targets` — so clippy, rustfmt and the Windows target go
+# missing while the version still looks correct. mise has no setting for
+# either list, so the file has to be the one in charge.
+#
+# Clearing RUSTUP_TOOLCHAIN puts it back in charge, and the idiomatic version
+# file setting lets mise read the version from it. mise still installs and
+# manages the toolchain: `mise ls` sources rust from rust-toolchain.toml, and
+# `mise install` provisions whatever channel that file names.
+#
+# So `mise use rust@<version>` is the wrong move here — it writes a second
+# version into [tools] below and mise stops reading the file. Edit `channel`
+# in rust-toolchain.toml instead.
+
+[settings]
+idiomatic_version_file_enable_tools = ["rust"]
+
+[env]
+RUSTUP_TOOLCHAIN = ""
+
+[tools]
+lua = "5.1"
+
+[tasks.build]
+description = "Build every crate in the workspace"
+run = "cargo build --workspace --all-targets"
+
+[tasks.test]
+description = "Run the workspace test suite"
+run = "cargo test --workspace"
+
+[tasks.fmt]
+description = "Format every crate"
+run = "cargo fmt --all"
+
+[tasks.check]
+description = "What CI gates a pull request on, against the host target"
+run = [
+  "cargo fmt --all --check",
+  "cargo clippy --workspace --all-targets -- -D warnings",
+  "cargo build --workspace --all-targets",
+  "cargo test --workspace",
+]
+
+[tasks.docs]
+description = "Lint the ledgers and hold STATE.md to its budget"
+run = [
+  "sh tools/ledger.sh lint",
+  "sh tools/statecheck.sh",
+]
