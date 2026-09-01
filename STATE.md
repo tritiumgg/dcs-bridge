@@ -1,6 +1,6 @@
 # Working state
 
-**Last updated:** 2026-09-01, 1.6 is green and waits on a merge.
+**Last updated:** 2026-09-01, 1.6 landed and Phase 1 is on 1.7.
 
 The handoff between sessions. Read it first; update it before a session ends,
 not only when a task finishes. Stamp the line above each time.
@@ -16,9 +16,7 @@ is just deleted. Write entries as one or two lines, never paragraphs.
 
 ## In progress
 
-**1.6** — PR #5 is green, CI run 33545252753, and waits on a merge. The zip
-carries `schema.pb`, and the Linux runner's copy is byte-identical to a macOS
-build. All committed. What is left is the merge.
+Nothing. 1.6 is closed; 1.7 is next.
 
 *One task at most. Say what is done, what is not, and where to resume. Say what
 is committed and what is only in the working tree. Say what is knowingly
@@ -28,6 +26,8 @@ broken. Empty this when the task closes.*
 
 - **1.5** — Tag `v0.1.0` published four assets, release run 33540903624.
   `tools/stage-release.sh` stages them and CI runs it on every pull request.
+- **1.6** — `proto/` compiles to `schema.pb` and the zip carries it, CI run
+  33545252753 on PR #5. ADR 0004 excepts one `buf lint` rule.
 
 *The last three at most, one line each. Git log holds the rest.*
 
