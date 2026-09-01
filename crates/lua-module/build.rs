@@ -1,16 +1,18 @@
-//! The import library the broker links DCS's Lua through.
+//! How the module's Lua symbols get resolved, which differs per host.
 //!
 //! SPEC 5.1.1: *Bind to it through an import library generated from a
 //! checked-in `.def` naming `lua.dll`, which needs no DCS install at build
 //! time and pins exactly which Lua symbols the broker depends on.*
 //!
-//! `tools/mkimplib.sh` runs the same probe from a shell, for checking a
-//! machine by hand. This runs it in Rust, so a Windows host with no `sh`
-//! still builds.
+//! On Windows that import library is the whole story, and the `dcs-lua`
+//! feature decides whether it is built. Everywhere else the symbols are left
+//! undefined and resolved from the interpreter that opens the module, which is
+//! what makes the host-native build loadable by a stock Lua 5.1. macOS needs
+//! that stated per symbol; Linux permits it by default. ADR 0002, ADR 0006.
 //!
-//! The `dcs-lua` feature decides whether any of this happens. It is on by
-//! default because the product artifact is the Windows DLL; the host-native
-//! test build turns it off and never touches the `.def`. ADR 0002.
+//! `tools/mkimplib.sh` runs the same import-library probe from a shell, for
+//! checking a machine by hand. This runs it in Rust, so a Windows host with no
+//! `sh` still builds.
 
 use std::env;
 use std::fs;
@@ -20,21 +22,91 @@ use std::process::Command;
 fn main() {
     println!("cargo::rerun-if-changed=build.rs");
 
-    // Without the feature this is the host-native build, which links a stock
-    // Lua rather than DCS's and must leave the .def alone.
-    if env::var_os("CARGO_FEATURE_DCS_LUA").is_none() {
-        return;
-    }
-
-    // The feature is on by default, so every non-Windows build reaches here.
-    // Nothing to do for them: the binding itself is cfg'd off too.
-    if cfg_var("CARGO_CFG_TARGET_OS") != "windows" {
-        return;
-    }
-
     let def = workspace_root().join("vendor").join("lua").join("lua.def");
     println!("cargo::rerun-if-changed={}", def.display());
 
+    match cfg_var("CARGO_CFG_TARGET_OS").as_str() {
+        // The linker resolves nothing lazily here, so the module names its
+        // Lua through an import library or not at all. Without the feature
+        // this is a host-native build on a Windows host, and there is no
+        // stock Lua to bind: the crate's Lua surface is cfg'd out to match.
+        "windows" => {
+            if env::var_os("CARGO_FEATURE_DCS_LUA").is_some() {
+                import_library(&def);
+            }
+        }
+
+        // Mach-O resolves an undefined symbol at load only where the link was
+        // told to expect it, so name each one. Reading them out of the same
+        // `.def` keeps one pinned list rather than two, and keeps a symbol
+        // outside the 114 a link error rather than a crash inside DCS.
+        "macos" => allow_undefined(&def),
+
+        // ELF permits an undefined symbol in a shared object by default, and
+        // the interpreter exports its own: Lua's `linux` target links with
+        // `-Wl,-E`.
+        _ => {}
+    }
+}
+
+/// A cargo-set variable that is always present and always UTF-8.
+fn cfg_var(name: &str) -> String {
+    env::var(name).unwrap_or_else(|_| panic!("cargo sets {name}"))
+}
+
+/// The checkout root, two levels above `crates/lua-module`.
+fn workspace_root() -> PathBuf {
+    let manifest = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").expect("cargo sets it"));
+    manifest
+        .parent()
+        .and_then(Path::parent)
+        .expect("crates/lua-module sits two levels below the checkout root")
+        .to_path_buf()
+}
+
+/// Tell the Mach-O linker that each name `def` exports may be undefined.
+///
+/// This is the per-symbol spelling of `-undefined dynamic_lookup`. The blanket
+/// form is deprecated on current `ld64` and admits every undefined symbol,
+/// including a misspelled one, which then fails at load instead of at link.
+fn allow_undefined(def: &Path) {
+    for symbol in symbols(def) {
+        // Mach-O prefixes a C symbol with an underscore.
+        println!("cargo::rustc-cdylib-link-arg=-Wl,-U,_{symbol}");
+    }
+}
+
+/// Every name in `def`'s `EXPORTS` list.
+///
+/// The format is a module-definition file: `;` comments, a `LIBRARY` line, an
+/// `EXPORTS` line, then one bare name per line.
+fn symbols(def: &Path) -> Vec<String> {
+    let text =
+        fs::read_to_string(def).unwrap_or_else(|e| panic!("could not read {}: {e}", def.display()));
+
+    let names: Vec<String> = text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with(';'))
+        .filter(|line| {
+            let head = line.split_whitespace().next().unwrap_or_default();
+            !head.eq_ignore_ascii_case("LIBRARY") && !head.eq_ignore_ascii_case("EXPORTS")
+        })
+        .map(str::to_owned)
+        .collect();
+
+    assert!(
+        !names.is_empty(),
+        "{} lists no symbols. SPEC 5.1.1 pins the 114 the broker may name.",
+        def.display()
+    );
+
+    names
+}
+
+/// Generate the import library the broker links DCS's Lua through, and tell
+/// cargo to link it.
+fn import_library(def: &Path) {
     // MSVC is the only Windows environment the broker builds for, because
     // DCS's lua.dll is an MSVC build and a second toolchain would put a second
     // C runtime in the process. ADR 0003.
@@ -48,7 +120,7 @@ fn main() {
     );
 
     let out = PathBuf::from(env::var_os("OUT_DIR").expect("cargo sets OUT_DIR")).join("lua.lib");
-    generate(&def, &out);
+    generate(def, &out);
     names_lua_dll(&out);
 
     println!(
@@ -56,21 +128,6 @@ fn main() {
         out.parent().unwrap().display()
     );
     println!("cargo::rustc-link-lib=dylib=lua");
-}
-
-/// A cargo-set variable that is always present and always UTF-8.
-fn cfg_var(name: &str) -> String {
-    env::var(name).unwrap_or_else(|_| panic!("cargo sets {name}"))
-}
-
-/// The checkout root, two levels above `crates/broker`.
-fn workspace_root() -> PathBuf {
-    let manifest = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").expect("cargo sets it"));
-    manifest
-        .parent()
-        .and_then(Path::parent)
-        .expect("crates/broker sits two levels below the checkout root")
-        .to_path_buf()
 }
 
 /// Turn `def` into the import library `out`, with whichever tool is installed.

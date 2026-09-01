@@ -1,16 +1,14 @@
-# Component 1 of SPEC 2: the broker, loaded into the DCS process as
-# Mods\services\DCSBridge\bin\lua-dcsbridge.dll.
+# Component 1 of SPEC 2: the broker. Rings, threads, framing and the drop
+# policy live here, and none of it touches DCS or Lua.
 #
-# Cargo rejects a hyphen in a library target name, so the artifact is
-# lua_dcsbridge.dll and the CI and release workflows rename it on the way out.
-#
-# It builds twice from one source. The cdylib is what DCS loads, and it links
-# against DCS's Lua through vendor/lua/lua.def. The rlib is the host-native
-# build the tests run against, and that path never touches the .def. The
-# dcs-lua feature below is which of the two you get. ADR 0002.
+# A plain rlib with no FFI, which is what lets SPEC 17's *Any (native module)*
+# rows run anywhere: the crate links into a test binary on any host with no
+# undefined symbols to resolve. The Lua entry point that carries this code into
+# a Lua state is crates/lua-module, and it is a cdylib so that nothing links it
+# into an executable. ADR 0005.
 
 [package]
-name = "lua-dcsbridge"
+name = "dcsbridge-broker"
 description = "The DCS-Bridge broker: rings, threads and the framed TCP transport."
 version.workspace = true
 edition.workspace = true
@@ -19,19 +17,7 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 
-[lib]
-name = "lua_dcsbridge"
-crate-type = ["cdylib", "rlib"]
-
 [dependencies]
-
-# On by default, because the product artifact is the Windows DLL and a build
-# that quietly omits the Lua binding is the failure worth ruling out. The
-# host-native test build passes --no-default-features, which is what CI's
-# three-host matrix and every mise task run.
-[features]
-default = ["dcs-lua"]
-dcs-lua = []
 
 [lints]
 workspace = true

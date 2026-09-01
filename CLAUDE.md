@@ -18,7 +18,8 @@ docs/
   decisions/           where the build goes somewhere the specifications did not
 proto/                 the record schema. buf.yaml configures the lint
 vendor/lua/lua.def     the import definition for DCS's Lua
-tools/                 ledger.sh, mkimplib.sh, mkschema.sh, statecheck.sh
+tests/lua/             the module opened by a stock Lua 5.1, no DCS present
+tools/                 ledger.sh, luatest.sh, mkimplib.sh, mkschema.sh, statecheck.sh
 .github/workflows/     CI, release, version bump
 .claude/               the read guard
 ```

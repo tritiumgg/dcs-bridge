@@ -7,8 +7,15 @@ name = "dcsb"
 version = "0.1.0"
 
 [[package]]
+name = "dcsbridge-broker"
+version = "0.1.0"
+
+[[package]]
 name = "lua-dcsbridge"
 version = "0.1.0"
+dependencies = [
+ "dcsbridge-broker",
+]
 
 [[package]]
 name = "protoc-gen-dcsbridge-lua"

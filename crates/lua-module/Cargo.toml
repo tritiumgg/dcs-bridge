@@ -1,0 +1,43 @@
+# The Lua entry point: Mods\services\DCSBridge\bin\lua-dcsbridge.dll, and the
+# .so or .dylib the tests load. It holds `luaopen_dcsbridge` and every
+# declaration that names a Lua symbol, and nothing else.
+#
+# Cargo rejects a hyphen in a library target name, so the artifact is
+# lua_dcsbridge.dll and the CI and release workflows rename it on the way out.
+#
+# cdylib and no rlib, deliberately. A host-native module leaves its Lua symbols
+# undefined and resolves them from the interpreter that opens it, which a
+# shared object permits and an executable does not. Cargo never links a
+# cdylib-only crate into an executable, so the two cannot collide. ADR 0005.
+#
+# The dcs-lua feature picks which Lua the symbols come from: DCS's lua.dll
+# through vendor/lua/lua.def, or the host's interpreter at load. ADR 0002,
+# ADR 0006.
+
+[package]
+name = "lua-dcsbridge"
+description = "The DCS-Bridge broker's Lua entry point."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lib]
+name = "lua_dcsbridge"
+crate-type = ["cdylib"]
+
+[dependencies]
+dcsbridge-broker = { path = "../broker" }
+
+# On by default, because the product artifact is the Windows DLL and a build
+# that quietly omits the Lua binding is the failure worth ruling out. The
+# host-native build passes --no-default-features, which is what CI's three-host
+# matrix and every mise task run.
+[features]
+default = ["dcs-lua"]
+dcs-lua = []
+
+[lints]
+workspace = true
