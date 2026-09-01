@@ -1,13 +1,11 @@
-# Plan task 1.5.
-#
 # Tag-triggered. Cross-builds the Windows target, assembles the write-directory
 # zip, publishes checksums, and attaches the broker, the CLI and the zip.
 #
 # A tag carrying a hyphenated suffix, such as v0.2.0-rc1, publishes as a
-# prerelease. That is the development channel the task asks for.
+# prerelease, which is the development channel.
 #
-# Task 10.1 extends the zip to the full write-directory tree. Until then the
-# staging step ships whatever dist/write-directory holds and says so.
+# The zip is not yet the full write-directory tree. Until it is, the staging
+# step ships whatever dist/write-directory holds and says so.
 
 name: Release
 
@@ -86,7 +84,7 @@ jobs:
           test -n "$(ls -A dist)" || { echo 'no artifacts produced'; exit 1; }
 
       # The zip mirrors the write directory, so installing is one extraction.
-      # Task 10.1 fills the tree out; this step ships what exists.
+      # The tree is not filled out yet; this step ships what exists.
       - name: Assemble the write-directory zip
         run: |
           set -eu
@@ -96,8 +94,8 @@ jobs:
           if [ -d dist/write-directory ]; then
             cp -R dist/write-directory/. "$stage"/
           else
-            echo 'dist/write-directory does not exist yet; the zip carries the'
-            echo 'binaries only. Task 10.1 extends it to the full tree.'
+            echo 'dist/write-directory does not exist yet, so the zip carries'
+            echo 'the binaries only.'
             cp dist/*.dll dist/*.exe "$stage"/ 2>/dev/null || true
           fi
           (cd "$stage" && zip -qr "../dist/write-directory-$v.zip" .)

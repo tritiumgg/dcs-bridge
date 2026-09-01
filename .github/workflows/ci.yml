@@ -1,8 +1,5 @@
-# Plan tasks 1.2 and 1.4.
-#
-# 1.2 gates a pull request on build, test, rustfmt and clippy across all three
-#     hosts, against host-native targets.
-# 1.4 cross-builds the Windows target from a Linux runner.
+# Build, test, rustfmt and clippy across all three hosts against host-native
+# targets, and a cross-build of the Windows target from a Linux runner.
 #
 # Action versions were current on 2026-09-01. Pin them to commit SHAs before
 # this repository has anything worth attacking.
@@ -108,8 +105,8 @@ jobs:
       - name: Test
         run: cargo test --workspace --no-default-features
 
-  # Task 1.4. The product target is x86_64 Windows and it is cross-compiled, so
-  # no contributor needs a Windows machine to produce a release artifact.
+  # The product target is x86_64 Windows and it is cross-compiled, so no
+  # contributor needs a Windows machine to produce a release artifact.
   windows-cross:
     name: Windows cross-build from Linux
     needs: [documents, guards]
@@ -145,7 +142,7 @@ jobs:
         run: sh tools/mkimplib.sh
 
       # Default features, so the broker's build.rs generates its own copy of
-      # the import library and links the DLL against DCS's Lua. Task 1.3.
+      # the import library and links the DLL against DCS's Lua.
       - name: Build
         run: cargo xwin build --release --workspace --target x86_64-pc-windows-msvc
 
@@ -165,10 +162,10 @@ jobs:
           ls -l "$out"
           test -n "$(ls -A "$out")" || { echo 'no artifacts produced'; exit 1; }
 
-      # Task 1.3's done-when. A DLL built without the dcs-lua feature, or one
-      # whose import library resolved nothing, links and collects exactly like
-      # a correct one and carries no lua.dll in its import table. Read the
-      # table rather than trusting the build to have used the .def.
+      # A DLL built without the dcs-lua feature, or one whose import library
+      # resolved nothing, links and collects exactly like a correct one and
+      # carries no lua.dll in its import table. Read the table rather than
+      # trusting the build to have used the .def.
       - name: The DLL imports lua.dll
         run: |
           set -eu

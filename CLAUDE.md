@@ -62,6 +62,16 @@ when convenient.
 
 `docs/index.tsv` has a `frozen` column and the tooling reads it.
 
+**A task ID never appears in the code.** Tasks are ephemeral. The plan retires
+when the build ships, and a comment reading "task 1.3" then points at nothing.
+Comments, error messages and the README say what the code does and why it is
+that way; where a choice needs an argument, they cite the decision record that
+holds it. Task IDs belong in `STATE.md`, the plan and `docs/audit.md`.
+
+A dated document may name a task, because it says what was true on its date and
+that stays true. A decision record and a commit message are both dated, and a
+task branch is named for its task already.
+
 ## Never read a specification whole
 
 The ledger beside each document holds a row per claim with an anchor that

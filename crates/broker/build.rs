@@ -1,4 +1,4 @@
-//! Task 1.3. The import library the broker links DCS's Lua through.
+//! The import library the broker links DCS's Lua through.
 //!
 //! SPEC 5.1.1: *Bind to it through an import library generated from a
 //! checked-in `.def` naming `lua.dll`, which needs no DCS install at build
@@ -39,9 +39,9 @@ fn main() {
     assert!(
         target_env == "msvc",
         "the broker links DCS's Lua through an MSVC import library, and this \
-         target is x86_64-pc-windows-{target_env}. Task 1.4 owns the gnu \
-         fallback. Build --target x86_64-pc-windows-msvc, or turn the \
-         dcs-lua feature off for a host-native build."
+         target is x86_64-pc-windows-{target_env}. Build --target \
+         x86_64-pc-windows-msvc, or turn the dcs-lua feature off for a \
+         host-native build."
     );
 
     let out = PathBuf::from(env::var_os("OUT_DIR").expect("cargo sets OUT_DIR")).join("lua.lib");

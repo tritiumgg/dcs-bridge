@@ -53,7 +53,7 @@ Rust is the one tool `mise.toml` does not name a version for. `rust-toolchain.to
 does, and mise reads it — `mise ls` shows rust sourced from that file, and
 `mise install` provisions the channel it names. The file also carries
 `components` and `targets`, which rustup installs on demand, so the Windows
-target task 1.4 needs arrives without a separate step.
+cross-build's target arrives without a separate step.
 
 Two settings in `mise.toml` make that work. mise's rust tool exports
 `RUSTUP_TOOLCHAIN`, which overrides `rust-toolchain.toml` outright and discards

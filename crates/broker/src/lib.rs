@@ -1,7 +1,6 @@
 //! The DCS-Bridge broker.
 //!
-//! A stub. Task 2.1 gives it a host-native test harness, and the rings,
-//! threads and framed TCP transport follow through Phase 2.
+//! A stub. The rings, threads and framed TCP transport come with Phase 2.
 
 /// The broker build, carried in the handshake for bug reports.
 ///
@@ -25,9 +24,9 @@ mod lua {
 
 /// Depth of `state`'s stack.
 ///
-/// One call into `lua.dll`, so the linker resolves a symbol through the
-/// import library and task 1.3's done-when has something to observe. Task 2.2
-/// replaces it with `luaopen_dcsbridge`.
+/// One call into `lua.dll`, so the linker resolves a symbol through the import
+/// library and the binding shows up in the built DLL's import table. It goes
+/// away once the broker exports `luaopen_dcsbridge`.
 ///
 /// # Safety
 ///
