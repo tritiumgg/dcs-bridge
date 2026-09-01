@@ -103,6 +103,28 @@ version numbers, four of which are compared at runtime, and none of the four
 moves for a reason outside its own row. `.github/workflows/version-bump.yml`
 touches the release version and fails if a bump reaches any of the four.
 
+## Releases
+
+A tag carries four assets: `lua-dcsbridge.dll`, `dcsb.exe`,
+`write-directory-<version>.zip` and `SHA256SUMS` over the three. The zip
+mirrors the write directory described in SPEC §13, so installing it is one
+extraction over `Saved Games\<write dir>\`. `dcsb` runs outside DCS and has no
+home in that tree, so it ships beside the zip rather than inside it.
+
+The tag names the version, and the part before any `-rc` suffix must match
+`[workspace.package]` in `Cargo.toml`. Staging fails on a mismatch, so bump the
+version and merge that first: `.github/workflows/version-bump.yml` opens the
+pull request.
+
+`tools/stage-release.sh` builds all four from a cross-build directory. CI runs
+it on every pull request and `.github/workflows/release.yml` runs it on a tag,
+so publishing is the only step a tag reaches first:
+
+```sh
+cargo xwin build --release --workspace --target x86_64-pc-windows-msvc
+sh tools/stage-release.sh target/x86_64-pc-windows-msvc/release
+```
+
 ## Licence
 
 MIT. See `LICENSE`.

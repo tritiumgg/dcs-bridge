@@ -146,36 +146,12 @@ jobs:
       - name: Build
         run: cargo xwin build --release --workspace --target x86_64-pc-windows-msvc
 
-      # Cargo replaces a hyphen with an underscore in a library artifact name,
-      # so the file on disk may not match the name the plan uses. Collect by
-      # extension and rename, rather than guessing which form landed.
-      - name: Collect artifacts
-        run: |
-          set -eu
-          out=dist
-          mkdir -p "$out"
-          find target/x86_64-pc-windows-msvc/release -maxdepth 1 \
-               \( -name '*.dll' -o -name '*.exe' \) -exec cp {} "$out"/ \;
-          if [ -f "$out/lua_dcsbridge.dll" ]; then
-            mv "$out/lua_dcsbridge.dll" "$out/lua-dcsbridge.dll"
-          fi
-          ls -l "$out"
-          test -n "$(ls -A "$out")" || { echo 'no artifacts produced'; exit 1; }
-
-      # A DLL built without the dcs-lua feature, or one whose import library
-      # resolved nothing, links and collects exactly like a correct one and
-      # carries no lua.dll in its import table. Read the table rather than
-      # trusting the build to have used the .def.
-      - name: The DLL imports lua.dll
-        run: |
-          set -eu
-          if LC_ALL=C grep -qa 'lua\.dll' dist/lua-dcsbridge.dll; then
-            echo 'lua-dcsbridge.dll imports lua.dll'
-          else
-            echo 'lua-dcsbridge.dll names no lua.dll, so it binds none of'
-            echo 'DCS Lua. Check the dcs-lua feature and vendor/lua/lua.def.'
-            exit 1
-          fi
+      # The same script the release workflow runs, so a pull request exercises
+      # the staging, the write-directory zip, the checksums and the guard that
+      # the DLL really imports lua.dll. Nothing but publishing is left for a
+      # tag to do for the first time.
+      - name: Stage the artifacts
+        run: sh tools/stage-release.sh target/x86_64-pc-windows-msvc/release
 
       - uses: actions/upload-artifact@v4
         with:
