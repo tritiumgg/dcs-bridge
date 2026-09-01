@@ -48,6 +48,9 @@ is the landing, so write the entry the way the merge will make true rather than
 describing a review in progress. A second pull request to say the first one
 landed is a round trip that records nothing the merge did not.
 
+Where a task lands as a sequence, that commit rides the last branch. An entry
+on the first would claim a completion three reviews early.
+
 That means a "Just finished" entry cites its pull request and not a CI run: a
 run id exists only after the run, and amending the commit to add it starts a
 different run.
@@ -193,6 +196,13 @@ Add a body when the change needs explaining.
 **A branch per plan task**, named `task/<id>-<summary>`, such as
 `task/1.1-cargo-workspace`. Work that belongs to no task takes the `type` it
 would commit under: `fix/`, `docs/`, `build/`.
+
+**A task too large to review at once lands as a sequence.** Past roughly 400
+changed lines, split it into stacked branches — `task/2.1-1-crate-split`, then
+`task/2.1-2-lua-surface` — landing ff-only in order. The plan names them and what each is reviewable against, because that is
+the last moment the boundaries are free to move. A preparatory refactor always
+takes its own, claiming no change in behavior: sharing a diff with the feature
+hides which lines moved among the lines that changed.
 
 **History is linear. Rebase, never merge-commit.** Bring a branch up to date
 with `git rebase origin/main`; the maintainer lands it with `git merge
