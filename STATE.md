@@ -1,9 +1,11 @@
 # Working state
 
-**Last updated:** 2026-09-01, 1.7 landed and Phase 1 closes. Phase 2 opens on 2.1.
+**Last updated:** 2026-09-01
 
 The handoff between sessions. Read it first; update it before a session ends,
-not only when a task finishes. Stamp the line above each time.
+not only when a task finishes. Stamp the date above each time; it carries a
+date and nothing else, because what changed is what the sections below are
+for.
 
 **This file is loaded cold every session, so its size is a tax on all of them.**
 Each section has a line budget and `tools/statecheck.sh` enforces it. Over

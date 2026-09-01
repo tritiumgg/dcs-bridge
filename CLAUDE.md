@@ -38,7 +38,21 @@ At the end of a session that stops mid-task: fill in "In progress" with the
 task, what is done, what is not, and where to resume. Say what is committed and
 what is only in the working tree. Say what is knowingly broken.
 
-Stamp the "Last updated" line each time.
+Stamp the "Last updated" line each time. It carries a date and nothing else.
+A status clause there says what "Just finished" says two lines below and goes
+stale on the next change, so `tools/statecheck.sh` refuses one.
+
+**One `STATE.md` commit per task, on the task's own branch.** The pull request
+is the landing, so write the entry the way the merge will make true rather than
+describing a review in progress. A second pull request to say the first one
+landed is a round trip that records nothing the merge did not.
+
+That means a "Just finished" entry cites its pull request and not a CI run: a
+run id exists only after the run, and amending the commit to add it starts a
+different run.
+
+"In progress" is for a session that stops with work an open pull request does
+not already account for. A branch waiting on review is not that.
 
 **Keep it small.** It is loaded cold every session, so its size is a tax on
 every session. Each section has a line budget, `tools/statecheck.sh` enforces
