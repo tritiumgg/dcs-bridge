@@ -1,6 +1,6 @@
 # Working state
 
-**Last updated:** 2026-09-01, decision records rewritten as ADRs.
+**Last updated:** 2026-09-01, release staging moved into one script.
 
 The handoff between sessions. Read it first; update it before a session ends,
 not only when a task finishes. Stamp the line above each time.
@@ -16,7 +16,9 @@ is just deleted. Write entries as one or two lines, never paragraphs.
 
 ## In progress
 
-Nothing. PR #2 is merged; 1.5 is next.
+**1.5** — PR #3 is green, CI run 33540101475, and waits on a merge.
+`tools/stage-release.sh` holds the staging, the zip and the checksums, and both
+workflows call it. All committed. What is left is the merge and the tag.
 
 *One task at most. Say what is done, what is not, and where to resume. Say what
 is committed and what is only in the working tree. Say what is knowingly
@@ -33,12 +35,13 @@ broken. Empty this when the task closes.*
 
 ## Next
 
-**Task 1.5** — `release.yml` already builds, stages and publishes on a `v*`
-tag. What is open: the write-directory zip ships a placeholder tree, and no tag
-has ever run the workflow end to end.
+**Close 1.5 by tagging.** Merge PR #3, then tag `v0.1.0`. Staging refuses a
+tag whose version disagrees with `Cargo.toml`, so bump first if the version has
+moved.
 
-**The maintainer verifies this**: only they may tag, and a tag is a release. An
-agent gets as far as `workflow_dispatch` against an existing tag.
+**The maintainer verifies this**: only they may tag, and a tag is a release.
+CI's cross-build runs the staging on every pull request, so publishing is all
+the tag reaches first.
 
 ## After that
 
