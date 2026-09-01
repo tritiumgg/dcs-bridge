@@ -1,6 +1,6 @@
 # spec: plan.md
-# sha256: d65924bf7ceb15a8217955e4d9390251660382cc23a908de24e0a9a5cc41cece
-# generated: 2026-08-31
+# sha256: f79439f00079e48d9e66fa411b42770d215430bdfadde9cad9e636cecb07030c
+# generated: 2026-09-01
 term	subject	defined_in	note
 PLAN	plan-role	DCS-Bridge — Project plan	This document. Build order, what ships, probe method, and the four documents' conventions.
 project plan	plan-role	DCS-Bridge — Project plan	Synonym for PLAN.

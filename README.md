@@ -66,7 +66,9 @@ a version into `[tools]` and mise stops reading the file.
 
 The product target is `x86_64` Windows for as long as DCS runs nowhere else,
 and it is cross-compiled, so no contributor needs a Windows machine to produce
-a release artifact.
+a release artifact. `x86_64-pc-windows-msvc` is the only Windows target, and
+`crates/broker/build.rs` refuses any other; DR-0003 says why there is no second
+one.
 
 ```sh
 cargo install --locked cargo-xwin      # once
