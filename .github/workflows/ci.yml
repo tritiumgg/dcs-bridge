@@ -46,6 +46,9 @@ jobs:
   # SPEC 14.2: a fault must drop one connection, not the process. In Rust that
   # means the broker is never built with panic = "abort". A workspace profile
   # setting would apply to it silently, so fail the build instead.
+  #
+  # The grep reaches comments too, so a Cargo.toml explains that setting
+  # without naming it.
   guards:
     name: Guards
     runs-on: ubuntu-latest
