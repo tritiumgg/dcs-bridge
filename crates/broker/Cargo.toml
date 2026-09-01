@@ -7,7 +7,7 @@
 # It builds twice from one source. The cdylib is what DCS loads, and it links
 # against DCS's Lua through vendor/lua/lua.def. The rlib is the host-native
 # build the tests run against, and that path never touches the .def. The
-# dcs-lua feature below is which of the two you get. DR-0002.
+# dcs-lua feature below is which of the two you get. ADR 0002.
 
 [package]
 name = "lua-dcsbridge"

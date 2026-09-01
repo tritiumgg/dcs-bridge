@@ -67,7 +67,7 @@ a version into `[tools]` and mise stops reading the file.
 The product target is `x86_64` Windows for as long as DCS runs nowhere else,
 and it is cross-compiled, so no contributor needs a Windows machine to produce
 a release artifact. `x86_64-pc-windows-msvc` is the only Windows target, and
-`crates/broker/build.rs` refuses any other; DR-0003 says why there is no second
+`crates/broker/build.rs` refuses any other; ADR 0003 says why there is no second
 one.
 
 ```sh
@@ -87,7 +87,7 @@ you get. On, the `cdylib` binds DCS's Lua through the `.def` — that is the
 default, and it is what the cross-build and the release workflow take. Off, the
 host-native build the tests run against never touches the `.def`. `mise run
 check` and CI's three-host matrix pass `--no-default-features` for it, which is
-what a plain `cargo test` on a Windows host needs too. DR-0002 says why the
+what a plain `cargo test` on a Windows host needs too. ADR 0002 says why the
 default points that way.
 
 ## Versioning

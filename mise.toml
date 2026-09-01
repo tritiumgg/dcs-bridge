@@ -28,7 +28,7 @@ lua = "5.1"
 # --no-default-features below turns the broker's dcs-lua feature off, which is
 # what the host-native build is. Leaving it on links DCS's lua.dll into every
 # binary on a Windows host, and a machine with no DCS has none to load.
-# DR-0002.
+# ADR 0002.
 
 [tasks.build]
 description = "Build every crate in the workspace"
