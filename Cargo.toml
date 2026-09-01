@@ -1,4 +1,4 @@
-# Task 1.1. Three crates, each a stub that builds.
+# Three crates: the broker, the CLI and the generator.
 #
 # The version below is the release version, and it is the only version this
 # file holds. SPEC 13.3's six numbers live with the code that compares them,

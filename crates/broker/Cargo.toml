@@ -5,9 +5,9 @@
 # lua_dcsbridge.dll and the CI and release workflows rename it on the way out.
 #
 # It builds twice from one source. The cdylib is what DCS loads, and it links
-# against DCS's Lua through vendor/lua/lua.def (task 1.3). The rlib is the
-# host-native build task 2.1's tests run against, and that path never touches
-# the .def.
+# against DCS's Lua through vendor/lua/lua.def. The rlib is the host-native
+# build the tests run against, and that path never touches the .def. The
+# dcs-lua feature below is which of the two you get. DR-0002.
 
 [package]
 name = "lua-dcsbridge"
@@ -24,6 +24,14 @@ name = "lua_dcsbridge"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
+
+# On by default, because the product artifact is the Windows DLL and a build
+# that quietly omits the Lua binding is the failure worth ruling out. The
+# host-native test build passes --no-default-features, which is what CI's
+# three-host matrix and every mise task run.
+[features]
+default = ["dcs-lua"]
+dcs-lua = []
 
 [lints]
 workspace = true
