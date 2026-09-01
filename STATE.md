@@ -1,6 +1,6 @@
 # Working state
 
-**Last updated:** 2026-09-01, 1.6 landed and Phase 1 is on 1.7.
+**Last updated:** 2026-09-01, 1.7 is built and PR #7 waits on the maintainer.
 
 The handoff between sessions. Read it first; update it before a session ends,
 not only when a task finishes. Stamp the line above each time.
@@ -16,7 +16,12 @@ is just deleted. Write entries as one or two lines, never paragraphs.
 
 ## In progress
 
-Nothing. 1.6 is closed; 1.7 is next.
+**1.7** — Done and pushed as PR #7, nothing in the working tree, waiting on
+review. `tools/schema-breaking.sh` and `tools/schema-ownership.sh` are the two
+gates, in the `Documents` job and `mise run schema`. **Verified by an agent**
+in a throwaway clone tagged with a baseline carrying a schema; the PR body
+tables the nine cases. `v0.1.0` predates the schema, so CI here covers the
+empty-baseline path only.
 
 *One task at most. Say what is done, what is not, and where to resume. Say what
 is committed and what is only in the working tree. Say what is knowingly
@@ -33,18 +38,18 @@ broken. Empty this when the task closes.*
 
 ## Next
 
-**Task 1.7** — `buf breaking` against the previous release and the SPEC §8.4
-ownership check. `buf lint` already runs in CI, so 1.7 adds the other two.
+**Task 2.1** — The host-native broker build a stock Lua 5.1 can load, so SPEC
+§17 runs in CI with no DCS present.
 
-**An agent verifies this**: a breaking change and a stray `dcs.bridge` message
-must each fail a CI run, both observable with nothing running.
+**An agent verifies this**: a CI run loading the module under `lua5.1` on all
+three hosts settles it, with no DCS install anywhere in it.
 
 ## After that
 
-- **2.1** — The host-native broker build a stock Lua 5.1 can load, so SPEC §17
-  runs in CI with no DCS present.
 - **2.2** — `luaopen_dcsbridge`, loaded by explicit path, with rings, sockets
   and the three registration maps process-global rather than per-state.
+- **Phase 3** opens on `protoc-gen-dcsbridge-lua`, which reads the four message
+  options this schema defines and splits its output by `Target`.
 
 ## Carries forward
 

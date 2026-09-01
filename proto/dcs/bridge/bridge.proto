@@ -1,5 +1,9 @@
 syntax = "proto3";
 
+// SPEC 8.4 bounds this package: the only messages permitted here are the
+// records SPEC 1.2 enumerates and the nested types those records carry.
+// A built-in set's record belongs in dcs.builtin and an adopter's in a package
+// they own. tools/schema-ownership.sh holds the list and enforces it.
 package dcs.bridge;
 
 import "google/protobuf/any.proto";
@@ -82,13 +86,4 @@ extend google.protobuf.MessageOptions {
   string reply_to = 50002;
   Target target = 50003;
   Capability required_capability = 50004;
-}
-
-// A unit left the mission. The first record, and the shape every other one
-// follows.
-message UnitDestroyed {
-  option (record_class) = RECORD_CLASS_DURABLE;
-
-  string unit_name = 1;
-  int32 coalition = 2;
 }

@@ -26,7 +26,12 @@ jobs:
     name: Documents
     runs-on: ubuntu-latest
     steps:
+      # buf breaking compares against the newest release tag and reads that
+      # tag's tree out of git, so the whole history and every tag have to be
+      # here. A shallow clone carries neither.
       - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
       # docs/ is frozen, so this is tamper detection rather than maintenance:
       # a failure means somebody edited a document that should not change.
       - name: The frozen documents are unchanged
@@ -46,6 +51,14 @@ jobs:
       - uses: ./.github/actions/buf
       - name: The schema lints
         run: buf lint
+
+      # SPEC 8.4's two remaining schema gates. Ownership is a naming check over
+      # the sources and needs no buf; the comparison reads the newest release
+      # tag's tree out of git.
+      - name: The bridge owns what dcs.bridge holds
+        run: sh tools/schema-ownership.sh
+      - name: The schema breaks no consumer built against the last release
+        run: sh tools/schema-breaking.sh
 
   # SPEC 14.2: a fault must drop one connection, not the process. In Rust that
   # means the broker is never built with panic = "abort". A workspace profile
