@@ -1,6 +1,6 @@
 # Working state
 
-**Last updated:** 2026-09-01, task 1.4 closed on one Windows target.
+**Last updated:** 2026-09-01, decision records rewritten as ADRs.
 
 The handoff between sessions. Read it first; update it before a session ends,
 not only when a task finishes. Stamp the line above each time.
@@ -25,9 +25,9 @@ broken. Empty this when the task closes.*
 ## Just finished
 
 - **1.3** — The cross-built DLL imports `lua.dll`, CI run 33534747477 on PR #1.
-  DR-0002 settles the broker's two builds.
+  ADR 0002 settles the broker's two builds.
 - **1.4** — Both artifacts cross-build from Linux, CI run 33537626474 on PR #2.
-  DR-0003 drops the gnu fallback rather than building one.
+  ADR 0003 drops the gnu fallback rather than building one.
 
 *The last three at most, one line each. Git log holds the rest.*
 

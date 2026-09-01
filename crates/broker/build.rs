@@ -10,7 +10,7 @@
 //!
 //! The `dcs-lua` feature decides whether any of this happens. It is on by
 //! default because the product artifact is the Windows DLL; the host-native
-//! test build turns it off and never touches the `.def`. DR-0002.
+//! test build turns it off and never touches the `.def`. ADR 0002.
 
 use std::env;
 use std::fs;
@@ -37,14 +37,14 @@ fn main() {
 
     // MSVC is the only Windows environment the broker builds for, because
     // DCS's lua.dll is an MSVC build and a second toolchain would put a second
-    // C runtime in the process. DR-0003.
+    // C runtime in the process. ADR 0003.
     let target_env = cfg_var("CARGO_CFG_TARGET_ENV");
     assert!(
         target_env == "msvc",
         "the broker links DCS's Lua through an MSVC import library, and this \
          target is x86_64-pc-windows-{target_env}. Build --target \
          x86_64-pc-windows-msvc, or turn the dcs-lua feature off for a \
-         host-native build. DR-0003 says why there is no second Windows target."
+         host-native build. ADR 0003 says why there is no second Windows target."
     );
 
     let out = PathBuf::from(env::var_os("OUT_DIR").expect("cargo sets OUT_DIR")).join("lua.lib");

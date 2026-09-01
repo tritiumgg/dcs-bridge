@@ -1,5 +1,5 @@
 # spec: plan.md
-# sha256: f79439f00079e48d9e66fa411b42770d215430bdfadde9cad9e636cecb07030c
+# sha256: da114d144f1f1d6dad10504c0366ae60585a0cec895d202add67f63525d88150
 # generated: 2026-09-01
 term	subject	defined_in	note
 PLAN	plan-role	DCS-Bridge — Project plan	This document. Build order, what ships, probe method, and the four documents' conventions.
