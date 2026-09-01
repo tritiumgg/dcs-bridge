@@ -1,11 +1,12 @@
-# Tag-triggered. Cross-builds the Windows target, assembles the write-directory
-# zip, publishes checksums, and attaches the broker, the CLI and the zip.
+# Tag-triggered. Cross-builds the Windows target, stages the artifacts, and
+# publishes the broker, the CLI, the write-directory zip and the checksums.
 #
 # A tag carrying a hyphenated suffix, such as v0.2.0-rc1, publishes as a
 # prerelease, which is the development channel.
 #
-# The zip is not yet the full write-directory tree. Until it is, the staging
-# step ships whatever dist/write-directory holds and says so.
+# tools/stage-release.sh does the staging, and ci.yml's cross-build runs the
+# same script on every pull request, so the path a tag takes is exercised long
+# before a tag takes it.
 
 name: Release
 
@@ -30,12 +31,26 @@ jobs:
           ref: ${{ inputs.tag || github.ref }}
           fetch-depth: 0
 
+      # The tag reaches the shell through the environment rather than through
+      # expansion, so its text cannot become script.
       - name: Resolve the tag
         id: tag
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+          GITHUB_REF: ${{ github.ref }}
         run: |
           set -eu
-          tag="${{ inputs.tag }}"
+          tag="$INPUT_TAG"
           [ -n "$tag" ] || tag="${GITHUB_REF#refs/tags/}"
+          case "$tag" in
+            v[0-9]*) ;;
+            *) echo "not a release tag: $tag" >&2; exit 1 ;;
+          esac
+          case "$tag" in
+            *[!A-Za-z0-9.-]*)
+              echo "the tag carries characters a version may not: $tag" >&2
+              exit 1 ;;
+          esac
           case "$tag" in
             *-*) channel=prerelease ;;
             *)   channel=release ;;
@@ -71,58 +86,27 @@ jobs:
       - name: Build
         run: cargo xwin build --release --workspace --target x86_64-pc-windows-msvc
 
+      # The version comes from the tag rather than from Cargo.toml, so a
+      # prerelease zip carries the tag's own suffix.
       - name: Stage the artifacts
+        env:
+          VERSION: ${{ steps.tag.outputs.version }}
         run: |
-          set -eu
-          bin=target/x86_64-pc-windows-msvc/release
-          mkdir -p dist
-          find "$bin" -maxdepth 1 \( -name '*.dll' -o -name '*.exe' \) \
-               -exec cp {} dist/ \;
-          if [ -f dist/lua_dcsbridge.dll ]; then
-            mv dist/lua_dcsbridge.dll dist/lua-dcsbridge.dll
-          fi
-          test -n "$(ls -A dist)" || { echo 'no artifacts produced'; exit 1; }
-
-      # The zip mirrors the write directory, so installing is one extraction.
-      # The tree is not filled out yet; this step ships what exists.
-      - name: Assemble the write-directory zip
-        run: |
-          set -eu
-          v='${{ steps.tag.outputs.version }}'
-          stage="writedir"
-          mkdir -p "$stage"
-          if [ -d dist/write-directory ]; then
-            cp -R dist/write-directory/. "$stage"/
-          else
-            echo 'dist/write-directory does not exist yet, so the zip carries'
-            echo 'the binaries only.'
-            cp dist/*.dll dist/*.exe "$stage"/ 2>/dev/null || true
-          fi
-          (cd "$stage" && zip -qr "../dist/write-directory-$v.zip" .)
-          ls -l dist
-
-      - name: Checksums
-        run: |
-          set -eu
-          cd dist
-          : > SHA256SUMS
-          for f in *; do
-            [ "$f" = SHA256SUMS ] && continue
-            sha256sum "$f" >> SHA256SUMS
-          done
-          cat SHA256SUMS
+          sh tools/stage-release.sh \
+             target/x86_64-pc-windows-msvc/release "$VERSION" dist
 
       - name: Publish
         env:
           GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.tag.outputs.tag }}
+          CHANNEL: ${{ steps.tag.outputs.channel }}
         run: |
           set -eu
-          tag='${{ steps.tag.outputs.tag }}'
           flags=""
-          case '${{ steps.tag.outputs.channel }}' in
-            prerelease) flags="--prerelease" ;;
-          esac
-          gh release create "$tag" dist/* \
-            --title "$tag" \
+          if [ "$CHANNEL" = prerelease ]; then
+            flags="--prerelease"
+          fi
+          gh release create "$TAG" dist/* \
+            --title "$TAG" \
             --generate-notes \
             $flags
