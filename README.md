@@ -1,142 +1,134 @@
-# Scaffolding
+# DCS-Bridge
 
-Unzip at the repository root. The tree is the tree you should end up with.
+A bridge between DCS World and external applications, allowing them to interact
+with and receive from the simulation state through events, subscriptions, and
+commands. The bridge is comprised of three parts: a message broker that acts as
+the data transport, and two scripts that interact with DCS World inside and
+outside of the simulation.
 
-No project code exists yet. This is your documents, with the three
-specifications frozen, plus the smallest tooling that makes them usable and
-gets a Windows build out of CI.
+Release version 0.1.0. The three crates are stubs. Phase 1 of `docs/plan/plan.md`
+builds the release pipeline before any behaviour, so every later phase ships
+through a path already known to work.
 
-## Start
+## Components
 
-1. **Fill the two slots in `CLAUDE.md`** — the name and the description, both
-   marked `<!-- FILL: ... -->`. Nothing else names or describes the project.
+| # | Component | Language | Location | Lifetime |
+|---|---|---|---|---|
+| 1 | Broker | Rust | `Mods\services\DCSBridge\bin\lua-dcsbridge.dll` | DCS process |
+| 2 | Hook driver | Lua 5.1 | `Scripts\Hooks\DCSBridge.lua` loader, `Mods\services\DCSBridge\lua\HookDriver.lua` payload | DCS process |
+| 3 | Sim driver | Lua 5.1 | Injected into the `"server"` state | One mission |
+| 4 | Generator | Rust | Build machine | Build time |
 
-2. **Make the scripts executable and check they run.**
+Everything outside the Lua files is Rust. The broker uses no garbage collector
+and no language runtime, because a collector inside the DCS process can stop the
+logic thread and that stops the sim for every player at once.
 
-   ```
-   chmod +x tools/*.sh .claude/hooks/*.sh
-   tools/ledger.sh codes
-   tools/ledger.sh lint
-   ```
+The workspace holds the three Rust crates:
 
-   ```
-   tools/statecheck.sh
-   ```
+| Crate | Package | Artifact |
+|---|---|---|
+| `crates/broker` | `lua-dcsbridge` | `lua_dcsbridge.dll`, renamed to `lua-dcsbridge.dll` |
+| `crates/cli` | `dcsb` | `dcsb.exe` |
+| `crates/generator` | `protoc-gen-dcsbridge-lua` | `protoc-gen-dcsbridge-lua.exe` |
 
-   `lint` reads all 553 ledger rows and every anchor. `statecheck` holds
-   `STATE.md` to a line budget per section. Both should exit 0.
+Cargo rejects a hyphen in a library target name, so the broker's library is
+`lua_dcsbridge` and the CI and release workflows rename the file. `protoc`
+resolves a plugin by executable name, so the generator's binary name is fixed
+by that contract.
 
-3. **Read `STATE.md`.** It is the entry point and exit point of every session,
-   and it already carries the open questions from the audit, including two that
-   only you can settle.
+## Build
 
-4. **Read `docs/audit.md`.** It records what the documents disagree about,
-   checked once before anything was built. Two problems in it are worth
-   deciding on before Phase 4 and Phase 5.
+Tool versions come from `mise.toml`. On a fresh checkout:
 
-5. **Initialize git and commit.** `.gitattributes` is load-bearing: it disables
-   line-ending conversion, without which every ledger stamp breaks on a Windows
-   checkout.
+```sh
+mise install
+mise run check
+```
 
-6. **Start Phase 1, task 1.1.** The workflows fail until the Cargo workspace
-   exists. That is deliberate: your plan builds the pipeline before any
-   behaviour, so every later phase flows through one already known to work.
+`check` runs what CI gates a pull request on: `cargo fmt --all --check`,
+`cargo clippy -D warnings`, `cargo build` and `cargo test`, against the host
+target. `mise tasks` lists the rest.
 
-## What ships here
+Rust is the one tool `mise.toml` does not name a version for. `rust-toolchain.toml`
+does, and mise reads it — `mise ls` shows rust sourced from that file, and
+`mise install` provisions the channel it names. The file also carries
+`components` and `targets`, which rustup installs on demand, so the Windows
+target task 1.4 needs arrives without a separate step.
 
-| Path | What it is |
-|---|---|
-| `README.md` | This file. Replace it when the project has something to describe. |
-| `CLAUDE.md` | Root instructions. Two fillable slots. |
-| `STATE.md` | The handoff between sessions: in progress, next, and what carries forward. |
-| `docs/specs/*/` | Your three specifications with their ledgers and glossaries. Frozen. |
-| `docs/plan/` | Your plan with its ledger and glossary. Changes as build order does. |
-| `docs/index.tsv` | Document code, path, and whether it is frozen. |
-| `docs/audit.md` | What the documents disagree about, checked once. |
-| `docs/conventions/documents.md` | Which are frozen, how to read them, the ledger format. |
-| `docs/conventions/decision-records.md` | Where the build departs from them. |
-| `docs/decisions/TEMPLATE.md` | Copy this to start a record. |
-| `docs/decisions/0001-specifications-are-frozen.md` | The first record, and the worked example. |
-| `vendor/lua/lua.def` | Your import definition for DCS's Lua, unchanged. |
-| `tools/ledger.sh` | Locate and retrieve specification text. Lint and stamp. |
-| `tools/mkimplib.sh` | Build the Windows import library from the `.def`. |
-| `tools/statecheck.sh` | Enforce `STATE.md`'s per-section line budgets. |
-| `.github/workflows/ci.yml` | Three-host checks, guards, Windows cross-build. |
-| `.github/workflows/release.yml` | Tag-triggered build, zip, checksums, release. |
-| `.github/workflows/version-bump.yml` | Release-version bump, guarded by SPEC §13.3. |
-| `rust-toolchain.toml` | One toolchain across three hosts and CI. |
-| `.claude/settings.json` | Wires the read guard. |
-| `.claude/hooks/guard-spec-reads.sh` | Refuses an unbounded `Read` of a specification. |
-| `.gitattributes` | Disables line-ending conversion. |
-| `.gitignore` | Cargo output and local Claude Code settings. |
+Two settings in `mise.toml` make that work. mise's rust tool exports
+`RUSTUP_TOOLCHAIN`, which overrides `rust-toolchain.toml` outright and discards
+both lists, so `[env]` clears it; `idiomatic_version_file_enable_tools` then
+lets mise read the version from the file. Change the toolchain by editing
+`channel`, then `mise install`. Not with `mise use rust@<version>`: that writes
+a version into `[tools]` and mise stops reading the file.
 
-Your source files moved and were renamed: `dcs-bridge-spec/dcs-bridge-spec.md`
-is now `docs/specs/bridge/spec.md`, and so on. The eight stamp lines that named
-a `-revised` file now name the living file. No document byte changed, and every
-hash still matches.
+### Windows
 
-## What you still have to create
+The product target is `x86_64` Windows for as long as DCS runs nowhere else,
+and it is cross-compiled, so no contributor needs a Windows machine to produce
+a release artifact.
 
-| What | Why it is not here |
-|---|---|
-| The name and description in `CLAUDE.md` | Yours to write. |
-| `LICENSE` | PLAN §4 says permissive. Which one is your call. |
-| The Cargo workspace, `.proto`, and the broker's `build.rs` | Phase 1, tasks 1.1 to 1.7. |
-| A decision on the two unmeasured claims in `docs/audit.md` | Both are scope calls. |
-| How you track work beyond `STATE.md` | Deliberately absent. See below. |
-
-## What is deliberately absent
-
-**Per-task files.** The plan is 115 rows in build order and `STATE.md` holds
-the working state. A file per row with a status field is a project management
-system, and you do not need one to read a table.
-
-**A cross-reference checker.** Every reference already resolves — 231 prefixed,
-597 bare, 64 probe references, all checked once. They cannot break in the frozen
-specifications. The plan can break one by renumbering; if that starts happening,
-this is worth twenty lines of awk.
-
-**A findings process.** Categories, severities and review cycles manage
-specification edits that will not happen. What the documents get wrong is in
-`docs/audit.md`; what you decide to do instead is a decision record.
-
-## Building for Windows
+```sh
+cargo install --locked cargo-xwin      # once
+sh tools/mkimplib.sh                   # check this machine can build the import library
+mise exec -- cargo xwin build --release --workspace --target x86_64-pc-windows-msvc
+```
 
 `vendor/lua/lua.def` pins the 114 Lua symbols the broker may link against.
-`tools/mkimplib.sh` turns it into an import library and tells you whether the
-machine you are on can do it. `rust-toolchain.toml` pins the toolchain and the
-`x86_64-pc-windows-msvc` target. The `windows-cross` job proves the path from a
-Linux runner on every pull request.
+`tools/mkimplib.sh` turns it into an import library and reports whether the
+machine you are on can do it. A full LLVM install is the one prerequisite; a
+rustup `llvm-tools` component ships neither `llvm-dlltool` nor `llvm-lib`.
 
-The piece you write is the broker's `build.rs`. It runs the same probe and
-emits the link directives:
+The broker builds twice from one source. The `cdylib` is what DCS loads and it
+links against the `.def`. The `rlib` is the host-native build the tests run
+against, and that path never touches the `.def`.
 
+## Versioning
+
+The release version is `0.1.0`, and it is the only version this README states.
+It lives under `[workspace.package]` in `Cargo.toml`. A tag `v<version>`
+publishes a release; a tag carrying a hyphenated suffix, such as `v0.2.0-rc1`,
+publishes to the prerelease channel.
+
+Below 1.0 a minor bump may break compatibility and a patch bump may not. The
+release version promises nothing about the wire: SPEC §13.3 holds six further
+version numbers, four of which are compared at runtime, and none of the four
+moves for a reason outside its own row. `.github/workflows/version-bump.yml`
+touches the release version and fails if a bump reaches any of the four.
+
+## Licence
+
+MIT. See `LICENSE`.
+
+## Documents
+
+`docs/specs/` holds three frozen specifications: `SPEC` is the bridge, `SIM` is
+the sim driver's built-in record and command set, and `HOOK` is the hook
+driver's. `docs/plan/plan.md` states build order and is not frozen.
+
+Never read a specification whole. The ledger beside each one holds a row per
+claim with an anchor that locates the prose:
+
+```sh
+tools/ledger.sh codes                     document codes and paths
+tools/ledger.sh subjects SPEC             every subject in a ledger
+tools/ledger.sh find SPEC <text>          rows matching subject, claim or section
+tools/ledger.sh show SPEC "<anchor>"      the prose around one anchor
+tools/ledger.sh lint                      every stamp, anchor and glossary join
 ```
-llvm-dlltool -m i386:x86-64 -d vendor/lua/lua.def -l $OUT_DIR/lua.lib
-llvm-lib /def:vendor/lua/lua.def /out:$OUT_DIR/lua.lib /machine:x64
-lib.exe  /def:vendor/lua/lua.def /out:$OUT_DIR/lua.lib /machine:x64
-```
 
-Both LLVM commands are verified against this `.def` on a Linux host with no DCS
-and no Windows machine. Each produces a library with 114 `__imp_` symbols
-recording `lua.dll`. Then emit `cargo:rustc-link-search=native=<OUT_DIR>`,
-`cargo:rustc-link-lib=dylib=lua` and
-`cargo:rerun-if-changed=vendor/lua/lua.def`, guarded on the target being
-`windows-msvc`. Task 2.1 builds the same crate host-native against a stock
-Lua 5.1, and that path must not touch the `.def`.
-
-Reimplement the probe in `build.rs` with `std::process::Command` rather than
-calling the script, so a Windows host with no `sh` still builds.
+Where the build needs to go somewhere the specifications did not anticipate,
+copy `docs/decisions/TEMPLATE.md` and number it next. `docs/audit.md` records
+what the documents disagree about. `STATE.md` is the handoff between sessions.
 
 ## Two portability limits
 
-**`sh` on Windows.** The tools and the hook are POSIX `sh`, resolved through
-Git for Windows, which Claude Code already expects. Without it, nothing here
-runs.
+**`sh` on Windows.** The tools and the read guard are POSIX `sh`, resolved
+through Git for Windows. Without it, none of them run.
 
 **The read guard has one hole.** `PreToolUse` fires on tool calls only, so a
-file pulled in with an `@` reference loads whole. Closing it needs a permission
-rule, which also blocks the bounded reads the hook permits:
+specification pulled in with an `@` reference loads whole. Closing it needs a
+permission rule, which also blocks the bounded reads the hook permits:
 
 ```json
 "permissions": { "deny": ["Read(./docs/specs/*/spec.md)", "Read(./docs/plan/plan.md)"] }
@@ -145,10 +137,13 @@ rule, which also blocks the bounded reads the hook permits:
 ## Add these when the problem shows up
 
 **Pin the actions to commit SHAs.** A major-version tag is mutable, so `@v6`
-today is not `@v6` next month. Versions were current on 2026-09-01.
+today is not `@v6` next month.
 
 **A `.def` regeneration check.** `vendor/lua/lua.def` omits sixteen of the 130
-symbols `lua.dll` exports: the nine `luaopen_*` openers SPEC §4 forbids calling
-and seven SPEC §5.1.1 calls an artefact rather than an interface. A
-regeneration that dumps the whole export table would make all sixteen linkable.
-Add a check the first time a DCS update forces a re-measure.
+symbols `lua.dll` exports: the nine `luaopen_*` openers SPEC §4 forbids calling,
+and seven SPEC §5.1.1 calls an artefact rather than an interface. A regeneration
+that dumps the whole export table would make all sixteen linkable. Add a check
+the first time a DCS update forces a re-measure.
+
+**A cross-reference checker.** Every reference resolves today, and the frozen
+specifications cannot break one. The plan can, by renumbering.
