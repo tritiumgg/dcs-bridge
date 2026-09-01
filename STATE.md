@@ -1,6 +1,6 @@
 # Working state
 
-**Last updated:** 2026-09-01, 1.7 is built and PR #7 waits on the maintainer.
+**Last updated:** 2026-09-01, 1.7 landed and Phase 1 closes. Phase 2 opens on 2.1.
 
 The handoff between sessions. Read it first; update it before a session ends,
 not only when a task finishes. Stamp the line above each time.
@@ -16,12 +16,7 @@ is just deleted. Write entries as one or two lines, never paragraphs.
 
 ## In progress
 
-**1.7** — Done and pushed as PR #7, nothing in the working tree, waiting on
-review. `tools/schema-breaking.sh` and `tools/schema-ownership.sh` are the two
-gates, in the `Documents` job and `mise run schema`. **Verified by an agent**
-in a throwaway clone tagged with a baseline carrying a schema; the PR body
-tables the nine cases. `v0.1.0` predates the schema, so CI here covers the
-empty-baseline path only.
+Nothing. 1.7 is closed and Phase 1 with it; 2.1 is next.
 
 *One task at most. Say what is done, what is not, and where to resume. Say what
 is committed and what is only in the working tree. Say what is knowingly
@@ -29,10 +24,10 @@ broken. Empty this when the task closes.*
 
 ## Just finished
 
-- **1.5** — Tag `v0.1.0` published four assets, release run 33540903624.
-  `tools/stage-release.sh` stages them and CI runs it on every pull request.
 - **1.6** — `proto/` compiles to `schema.pb` and the zip carries it, CI run
   33545252753 on PR #5. ADR 0004 excepts one `buf lint` rule.
+- **1.7** — `tools/schema-breaking.sh` and `tools/schema-ownership.sh` gate the
+  schema, CI run 33563001197 on PR #7. `UnitDestroyed` moved to `dcs.builtin`.
 
 *The last three at most, one line each. Git log holds the rest.*
 
@@ -71,6 +66,9 @@ entries at most: an eleventh means something here is finished, or belongs in
   records a seventh crasher with two unattributed candidates and no probe. Task
   5.2 ships it anyway and task 6.3 calls into the same table. Needed before
   Phase 5. See `docs/audit.md`.
+- **`buf breaking` has no baseline until the next release.** `v0.1.0` predates
+  the schema, so `tools/schema-breaking.sh` reports that and passes. It starts
+  comparing at the first tag whose tree carries `proto/`. Delete this then.
 - **Ring sizes are provisional until task 9.7.** Tasks 2.15 and 2.18 pick
   values; PROBE-7 measures them seven phases later, so 2.18's done-when reopens
   at 9.7. Record the provisional reserve here when chosen.
