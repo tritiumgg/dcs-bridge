@@ -1,0 +1,33 @@
+# Task 1.1. Three crates, each a stub that builds.
+#
+# The version below is the release version, and it is the only version this
+# file holds. SPEC 13.3's six numbers live with the code that compares them,
+# and .github/workflows/version-bump.yml fails if a bump reaches any of them.
+
+[workspace]
+resolver = "3"
+members = ["crates/broker", "crates/cli", "crates/generator"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.98.0"
+license = "MIT"
+repository = "https://github.com/tritiumgg/dcs-bridge"
+authors = ["tritiumgg"]
+
+# SPEC 14.2: a parser fault must drop one connection rather than the process,
+# so the broker unwinds. Stated here because this is the profile somebody would
+# set to abort instead. The CI `guards` job greps every Cargo.toml for that
+# setting and fails the build, so do not name it in a comment either.
+[profile.release]
+panic = "unwind"
+
+# The broker is a DLL in someone else's process doing raw FFI into Lua, so the
+# unsafe hygiene lints earn their place across the workspace.
+[workspace.lints.rust]
+missing_docs = "warn"
+unsafe_op_in_unsafe_fn = "warn"
+
+[workspace.lints.clippy]
+undocumented_unsafe_blocks = "warn"
