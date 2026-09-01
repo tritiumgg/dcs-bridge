@@ -95,14 +95,18 @@ jobs:
       - name: Format
         run: cargo fmt --all --check
 
+      # --no-default-features turns the broker's dcs-lua feature off, which is
+      # what a host-native build is: the same source without DCS's Lua. On a
+      # Windows runner the feature would otherwise link lua.dll into every test
+      # binary, and no runner has one to load. DR-0002.
       - name: Clippy
-        run: cargo clippy --workspace --all-targets
+        run: cargo clippy --workspace --all-targets --no-default-features
 
       - name: Build
-        run: cargo build --workspace --all-targets
+        run: cargo build --workspace --all-targets --no-default-features
 
       - name: Test
-        run: cargo test --workspace
+        run: cargo test --workspace --no-default-features
 
   # Task 1.4. The product target is x86_64 Windows and it is cross-compiled, so
   # no contributor needs a Windows machine to produce a release artifact.
@@ -140,6 +144,8 @@ jobs:
       - name: Import library from the checked-in .def
         run: sh tools/mkimplib.sh
 
+      # Default features, so the broker's build.rs generates its own copy of
+      # the import library and links the DLL against DCS's Lua. Task 1.3.
       - name: Build
         run: cargo xwin build --release --workspace --target x86_64-pc-windows-msvc
 
@@ -158,6 +164,21 @@ jobs:
           fi
           ls -l "$out"
           test -n "$(ls -A "$out")" || { echo 'no artifacts produced'; exit 1; }
+
+      # Task 1.3's done-when. A DLL built without the dcs-lua feature, or one
+      # whose import library resolved nothing, links and collects exactly like
+      # a correct one and carries no lua.dll in its import table. Read the
+      # table rather than trusting the build to have used the .def.
+      - name: The DLL imports lua.dll
+        run: |
+          set -eu
+          if LC_ALL=C grep -qa 'lua\.dll' dist/lua-dcsbridge.dll; then
+            echo 'lua-dcsbridge.dll imports lua.dll'
+          else
+            echo 'lua-dcsbridge.dll names no lua.dll, so it binds none of'
+            echo 'DCS Lua. Check the dcs-lua feature and vendor/lua/lua.def.'
+            exit 1
+          fi
 
       - uses: actions/upload-artifact@v4
         with:

@@ -71,17 +71,22 @@ a release artifact.
 ```sh
 cargo install --locked cargo-xwin      # once
 sh tools/mkimplib.sh                   # check this machine can build the import library
-mise exec -- cargo xwin build --release --workspace --target x86_64-pc-windows-msvc
+mise run windows
 ```
 
 `vendor/lua/lua.def` pins the 114 Lua symbols the broker may link against.
-`tools/mkimplib.sh` turns it into an import library and reports whether the
-machine you are on can do it. A full LLVM install is the one prerequisite; a
-rustup `llvm-tools` component ships neither `llvm-dlltool` nor `llvm-lib`.
+`crates/broker/build.rs` turns it into the import library the DLL links, and
+`tools/mkimplib.sh` does the same from a shell to report whether the machine you
+are on can do it at all. A full LLVM install is the one prerequisite; a rustup
+`llvm-tools` component ships neither `llvm-dlltool` nor `llvm-lib`.
 
-The broker builds twice from one source. The `cdylib` is what DCS loads and it
-links against the `.def`. The `rlib` is the host-native build the tests run
-against, and that path never touches the `.def`.
+The broker builds twice from one source, and the `dcs-lua` feature is which one
+you get. On, the `cdylib` binds DCS's Lua through the `.def` — that is the
+default, and it is what the cross-build and the release workflow take. Off, the
+host-native build the tests run against never touches the `.def`. `mise run
+check` and CI's three-host matrix pass `--no-default-features` for it, which is
+what a plain `cargo test` on a Windows host needs too. DR-0002 says why the
+default points that way.
 
 ## Versioning
 
