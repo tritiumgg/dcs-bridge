@@ -13,7 +13,11 @@
 # Only those two binaries ship. protoc-gen-dcsbridge-lua is a build-time protoc
 # plugin, so naming the artifacts here keeps it out of a release.
 #
-# Usage: sh tools/stage-release.sh <build-dir> [version] [out-dir]
+# The zip also carries schema.pb, which tools/mkschema.sh compiles. It is
+# platform-independent and comes from the .proto tree rather than from the
+# Windows build, so it has a path of its own rather than a place under BUILD.
+#
+# Usage: sh tools/stage-release.sh <build-dir> [version] [out-dir] [schema]
 #
 # POSIX sh only, and no tool beyond zip and one of sha256sum or shasum.
 set -eu
@@ -22,8 +26,14 @@ ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 BUILD=${1:-$ROOT/target/x86_64-pc-windows-msvc/release}
 VERSION=${2:-}
 OUT=${3:-$ROOT/dist}
+SCHEMA=${4:-$ROOT/target/schema.pb}
 
 [ -d "$BUILD" ] || { printf 'no build directory at %s\n' "$BUILD" >&2; exit 2; }
+[ -f "$SCHEMA" ] || {
+    printf 'no schema at %s. Build it first:\n\n' "$SCHEMA" >&2
+    printf '  mise run schema\n' >&2
+    exit 2
+}
 
 WORKSPACE=$(awk '
     /^\[workspace\.package\]/ { in_sec = 1; next }
@@ -78,12 +88,13 @@ else
 fi
 
 # SPEC 13's tree, so installing is one extraction over the write directory.
-# Only the broker has a home there so far; the Lua files and the schema join it
+# The broker and the schema have a home there so far; the Lua files join them
 # as they are built. The CLI runs outside DCS and ships as a loose asset.
 ZIP="write-directory-$VERSION.zip"
 STAGE=$OUT/.writedir
 mkdir -p "$STAGE/Mods/services/DCSBridge/bin"
 cp "$OUT/lua-dcsbridge.dll" "$STAGE/Mods/services/DCSBridge/bin/"
+cp "$SCHEMA" "$STAGE/Mods/services/DCSBridge/schema.pb"
 (cd "$STAGE" && zip -qr "../$ZIP" .)
 rm -rf "$STAGE"
 

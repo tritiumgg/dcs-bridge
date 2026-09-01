@@ -1,6 +1,6 @@
 # Working state
 
-**Last updated:** 2026-09-01, v0.1.0 published and Phase 1 is on 1.6.
+**Last updated:** 2026-09-01, 1.6 is green and waits on a merge.
 
 The handoff between sessions. Read it first; update it before a session ends,
 not only when a task finishes. Stamp the line above each time.
@@ -16,7 +16,9 @@ is just deleted. Write entries as one or two lines, never paragraphs.
 
 ## In progress
 
-Nothing. 1.5 is closed; 1.6 is next.
+**1.6** — PR #5 is green, CI run 33545252753, and waits on a merge. The zip
+carries `schema.pb`, and the Linux runner's copy is byte-identical to a macOS
+build. All committed. What is left is the merge.
 
 *One task at most. Say what is done, what is not, and where to resume. Say what
 is committed and what is only in the working tree. Say what is knowingly
@@ -24,8 +26,6 @@ broken. Empty this when the task closes.*
 
 ## Just finished
 
-- **1.4** — Both artifacts cross-build from Linux, CI run 33537626474 on PR #2.
-  ADR 0003 drops the gnu fallback rather than building one.
 - **1.5** — Tag `v0.1.0` published four assets, release run 33540903624.
   `tools/stage-release.sh` stages them and CI runs it on every pull request.
 
@@ -33,18 +33,18 @@ broken. Empty this when the task closes.*
 
 ## Next
 
-**Task 1.6** — The `.proto` and `schema.pb` built with `buf`. SPEC §8 holds
-the shape; §8.4 holds the evolution rules 1.7 then enforces.
+**Task 1.7** — `buf breaking` against the previous release and the SPEC §8.4
+ownership check. `buf lint` already runs in CI, so 1.7 adds the other two.
 
-**An agent verifies this**: `buf lint` passes and `schema.pb` exists, both
-observable in CI with nothing running.
+**An agent verifies this**: a breaking change and a stray `dcs.bridge` message
+must each fail a CI run, both observable with nothing running.
 
 ## After that
 
-- **1.7** — `buf lint` and `buf breaking` in CI, plus the SPEC §8.4 ownership
-  check on `dcs.bridge`.
 - **2.1** — The host-native broker build a stock Lua 5.1 can load, so SPEC §17
   runs in CI with no DCS present.
+- **2.2** — `luaopen_dcsbridge`, loaded by explicit path, with rings, sockets
+  and the three registration maps process-global rather than per-state.
 
 ## Carries forward
 

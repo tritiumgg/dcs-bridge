@@ -16,8 +16,9 @@ docs/
   audit.md             what the documents disagree about, checked once
   conventions/         how to read them, and how to write a decision record
   decisions/           where the build goes somewhere the specifications did not
+proto/                 the record schema. buf.yaml configures the lint
 vendor/lua/lua.def     the import definition for DCS's Lua
-tools/                 ledger.sh, mkimplib.sh, statecheck.sh
+tools/                 ledger.sh, mkimplib.sh, mkschema.sh, statecheck.sh
 .github/workflows/     CI, release, version bump
 .claude/               the read guard
 ```
