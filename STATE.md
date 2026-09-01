@@ -1,6 +1,6 @@
 # Working state
 
-**Last updated:** 2026-09-01, before any code existed.
+**Last updated:** 2026-09-01, task 1.1 written and green on macOS.
 
 The handoff between sessions. Read it first; update it before a session ends,
 not only when a task finishes. Stamp the line above each time.
@@ -16,34 +16,36 @@ is just deleted. Write entries as one or two lines, never paragraphs.
 
 ## In progress
 
-Nothing. No project code exists yet.
+**Task 1.1.** Workspace written: `crates/{broker,cli,generator}`, root
+`Cargo.toml`, `rustfmt.toml`, workspace lints, README, `mise.toml` tasks. All
+of it is working tree only; nothing is committed. Nothing is knowingly broken.
 
-*One task at most. Say what is done, what is not, and where to resume. Say what
-is committed and what is only in the working tree. Say what is knowingly
-broken. Empty this when the task closes.*
+`mise run check` — fmt, clippy `-D warnings`, build, test — passes on macOS.
+**Only a maintainer can close this**, by reading the three-host CI matrix. An
+agent on one host cannot observe the Linux or Windows leg.
 
 ## Just finished
 
-- Repository set up: frozen documents and ledgers, ledger tooling, Windows
-  cross-build path, three CI workflows.
+- `rust-toolchain.toml` is the only file naming the Rust toolchain, and mise
+  reads it. `mise.toml` clears `RUSTUP_TOOLCHAIN` so the components and the
+  Windows target survive.
 
 *The last three at most, one line each. Git log holds the rest.*
 
 ## Next
 
-**Task 1.1** — Cargo workspace with three crates (module, CLI, generator), each
-a stub that builds. Licence, README, `rustfmt` and `clippy` configuration.
+**Task 1.2** — Actions gating a pull request on all three hosts. Mostly
+written; the task is making it pass, which also closes 1.1.
 
-Done when `cargo build` succeeds on Linux, macOS and Windows. Verified by a
-maintainer reading the three-host CI matrix, not by an agent on one host.
+Verified by a maintainer reading a pull request's checks. An agent can read the
+workflow but cannot run it.
 
 ## After that
 
-- **1.2** — Actions gating a pull request on all three hosts. Mostly written;
-  the task is making it pass.
 - **1.3** — The broker's `build.rs`, turning `vendor/lua/lua.def` into an
   import library. Commands are verified and written up in the README.
-- **1.4** — Windows cross-build through cargo-xwin. Needs the workspace.
+- **1.4** — Windows cross-build through cargo-xwin. The target arrives from
+  `rust-toolchain.toml`; `cargo check --target x86_64-pc-windows-msvc` passes.
 
 ## Carries forward
 
@@ -66,7 +68,5 @@ entries at most: an eleventh means something here is finished, or belongs in
 - **The broker builds twice.** A `cdylib` for `x86_64-pc-windows-msvc` linking
   the `.def`, and the same source host-native for task 2.1's tests. The
   host-native path must not touch the `.def`.
-- **Cargo may emit `lua_dcsbridge.dll`** where the plan names
-  `lua-dcsbridge.dll`. Both workflows rename. Settle which you want at 1.1.
 - **Task 7.10 does not exist.** Phase 7 runs 7.1 to 7.9 then 7.11, with no note
   explaining the gap. Retired ID or omission, unresolved.
