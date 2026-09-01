@@ -29,7 +29,15 @@ awk '
         total_bytes = 8192
     }
     { bytes += length($0) + 1; sub(/\r$/, "") }
-    /^\*\*Last updated:\*\*/ { stamped = 1 }
+    # The stamp is a date and nothing else. Left open it collects a status
+    # clause, which then says what "Just finished" already says two lines
+    # below and goes stale on the next change. Intervals such as {4} are not
+    # portable across awks, so the digits are spelled out.
+    /^\*\*Last updated:\*\*/ {
+        stamped = 1
+        if ($0 !~ /^\*\*Last updated:\*\* [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]$/)
+            malformed = $0
+    }
     /^## / {
         sec = $0; sub(/^## /, "", sec)
         if (!(sec in seen)) { seen[sec] = 1; order[++k] = sec }
@@ -47,7 +55,7 @@ awk '
             }
             over = (n[s] > budget[s])
             printf "%-18s %6d %8d%s\n", s, n[s], budget[s], (over ? "  OVER" : "")
-            if (over) bad = 1
+            if (over) { bad = 1; fat = 1 }
             got[s] = 1
         }
         for (s in budget)
@@ -56,12 +64,20 @@ awk '
         printf "\n%-18s %6d %8d%s\n", "whole file", NR, total_lines, (NR > total_lines ? "  OVER" : "")
         printf "%-18s %6d %8d%s\n", "bytes", bytes, total_bytes, (bytes > total_bytes ? "  OVER" : "")
         printf "%-18s %6d\n", "approx tokens", int(bytes / 4)
-        if (NR > total_lines || bytes > total_bytes) bad = 1
+        if (NR > total_lines || bytes > total_bytes) { bad = 1; fat = 1 }
 
         if (!stamped) { printf "\nno **Last updated:** line\n"; bad = 1 }
+        else if (malformed != "") {
+            printf "\nthe **Last updated:** line carries more than a date:\n\n"
+            printf "  %s\n\n", malformed
+            printf "It reads **Last updated:** YYYY-MM-DD and stops there.\n"
+            printf "What changed goes in the sections below.\n"
+            bad = 1
+        }
 
         if (bad) {
             printf "\nSTATE.md failed the check.\n"
+            if (!fat) exit 1
             printf "If a section is over budget, nothing is deleted. It moves:\n"
             printf "  a completion older than the last few  -> git log\n"
             printf "  a choice with reasoning behind it     -> docs/decisions/\n"
