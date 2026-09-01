@@ -1,6 +1,6 @@
 # Working state
 
-**Last updated:** 2026-09-01, task 1.1 written and green on macOS.
+**Last updated:** 2026-09-01, task 1.1 closed on the three-host matrix.
 
 The handoff between sessions. Read it first; update it before a session ends,
 not only when a task finishes. Stamp the line above each time.
@@ -16,36 +16,37 @@ is just deleted. Write entries as one or two lines, never paragraphs.
 
 ## In progress
 
-**Task 1.1.** Workspace written: `crates/{broker,cli,generator}`, root
-`Cargo.toml`, `rustfmt.toml`, workspace lints, README, `mise.toml` tasks. All
-of it is working tree only; nothing is committed. Nothing is knowingly broken.
+Nothing.
 
-`mise run check` — fmt, clippy `-D warnings`, build, test — passes on macOS.
-**Only a maintainer can close this**, by reading the three-host CI matrix. An
-agent on one host cannot observe the Linux or Windows leg.
+*One task at most. Say what is done, what is not, and where to resume. Say what
+is committed and what is only in the working tree. Say what is knowingly
+broken. Empty this when the task closes.*
 
 ## Just finished
 
+- **1.1** — Workspace of three stub crates. Green on all three hosts, CI run
+  33532382191 on `main`.
 - `rust-toolchain.toml` is the only file naming the Rust toolchain, and mise
-  reads it. `mise.toml` clears `RUSTUP_TOOLCHAIN` so the components and the
-  Windows target survive.
+  reads it, so the components and the Windows target survive.
 
 *The last three at most, one line each. Git log holds the rest.*
 
 ## Next
 
-**Task 1.2** — Actions gating a pull request on all three hosts. Mostly
-written; the task is making it pass, which also closes 1.1.
+**Task 1.2** — Actions gating a pull request on all three hosts. The workflow
+runs and passes; what is missing is the gate. A branch protection rule on
+`main` has to require Guards, Documents and the three host checks.
 
-Verified by a maintainer reading a pull request's checks. An agent can read the
-workflow but cannot run it.
+**Only the maintainer can do this and see it**, in repository settings. An
+agent can read the workflow but cannot set a protection rule.
 
 ## After that
 
 - **1.3** — The broker's `build.rs`, turning `vendor/lua/lua.def` into an
   import library. Commands are verified and written up in the README.
-- **1.4** — Windows cross-build through cargo-xwin. The target arrives from
-  `rust-toolchain.toml`; `cargo check --target x86_64-pc-windows-msvc` passes.
+- **1.4** — Cross-build already emits `lua-dcsbridge.dll` and `dcsb.exe` from
+  the Linux runner, but only because the broker links nothing yet. Reopens at
+  1.3. The `x86_64-pc-windows-gnu` fallback is still undocumented.
 
 ## Carries forward
 
