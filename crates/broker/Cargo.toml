@@ -1,0 +1,29 @@
+# Component 1 of SPEC 2: the broker, loaded into the DCS process as
+# Mods\services\DCSBridge\bin\lua-dcsbridge.dll.
+#
+# Cargo rejects a hyphen in a library target name, so the artifact is
+# lua_dcsbridge.dll and the CI and release workflows rename it on the way out.
+#
+# It builds twice from one source. The cdylib is what DCS loads, and it links
+# against DCS's Lua through vendor/lua/lua.def (task 1.3). The rlib is the
+# host-native build task 2.1's tests run against, and that path never touches
+# the .def.
+
+[package]
+name = "lua-dcsbridge"
+description = "The DCS-Bridge broker: rings, threads and the framed TCP transport."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lib]
+name = "lua_dcsbridge"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+
+[lints]
+workspace = true

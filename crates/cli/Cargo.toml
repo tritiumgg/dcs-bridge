@@ -1,0 +1,21 @@
+# SPEC 15: dcsb is one binary with nine verbs. It runs outside the DCS process
+# and links no part of the broker's FFI surface.
+
+[package]
+name = "dcsb"
+description = "The DCS-Bridge CLI: observe a running bridge and diagnose a broken one."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "dcsb"
+path = "src/main.rs"
+
+[dependencies]
+
+[lints]
+workspace = true
