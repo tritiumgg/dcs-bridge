@@ -112,10 +112,13 @@ jobs:
       - name: Format
         run: cargo fmt --all --check
 
-      # --no-default-features turns the broker's dcs-lua feature off, which is
-      # what a host-native build is: the same source without DCS's Lua. On a
-      # Windows runner the feature would otherwise link lua.dll into every test
-      # binary, and no runner has one to load. DR-0002.
+      # --no-default-features turns the Lua module's dcs-lua feature off, which
+      # is what a host-native build is: the same source without DCS's Lua. On a
+      # Windows runner the feature would otherwise link lua.dll into the
+      # module, and no runner has one to load. ADR 0002.
+      #
+      # On Linux and macOS this also lints and builds the module's Lua surface,
+      # which the Windows leg has cfg'd out. ADR 0006.
       - name: Clippy
         run: cargo clippy --workspace --all-targets --no-default-features
 
@@ -124,6 +127,29 @@ jobs:
 
       - name: Test
         run: cargo test --workspace --no-default-features
+
+      # SPEC 17's *Any (native module)* rows run against a host-native build
+      # opened by a stock Lua 5.1. Task 2.1 lands the load; each row arrives
+      # with the behaviour it describes.
+      #
+      # mise.toml already pins the interpreter, and it is the only source that
+      # covers both hosts: homebrew dropped lua@5.1, and apt reaches only the
+      # Linux leg. install: false keeps mise off the Rust toolchain, which
+      # rust-toolchain.toml and rustup handle above.
+      #
+      # Windows is excluded: a module there resolves no symbol at load, so this
+      # would need a fetched lua51.dll and a second .def for a configuration
+      # that never ships. ADR 0006.
+      - uses: jdx/mise-action@v2
+        if: matrix.os != 'windows-latest'
+        with:
+          install: false
+          cache: false
+      - name: The module opens under a stock Lua 5.1
+        if: matrix.os != 'windows-latest'
+        run: |
+          mise install lua
+          mise exec -- sh tools/luatest.sh
 
   # The product target is x86_64 Windows and it is cross-compiled, so no
   # contributor needs a Windows machine to produce a release artifact.

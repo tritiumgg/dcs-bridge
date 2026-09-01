@@ -6,9 +6,9 @@ commands. The bridge is comprised of three parts: a message broker that acts as
 the data transport, and two scripts that interact with DCS World inside and
 outside of the simulation.
 
-Release version 0.1.0. The three crates are stubs. Phase 1 of `docs/plan/plan.md`
-builds the release pipeline before any behaviour, so every later phase ships
-through a path already known to work.
+Release version 0.1.0. Phase 1 of `docs/plan/plan.md` built the release pipeline
+before any behaviour, so every later phase ships through a path already known to
+work. Phase 2 is building the broker; the CLI and the generator are still stubs.
 
 ## Components
 
@@ -23,15 +23,22 @@ Everything outside the Lua files is Rust. The broker uses no garbage collector
 and no language runtime, because a collector inside the DCS process can stop the
 logic thread and that stops the sim for every player at once.
 
-The workspace holds the three Rust crates:
+The workspace holds four Rust crates:
 
 | Crate | Package | Artifact |
 |---|---|---|
-| `crates/broker` | `lua-dcsbridge` | `lua_dcsbridge.dll`, renamed to `lua-dcsbridge.dll` |
+| `crates/broker` | `dcsbridge-broker` | rlib, linked into the module |
+| `crates/lua-module` | `lua-dcsbridge` | `lua_dcsbridge.dll`, renamed to `lua-dcsbridge.dll` |
 | `crates/cli` | `dcsb` | `dcsb.exe` |
 | `crates/generator` | `protoc-gen-dcsbridge-lua` | `protoc-gen-dcsbridge-lua.exe` |
 
-Cargo rejects a hyphen in a library target name, so the broker's library is
+The broker is split in two. `crates/broker` holds the rings, threads, framing
+and drop policy and names no Lua symbol, so it links into a test binary on any
+host. `crates/lua-module` holds `luaopen_dcsbridge` and every declaration that
+does name one, and it is a `cdylib` and nothing else, because a module leaves
+those symbols undefined and only a shared object may. ADR 0005.
+
+Cargo rejects a hyphen in a library target name, so the module's library is
 `lua_dcsbridge` and the CI and release workflows rename the file. `protoc`
 resolves a plugin by executable name, so the generator's binary name is fixed
 by that contract.
@@ -46,8 +53,8 @@ mise run check
 ```
 
 `check` runs what CI gates a pull request on: `cargo fmt --all --check`,
-`cargo clippy -D warnings`, `cargo build` and `cargo test`, against the host
-target. `mise tasks` lists the rest.
+`cargo clippy -D warnings`, `cargo build`, `cargo test` and the Lua load
+below, against the host target. `mise tasks` lists the rest.
 
 Rust is the one tool `mise.toml` does not name a version for. `rust-toolchain.toml`
 does, and mise reads it — `mise ls` shows rust sourced from that file, and
@@ -62,13 +69,31 @@ lets mise read the version from the file. Change the toolchain by editing
 `channel`, then `mise install`. Not with `mise use rust@<version>`: that writes
 a version into `[tools]` and mise stops reading the file.
 
+### The module under a stock Lua
+
+SPEC §17 marks about half its test rows *Any (native module)*: runnable against
+a host-native build of the broker opened by a stock Lua 5.1, with no DCS
+present. That is what makes the broker developable on any of the three build
+hosts.
+
+```sh
+mise run lua
+```
+
+It builds the module with `--no-default-features` and opens it with
+`package.loadlib`, the way SPEC §5.1.1 does inside DCS. The host-native build
+takes its Lua symbols from the interpreter that opens it rather than from a
+library, so nothing here needs a DCS install. ADR 0006 says how that resolves
+per host, and why the step runs on Linux and macOS but not on Windows, where a
+module resolves no symbol at load.
+
 ### Windows
 
 The product target is `x86_64` Windows for as long as DCS runs nowhere else,
 and it is cross-compiled, so no contributor needs a Windows machine to produce
 a release artifact. `x86_64-pc-windows-msvc` is the only Windows target, and
-`crates/broker/build.rs` refuses any other; ADR 0003 says why there is no second
-one.
+`crates/lua-module/build.rs` refuses any other; ADR 0003 says why there is no
+second one.
 
 ```sh
 cargo install --locked cargo-xwin      # once
@@ -77,12 +102,12 @@ mise run windows
 ```
 
 `vendor/lua/lua.def` pins the 114 Lua symbols the broker may link against.
-`crates/broker/build.rs` turns it into the import library the DLL links, and
+`crates/lua-module/build.rs` turns it into the import library the DLL links, and
 `tools/mkimplib.sh` does the same from a shell to report whether the machine you
 are on can do it at all. A full LLVM install is the one prerequisite; a rustup
 `llvm-tools` component ships neither `llvm-dlltool` nor `llvm-lib`.
 
-The broker builds twice from one source, and the `dcs-lua` feature is which one
+The module builds twice from one source, and the `dcs-lua` feature is which one
 you get. On, the `cdylib` binds DCS's Lua through the `.def` — that is the
 default, and it is what the cross-build and the release workflow take. Off, the
 host-native build the tests run against never touches the `.def`. `mise run

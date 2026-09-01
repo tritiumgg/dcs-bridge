@@ -1,4 +1,4 @@
-# Three crates: the broker, the CLI and the generator.
+# Four crates: the broker, its Lua entry point, the CLI and the generator.
 #
 # The version below is the release version, and it is the only version this
 # file holds. SPEC 13.3's six numbers live with the code that compares them,
@@ -6,7 +6,7 @@
 
 [workspace]
 resolver = "3"
-members = ["crates/broker", "crates/cli", "crates/generator"]
+members = ["crates/broker", "crates/cli", "crates/generator", "crates/lua-module"]
 
 [workspace.package]
 version = "0.1.0"

@@ -18,7 +18,7 @@ is just deleted. Write entries as one or two lines, never paragraphs.
 
 ## In progress
 
-Nothing. 1.7 is closed and Phase 1 with it; 2.1 is next.
+Nothing. 2.1 is closed; 2.2 is next.
 
 *One task at most. Say what is done, what is not, and where to resume. Say what
 is committed and what is only in the working tree. Say what is knowingly
@@ -26,25 +26,28 @@ broken. Empty this when the task closes.*
 
 ## Just finished
 
-- **1.6** — `proto/` compiles to `schema.pb` and the zip carries it, CI run
-  33545252753 on PR #5. ADR 0004 excepts one `buf lint` rule.
 - **1.7** — `tools/schema-breaking.sh` and `tools/schema-ownership.sh` gate the
   schema, CI run 33563001197 on PR #7. `UnitDestroyed` moved to `dcs.builtin`.
+- **2.1** — the broker splits in two and `mise run lua` opens the host-native
+  module under a stock Lua 5.1, PR #9. ADR 0005 and ADR 0006.
 
 *The last three at most, one line each. Git log holds the rest.*
 
 ## Next
 
-**Task 2.1** — The host-native broker build a stock Lua 5.1 can load, so SPEC
-§17 runs in CI with no DCS present.
+**Task 2.2** — `luaopen_dcsbridge` over process-global state: rings, sockets,
+threads and the three registration maps shared across both DCS states, and the
+cross-built DLL loaded by `package.loadlib` at an explicit path.
 
-**An agent verifies this**: a CI run loading the module under `lua5.1` on all
-three hosts settles it, with no DCS install anywhere in it.
+**Only somebody at a live install can see this.** The load banner in `dcs.log`
+and two tables over one set of maps both need DCS running. An agent reaches as
+far as two opens in one process returning distinct tables over shared state,
+which `tests/lua/load.lua` already asks for.
 
 ## After that
 
-- **2.2** — `luaopen_dcsbridge`, loaded by explicit path, with rings, sockets
-  and the three registration maps process-global rather than per-state.
+- **2.3** — SPSC ring buffer, fixed size, drop-oldest with a counter. It lands
+  in `crates/broker`, which is where everything testable goes now.
 - **Phase 3** opens on `protoc-gen-dcsbridge-lua`, which reads the four message
   options this schema defines and splits its output by `Target`.
 
@@ -74,5 +77,10 @@ entries at most: an eleventh means something here is finished, or belongs in
 - **Ring sizes are provisional until task 9.7.** Tasks 2.15 and 2.18 pick
   values; PROBE-7 measures them seven phases later, so 2.18's done-when reopens
   at 9.7. Record the provisional reserve here when chosen.
+- **SPEC §17's *Any (native module)* rows land with their behaviour.** Task 2.1
+  built the carrier, `mise run lua`, and closed on that. Each row is owed by
+  the task implementing what it describes: capability at 2.14, late join at
+  2.17, topic filter at 2.20. The plan's 2.1 done-when reads as though all
+  seventeen run at 2.1, which none of them can.
 - **Task 7.10 does not exist.** Phase 7 runs 7.1 to 7.9 then 7.11, with no note
   explaining the gap. Retired ID or omission, unresolved.
