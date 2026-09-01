@@ -1,6 +1,6 @@
 # Working state
 
-**Last updated:** 2026-09-01, task 1.2's gate blocked, task 1.3 started.
+**Last updated:** 2026-09-01, task 1.3 closed on the import library.
 
 The handoff between sessions. Read it first; update it before a session ends,
 not only when a task finishes. Stamp the line above each time.
@@ -16,11 +16,7 @@ is just deleted. Write entries as one or two lines, never paragraphs.
 
 ## In progress
 
-**1.3** — `crates/broker/build.rs` generates the import library from
-`vendor/lua/lua.def`, and the stub calls `lua_gettop` through it. The `dcs-lua`
-feature keeps that off the host-native build; DR-0002. Host-native is green
-here and the msvc link is unverified: this machine has neither LLVM nor
-cargo-xwin, so CI's cross-build is the observer. Resume by reading it.
+Nothing. PR #1 carries 1.3 and is green but unmerged.
 
 *One task at most. Say what is done, what is not, and where to resume. Say what
 is committed and what is only in the working tree. Say what is knowingly
@@ -28,27 +24,26 @@ broken. Empty this when the task closes.*
 
 ## Just finished
 
-- **1.1** — Workspace of three stub crates. Green on all three hosts, CI run
-  33532382191 on `main`.
-- **1.2** — CI runs fmt, clippy, build and test on all three hosts and passes,
-  run 33533254306. The gate half is blocked; see the carry-forward.
+- **1.2** — CI is green on all three hosts. The gate half is blocked, see the
+  carry-forward.
+- **1.3** — The cross-built DLL imports `lua.dll`, CI run 33534747477 on PR #1.
+  DR-0002 settles the broker's two builds.
 
 *The last three at most, one line each. Git log holds the rest.*
 
 ## Next
 
-**Task 1.3** — The broker's `build.rs` turns `vendor/lua/lua.def` into an import
-library at build time, so the stub links against DCS's Lua from a host with no
-DCS installed. SPEC §5.1.1. Commands written up in the README.
+**Task 1.4** — Only the `x86_64-pc-windows-gnu` fallback is left. It is
+undocumented and never built, and `build.rs` refuses that target with a message
+pointing at this task. Document it, or drop it from the plan.
 
-**An agent verifies this**: the msvc cross-build links here and in CI, and the
-host-native build must not touch the `.def`.
+**An agent verifies this**: a gnu cross-build from this checkout, or CI.
 
 ## After that
 
-- **1.4** — Cross-build already emits `lua-dcsbridge.dll` and `dcsb.exe` from
-  the Linux runner, but only because the broker links nothing yet. Reopens at
-  1.3. The `x86_64-pc-windows-gnu` fallback is still undocumented.
+- **1.5** — Release workflow. A tag produces a downloadable build with no
+  manual step, and only the maintainer tags.
+- **1.6** — The `.proto` and `schema.pb` under `buf`, for Phase 2 to serve.
 
 ## Carries forward
 
@@ -73,8 +68,5 @@ entries at most: an eleventh means something here is finished, or belongs in
 - **Ring sizes are provisional until task 9.7.** Tasks 2.15 and 2.18 pick
   values; PROBE-7 measures them seven phases later, so 2.18's done-when reopens
   at 9.7. Record the provisional reserve here when chosen.
-- **The broker builds twice.** A `cdylib` for `x86_64-pc-windows-msvc` linking
-  the `.def`, and the same source host-native for task 2.1's tests. The
-  host-native path must not touch the `.def`.
 - **Task 7.10 does not exist.** Phase 7 runs 7.1 to 7.9 then 7.11, with no note
   explaining the gap. Retired ID or omission, unresolved.
