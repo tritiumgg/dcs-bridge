@@ -53,9 +53,11 @@ run = [
 ]
 
 [tasks.schema]
-description = "Lint the .proto tree and compile target/schema.pb"
+description = "Check the .proto tree and compile target/schema.pb"
 run = [
   "buf lint",
+  "sh tools/schema-ownership.sh",
+  "sh tools/schema-breaking.sh",
   "sh tools/mkschema.sh",
 ]
 
