@@ -5,6 +5,7 @@
 //! into a Lua state, and holds every declaration that needs a Lua symbol.
 //! ADR 0005.
 
+pub mod fanout;
 pub mod ring;
 pub mod state;
 mod sync;

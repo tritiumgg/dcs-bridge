@@ -1,4 +1,5 @@
-//! The atomics and the cell the rings are built from, or Loom's models of them.
+//! The atomics, the cell, the channel and the thread the rings and the writer
+//! thread are built from, or Loom's models of them.
 //!
 //! A test on the three CI hosts cannot establish that a lock-free structure is
 //! correct. Two of the three are x86-64, where a missing acquire-release pair is
@@ -22,13 +23,17 @@
 //! Building with Loom is `RUSTFLAGS="--cfg loom"`, which `mise run loom` sets.
 
 #[cfg(loom)]
-pub use loom::sync::Arc;
+pub use loom::sync::atomic::{AtomicBool, AtomicU64, Ordering, fence};
 #[cfg(loom)]
-pub use loom::sync::atomic::{AtomicU64, Ordering};
+pub use loom::sync::{Arc, mpsc};
+#[cfg(loom)]
+pub use loom::thread;
 #[cfg(not(loom))]
-pub use std::sync::Arc;
+pub use std::sync::atomic::{AtomicBool, AtomicU64, Ordering, fence};
 #[cfg(not(loom))]
-pub use std::sync::atomic::{AtomicU64, Ordering};
+pub use std::sync::{Arc, mpsc};
+#[cfg(not(loom))]
+pub use std::thread;
 
 #[cfg(loom)]
 pub use loom::cell::UnsafeCell;
