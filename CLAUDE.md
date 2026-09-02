@@ -211,9 +211,9 @@ would commit under: `fix/`, `docs/`, `build/`.
 changed lines, split it into stacked branches — `task/2.1-1-crate-split`, then
 `task/2.1-2-lua-surface` — landing ff-only in order. The plan names them and
 what each is reviewable against, because that is the last moment the boundaries
-are free to move. A preparatory refactor always
-takes its own, claiming no change in behavior: sharing a diff with the feature
-hides which lines moved among the lines that changed.
+are free to move. A preparatory refactor always takes its own, claiming no
+change in behavior: sharing a diff with the feature hides which lines moved
+among the lines that changed.
 
 **History is linear. Rebase, never merge-commit.** Bring a branch up to date
 with `git rebase origin/main`; the maintainer lands it with `git merge
