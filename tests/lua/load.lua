@@ -55,13 +55,24 @@ assert(
   'version reads ' .. tostring(shim.version) .. ', expected ' .. expected
 )
 
+assert(shim.opens == 1, 'the first open reads ' .. tostring(shim.opens))
+
 -- If both DCS states load the broker, luaopen_* runs twice and each state gets
--- its own Lua table (SPEC 5.1.1). Two opens here stand in for that. Making
--- what sits behind them process-global is task 2.2.
+-- its own Lua table over one bridge. Two opens here stand in for that, and this
+-- interpreter is one process the way DCS is one process.
+--
+-- Two distinct tables is half of it. The other half is that they read one
+-- counter: a second table reading 1 would mean the second open got its own
+-- bridge, which is the failure the process-global rule exists to prevent.
 local second = (open(path))()
 assert(second ~= shim, 'a second open returned the same table')
 assert(second.version == expected, 'the second open carries no version')
+assert(
+  second.opens == 2,
+  'the second open reads ' .. tostring(second.opens) .. ', so it did not share'
+)
 
 print('ok  opened ' .. path)
 print('ok  ' .. symbol .. ' returns a table, version ' .. shim.version)
 print('ok  a second open returns a distinct table')
+print('ok  both tables read one bridge, opens 1 then 2')
