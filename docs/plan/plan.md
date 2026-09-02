@@ -104,6 +104,17 @@ Neither the merge rules nor any allocation belongs to 2.2. Registration
 semantics are 2.16, the rings and the listener are allocated at the first
 `shim.configure` at 2.15, and the load banner is 4.1's.
 
+**Task 2.3 lands as a sequence of two**, for the same reason:
+
+| Branch | What it holds | Reviewable against |
+|---|---|---|
+| `task/2.3-1-ring` | The ring: fixed size, one producer, one consumer, drop-oldest with a counter, and the per-slot stamp that lets the producer evict a record its consumer may be reading. Single-threaded tests, and the record that argues the departure. | The done-when — a unit test fills, drains and overflows it — and ADR 0008 |
+| `task/2.3-2-ring-verification` | A two-thread accounting test, Loom over a shrunk model behind a `cfg` shim, and the CI jobs that run Loom and Miri. No change in behavior. | No schedule loses, duplicates, reorders or double-drops a record |
+
+The class-aware drop rule is not 2.3's. Evicting the oldest non-`LIFECYCLE`
+record and the `ring_out_lifecycle_reserve` watermark are both 2.18, and the
+sizes come from config at 2.15.
+
 ### Phase 3 — Generator
 
 | ID | Task | Done when |
