@@ -1,12 +1,12 @@
 -- The module opens under a stock Lua 5.1.
 --
--- SPEC 17's *Any (native module)* rows run against a host-native build of the
--- broker loaded by a stock Lua 5.1, which is what lets them run in CI with no
--- DCS present. This is that load, spelled the way SPEC 5.1.1 spells it inside
--- DCS: package.loadlib against an explicit path, never require.
+-- The broker touches nothing DCS-specific, so a host-native build of the
+-- module loaded by a stock Lua 5.1 puts its behaviour within reach of CI. This
+-- is that load, spelled the way DCS spells it: package.loadlib against an
+-- explicit path, never require.
 --
--- SPEC 17 also says a clean harness run that exercised nothing is a failure
--- rather than a pass, so every check below reads a value.
+-- A clean harness run that exercised nothing is a failure rather than a pass,
+-- so every check below reads a value.
 --
 -- Run it through tools/luatest.sh, which builds the module and finds it.
 
@@ -31,7 +31,7 @@ assert(loadlib == nil, 'the Lua 5.0 loadlib global is present')
 -- bare name, and dlopen adds the underscore itself.
 --
 -- DCS is a dlopen-equivalent load on Windows and takes the bare name, which is
--- what SPEC 5.1.1 writes. So try that first and let the underscore be the
+-- the spelling that ships. So try that first and let the underscore be the
 -- fallback: wherever the bare name works, the harness has exercised the
 -- spelling DCS uses.
 local function open(module)

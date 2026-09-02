@@ -2,7 +2,7 @@
 # Compile the .proto tree into the FileDescriptorSet the bridge deploys.
 #
 # The hook driver reads Mods\services\DCSBridge\schema.pb at DCS start and
-# hands the bytes to the broker once (SPEC 5.1). The broker hashes them and
+# hands the bytes to the broker once. The broker hashes them and
 # serves them back through GetSchema, and a consumer compares that hash against
 # the one the handshake carries. The output is a wire artifact: two runs over
 # the same tree must produce the same bytes, or the comparison reports a
@@ -15,7 +15,7 @@
 # set, so a buf release that touches it changes the hash without a line of this
 # project changing. Expect a hash move on a buf bump and nowhere else.
 #
-# Source info stays in. It is the comments, and SPEC 8.2 puts a contract in
+# Source info stays in. It is the comments, and there is a contract in
 # them: every position field states +x north, +z east, +y up, and every
 # heading field states grid, true or magnetic. A consumer reads those to
 # interpret the numbers, so --exclude-source-info would strip the artifact of

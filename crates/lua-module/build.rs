@@ -1,8 +1,8 @@
 //! How the module's Lua symbols get resolved, which differs per host.
 //!
-//! SPEC 5.1.1: *Bind to it through an import library generated from a
-//! checked-in `.def` naming `lua.dll`, which needs no DCS install at build
-//! time and pins exactly which Lua symbols the broker depends on.*
+//! The module binds DCS's Lua through an import library generated from a
+//! checked-in `.def` naming `lua.dll`. That needs no DCS install at build time
+//! and pins exactly which Lua symbols the broker may depend on.
 //!
 //! On Windows that import library is the whole story, and the `dcs-lua`
 //! feature decides whether it is built. Everywhere else the symbols are left
@@ -97,7 +97,7 @@ fn symbols(def: &Path) -> Vec<String> {
 
     assert!(
         !names.is_empty(),
-        "{} lists no symbols. SPEC 5.1.1 pins the 114 the broker may name.",
+        "{} lists no symbols. It is what pins the ones the broker may name.",
         def.display()
     );
 
@@ -234,7 +234,7 @@ fn names_lua_dll(out: &Path) {
             .windows(name.len())
             .any(|w| w.eq_ignore_ascii_case(name)),
         "{} does not name lua.dll. Check the LIBRARY line in vendor/lua/lua.def: \
-         DCS ships its Lua as bin\\lua.dll, not lua51.dll. SPEC 5.1.1.",
+         DCS ships its Lua as bin\\lua.dll, not lua51.dll.",
         out.display()
     );
 }

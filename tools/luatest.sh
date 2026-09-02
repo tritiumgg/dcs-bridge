@@ -1,10 +1,10 @@
 #!/bin/sh
 # Build the host-native module and open it with a stock Lua 5.1.
 #
-# SPEC 17's Host column marks about half the test rows *Any (native module)*:
-# runnable against a host-native build of the broker loaded by a stock Lua 5.1,
-# with no DCS present. This is what carries them. Task 2.1 lands the load
-# itself; each row arrives with the behaviour it describes.
+# The broker touches nothing DCS-specific, so about half of what it has to be
+# tested for is checkable off-platform: build it host-native, open it with a
+# stock Lua 5.1, and no DCS is needed. This is what carries those checks, and
+# each one arrives with the behaviour it covers.
 #
 # --no-default-features turns the dcs-lua feature off, which is what the
 # host-native build is. Left on, the module would try to link DCS's lua.dll,
@@ -39,7 +39,7 @@ case "$("$LUA" -v 2>&1)" in
     *"Lua 5.1"*) ;;
     *)
         printf '%s is not Lua 5.1: %s\n' "$LUA" "$("$LUA" -v 2>&1)" >&2
-        printf 'SPEC 5.1.1 binds the stock 5.1 API and DCS ships 5.1.\n' >&2
+        printf 'The module binds the stock 5.1 API and DCS ships 5.1.\n' >&2
         exit 2
         ;;
 esac

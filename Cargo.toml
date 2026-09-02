@@ -1,8 +1,10 @@
 # Four crates: the broker, its Lua entry point, the CLI and the generator.
 #
 # The version below is the release version, and it is the only version this
-# file holds. SPEC 13.3's six numbers live with the code that compares them,
-# and .github/workflows/version-bump.yml fails if a bump reaches any of them.
+# file holds. The bridge carries five others — the protocol, the interface, the
+# grammar, the state and the schema hash — and each lives with the code that
+# compares it, because none of them moves when a release is cut.
+# .github/workflows/version-bump.yml fails if a bump reaches any of them.
 
 [workspace]
 resolver = "3"
@@ -16,10 +18,10 @@ license = "MIT"
 repository = "https://github.com/tritiumgg/dcs-bridge"
 authors = ["tritiumgg"]
 
-# SPEC 14.2: a parser fault must drop one connection rather than the process,
-# so the broker unwinds. Stated here because this is the profile somebody would
-# set to abort instead. The CI `guards` job greps every Cargo.toml for that
-# setting and fails the build, so do not name it in a comment either.
+# A parser fault must drop one connection rather than the process, so the
+# broker unwinds. Stated here because this is the profile somebody would set to
+# abort instead. The CI `guards` job greps every Cargo.toml for that setting
+# and fails the build, so do not name it in a comment either.
 [profile.release]
 panic = "unwind"
 

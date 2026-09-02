@@ -1,6 +1,7 @@
 //! `luaopen_dcsbridge`, and the Lua declarations behind it.
 //!
-//! SPEC 5.1.1 loads the broker by explicit path rather than through `require`:
+//! DCS loads the broker by explicit path rather than through `require`,
+//! because `package.cpath` is not set in the hook state:
 //!
 //! ```lua
 //! local path   = lfs.writedir() .. 'Mods/services/DCSBridge/bin/lua-dcsbridge.dll'
@@ -9,8 +10,8 @@
 //! ```
 //!
 //! The same call opens the host-native `.so` or `.dylib` a stock Lua 5.1
-//! builds against, which is what lets SPEC 17's *Any (native module)* rows run
-//! with no DCS present.
+//! builds against, which is what lets the broker's behaviour be tested with no
+//! DCS present.
 //!
 //! This crate holds the whole Lua surface and no broker logic. The rings,
 //! threads and framing live in `dcsbridge-broker`, which names no Lua symbol

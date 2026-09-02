@@ -60,7 +60,7 @@ printf 'wrote %s (%s bytes) using %s\n' "${OUT#"$ROOT"/}" "$(wc -c < "$OUT" | tr
 
 # The library is useless if it names the wrong DLL, so say which one it names.
 if strings "$OUT" 2>/dev/null | grep -q '^lua\.dll$'; then
-    printf 'links against lua.dll, as SPEC 5.1.1 requires\n'
+    printf 'links against lua.dll, which is the one DCS ships\n'
 else
     printf 'WARNING: the output does not name lua.dll. Check the LIBRARY line in %s\n' "$DEF" >&2
     exit 1
