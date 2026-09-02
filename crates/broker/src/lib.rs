@@ -5,6 +5,10 @@
 //! into a Lua state, and holds every declaration that needs a Lua symbol.
 //! ADR 0005.
 
+pub mod state;
+
+pub use state::bridge;
+
 /// The broker build, carried in the handshake for bug reports.
 ///
 /// SPEC 13.3 compares nothing against it.

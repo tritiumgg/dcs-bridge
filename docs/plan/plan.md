@@ -91,6 +91,19 @@ states which hosts build what.
 | 2.C5 | CLI `record` and `replay`. | A captured session replays to a consumer with no DCS running. |
 | 2.C6 | CLI `mock` — synthetic traffic at a configurable rate. | A consumer can be written before any capture exists, and 9.8 has its load generator. |
 
+**Task 2.2 lands as a sequence of three**, named here because this is the last
+moment the boundaries are free to move:
+
+| Branch | What it holds | Reviewable against |
+|---|---|---|
+| `task/2.2-1-process-global-state` | The process-global owner in `crates/broker`: three empty registration maps, unallocated slots for the rings, the listener and the threads, and the record deciding what a second open does. No FFI. | SPEC §5.1.1's process-global paragraph, and SPEC §5.1's "`configure` comes first" |
+| `task/2.2-2-lua-surface` | `luaopen_dcsbridge` over that owner, each call returning its own table. | SPEC §5.1.1's load recipe, ADR 0006 |
+| `task/2.2-3-load-test` | Two opens in one process read one counter through two tables; the staged DLL is checked for the export `package.loadlib` asks for. | SPEC §17's rule that a harness run exercising nothing is a failure |
+
+Neither the merge rules nor any allocation belongs to 2.2. Registration
+semantics are 2.16, the rings and the listener are allocated at the first
+`shim.configure` at 2.15, and the load banner is 4.1's.
+
 ### Phase 3 — Generator
 
 | ID | Task | Done when |
