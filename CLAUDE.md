@@ -91,6 +91,16 @@ A dated document may name a task, because it says what was true on its date and
 that stays true. A decision record and a commit message are both dated, and a
 task branch is named for its task already.
 
+**A specification citation never appears in the code either.** A comment, a doc
+comment or an error message says why the code is the way it is, in its own
+words. `SPEC §5.1.1` sends the reader to a document the build is drifting away
+from, to find a reason that would have fitted in the comment. Where the
+argument is too long for one, cite the decision record holding it.
+
+`tools/nospecrefs.sh` enforces that and the CI `Guards` job runs it. Everything
+under `docs/`, plus this file, `README.md` and `STATE.md`, is exempt, because
+documents cite documents.
+
 ## Never read a specification whole
 
 The ledger beside each document holds a row per claim with an anchor that

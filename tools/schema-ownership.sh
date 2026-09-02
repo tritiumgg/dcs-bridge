@@ -1,28 +1,27 @@
 #!/bin/sh
-# SPEC 8.4's ownership check: only the bridge's own records may live in the
-# dcs.bridge package.
+# The ownership check: only the bridge's own records may live in the dcs.bridge
+# package.
 #
-# A topic id is its payload's fully-qualified type name (SPEC 5.2), so the
-# package name partitions the topic space and nothing else has to. SPEC 8.2
-# assigns the bridge's own records to dcs.bridge, both built-in sets' to
-# dcs.builtin, and an adopter's to a package they own. This script polices the
-# first of those three, which is the only one this repository can police.
+# A topic id is its payload's fully-qualified type name, so the package name
+# partitions the topic space and nothing else has to. The bridge's own records
+# go in dcs.bridge, both built-in sets' in dcs.builtin, and an adopter's in a
+# package they own. This script polices the first of those three, which is the
+# only one this repository can police.
 #
-# SPEC 8.4 defines the permitted set as the records SPEC 1.2 enumerates -- from
-# SPEC 5.2 (broker-answered), SPEC 9 (lifecycle), SPEC 9.5 (the bridge's own
-# commands), SPEC 7.6 (the operator-eval audit record) and SPEC 8.5.3 (the
-# acknowledgement record) -- together with the nested types those records
-# carry. It is a naming check rather than a numbering one, because the Envelope
-# names no payload type and so no shared file exists for two owners to contend
-# over.
+# The permitted set is the bridge's own records -- the ones the broker answers
+# itself, the lifecycle topics, the bridge's own commands, the operator-eval
+# audit record and the acknowledgement record -- together with the nested types
+# those records carry. It is a naming check rather than a numbering one,
+# because the Envelope names no payload type and so no shared file exists for
+# two owners to contend over.
 #
 # The list below is that set, and it is the whole of it. Adding a name is a
-# change to what the bridge owns, so it needs a SPEC section beside it. A
-# message the specification does not put in dcs.bridge belongs in another
-# package instead.
+# change to what the bridge owns, so it does not happen because a record was
+# convenient to put here. A record the bridge does not own belongs in another
+# package.
 #
 # Only top-level messages are checked. A message nested inside a permitted
-# record is a nested type that record carries, which SPEC 8.4 permits by name.
+# record is a nested type that record carries, and is permitted with it.
 #
 # POSIX sh and awk only. Needs no buf: the check reads the .proto sources, so
 # it runs on a checkout with no toolchain.
@@ -37,7 +36,7 @@ PACKAGE=dcs.bridge
 # One name per line. A leading # is a comment and blank lines are skipped.
 owned() {
     cat <<'EOF'
-# SPEC 5.2 -- the frame, and the five request/reply pairs the broker answers
+# The frame, and the request and reply pairs the broker answers itself
 Envelope
 Ping
 Pong
@@ -52,7 +51,7 @@ SetTopicFilter
 TopicFilterResult
 Rejected
 
-# SPEC 9 -- the thirteen lifecycle topics
+# The lifecycle topics
 MissionLoadBegan
 MissionLoaded
 MissionStopped
@@ -67,23 +66,23 @@ CallbackHz
 SimDriverLoaded
 SimDriverReloaded
 
-# SPEC 6.3 -- what CoordinateCalibration carries. SPEC 8.4 names these three
-# because no enumeration of records covers them.
+# What CoordinateCalibration carries. These three are named separately because
+# they are not records in their own right.
 MissionDate
 Projection
 Verification
 
-# SPEC 9.5 -- the bridge's own commands
+# The bridge's own commands
 Resync
 SeqAck
 ReloadSimDriver
 SetEnabled
 ReloadConfig
 
-# SPEC 7.6 -- the operator-eval audit record
+# The operator-eval audit record
 EvalExecuted
 
-# SPEC 8.5.3 -- the acknowledgement record
+# The acknowledgement record
 CommandAck
 EOF
 }
@@ -135,19 +134,17 @@ STRAY=$(declared $FILES | awk -v allowed="$ALLOWED" '
 COUNT=$(printf '%s' "$FILES" | grep -c . || true)
 
 if [ -n "$STRAY" ]; then
-    printf 'SPEC 8.4: the %s package holds a message the bridge does not own.\n\n' \
+    printf 'the %s package holds a message the bridge does not own.\n\n' \
         "$PACKAGE" >&2
     printf '%s\n' "$STRAY" | while IFS='	' read -r name where; do
         printf '  %s\t%s\n' "$name" "${where#"$ROOT"/}" >&2
     done
     printf '\n' >&2
-    printf 'Only the records SPEC 1.2 enumerates may live in %s. A built-in\n' \
+    printf 'Only the bridge'"'"'s own records may live in %s. A built-in set'"'"'s\n' \
         "$PACKAGE" >&2
-    printf 'set'"'"'s record belongs in dcs.builtin and an adopter'"'"'s in a package\n' >&2
-    printf 'they own (SPEC 8.2). If the specification does put this record in\n' >&2
-    printf '%s, add it to the list in %s with its\n' \
-        "$PACKAGE" "tools/schema-ownership.sh" >&2
-    printf 'SPEC section beside it.\n' >&2
+    printf 'record belongs in dcs.builtin and an adopter'"'"'s in a package they own.\n' >&2
+    printf 'If the bridge really does own this record, add it to the list in %s.\n' \
+        "tools/schema-ownership.sh" >&2
     exit 1
 fi
 

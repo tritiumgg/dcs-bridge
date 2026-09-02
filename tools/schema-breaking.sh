@@ -1,11 +1,11 @@
 #!/bin/sh
-# SPEC 8.4's compatibility check: compare the .proto tree against the previous
-# release and refuse a change that breaks a consumer already deployed.
+# Compare the .proto tree against the previous release and refuse a change
+# that breaks a consumer already deployed.
 #
 # Field numbers are permanent and a removed one is reserved rather than reused.
 # The schema hash a consumer compares across the handshake reports a mismatch
-# only as a warning (SPEC 5.2), so nothing at run time refuses an incompatible
-# build. This is where that is caught.
+# only as a warning, so nothing at run time refuses an incompatible build.
+# This is where that is caught.
 #
 # The comparison is against the newest release tag rather than against main.
 # A release is what a consumer has, and two changes that are each compatible
@@ -21,7 +21,7 @@
 #
 # buf.yaml sets no breaking rules, so this runs buf's default FILE category.
 # It is the strictest, and it catches the move that matters most here: a topic
-# id is <package>.<Message> (SPEC 5.2), so renaming a message or moving it to
+# id is <package>.<Message>, so renaming a message or moving it to
 # another package breaks every consumer subscribed to it while leaving the wire
 # bytes compatible.
 #

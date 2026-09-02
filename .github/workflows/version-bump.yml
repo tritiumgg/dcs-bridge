@@ -1,14 +1,13 @@
 # Bump the release version.
 #
-# No plan task creates this. PLAN §4 asks only that the README state the
-# versioning policy, and SPEC §13.3 holds the numbers themselves. Treat this
-# workflow as a convenience that arrived early rather than as scheduled work.
+# No plan task creates this. Treat it as a convenience that arrived early
+# rather than as scheduled work.
 #
-# SPEC §13.3 defines six version numbers. Four of them — protocol, interface,
-# GRAMMAR_VERSION and STATE_VERSION — carry their own bump rules, and the
-# section states that none of the four moves for a reason outside its own row.
-# Section 6.9 depends on that: a grammar change that also bumped STATE_VERSION
-# would drop every subscription and spot on a running server for nothing.
+# The bridge carries six version numbers. Four of them — protocol, interface,
+# GRAMMAR_VERSION and STATE_VERSION — carry their own bump rules, and none of
+# the four moves for a reason outside its own. A sim driver reload depends on
+# that: a grammar change that also bumped STATE_VERSION would drop every
+# subscription and spot on a running server for nothing.
 #
 # So this workflow touches the release version and nothing else, and the guard
 # step below fails if the diff reaches any of the four. Bump those by hand,
@@ -90,7 +89,7 @@ jobs:
           rustup show
           cargo update --workspace
 
-      # PLAN §4: the README states the release version and nothing else.
+      # The README states the release version and nothing else.
       - name: Update the stated release version
         run: |
           set -eu
@@ -123,8 +122,8 @@ jobs:
           done
           if [ "$bad" = 1 ]; then
             echo
-            echo 'SPEC 13.3: none of the four compared versions moves for a'
-            echo 'reason outside its own row. Bump them by hand.'
+            echo 'None of the four compared versions moves for a reason'
+            echo 'outside its own. Bump them by hand.'
             exit 1
           fi
           echo 'the diff touches the release version only'
@@ -143,7 +142,7 @@ jobs:
           git commit -m "chore(release): bump version to $new"
           git push -u origin "$branch"
           cat > /tmp/pr-body.md <<BODY
-          Release version only. SPEC 13.3's four compared versions are untouched.
+          Release version only. The four compared versions are untouched.
 
           Merge, then tag \`v$new\` to publish. A hyphenated tag such as
           \`v$new-rc1\` publishes as a prerelease.

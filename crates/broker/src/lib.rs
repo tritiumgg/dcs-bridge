@@ -11,7 +11,8 @@ pub use state::bridge;
 
 /// The broker build, carried in the handshake for bug reports.
 ///
-/// SPEC 13.3 compares nothing against it.
+/// Nothing compares against it. Compatibility is decided by the protocol and
+/// interface versions, which move for their own reasons.
 pub const BROKER_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 #[cfg(test)]

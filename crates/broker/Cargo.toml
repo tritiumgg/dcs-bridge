@@ -1,9 +1,9 @@
-# Component 1 of SPEC 2: the broker. Rings, threads, framing and the drop
-# policy live here, and none of it touches DCS or Lua.
+# The broker, the first of the bridge's three components. Rings, threads,
+# framing and the drop policy live here, and none of it touches DCS or Lua.
 #
-# A plain rlib with no FFI, which is what lets SPEC 17's *Any (native module)*
-# rows run anywhere: the crate links into a test binary on any host with no
-# undefined symbols to resolve. The Lua entry point that carries this code into
+# A plain rlib with no FFI, which is what lets the broker's behaviour be tested
+# on a machine with no DCS: the crate links into a test binary on any host with
+# no undefined symbols to resolve. The Lua entry point that carries this code into
 # a Lua state is crates/lua-module, and it is a cdylib so that nothing links it
 # into an executable. ADR 0005.
 

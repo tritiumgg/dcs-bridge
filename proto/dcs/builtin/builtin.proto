@@ -4,13 +4,13 @@ package dcs.builtin;
 
 import "dcs/bridge/bridge.proto";
 
-// The built-in sets' records. SPEC 8.2 partitions the topic space by package
-// name: the bridge's own records live in dcs.bridge, both built-in sets' here,
-// and an adopter's in a package they own. A topic id is its payload's
+// The built-in sets' records. Package names partition the topic space: the
+// bridge's own records live in dcs.bridge, both built-in sets' here, and an
+// adopter's in a package they own. A topic id is its payload's
 // fully-qualified type name, so the package is the partition.
 //
-// SPEC 8.4 polices the other side of that line. Only the SPEC 1.2 records may
-// live in dcs.bridge, and tools/schema-ownership.sh enforces it.
+// tools/schema-ownership.sh polices the other side of that line, keeping
+// anything but the bridge's own records out of dcs.bridge.
 
 // A unit left the mission. The first record, and the shape every other one
 // follows.

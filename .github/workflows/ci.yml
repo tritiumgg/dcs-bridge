@@ -45,24 +45,24 @@ jobs:
           sudo apt-get install -y --no-install-recommends llvm
           sh tools/mkimplib.sh
 
-      # SPEC 8.2 names buf lint as what enforces snake_case fields, the
-      # enum-name value prefix and the _UNSPECIFIED zero value. ADR 0004 says
-      # why one standard rule is excepted.
+      # buf lint is what enforces snake_case fields, the enum-name value
+      # prefix and the _UNSPECIFIED zero value. ADR 0004 says why one standard
+      # rule is excepted.
       - uses: ./.github/actions/buf
       - name: The schema lints
         run: buf lint
 
-      # SPEC 8.4's two remaining schema gates. Ownership is a naming check over
-      # the sources and needs no buf; the comparison reads the newest release
-      # tag's tree out of git.
+      # The two remaining schema gates. Ownership is a naming check over the
+      # sources and needs no buf; the comparison reads the newest release tag's
+      # tree out of git.
       - name: The bridge owns what dcs.bridge holds
         run: sh tools/schema-ownership.sh
       - name: The schema breaks no consumer built against the last release
         run: sh tools/schema-breaking.sh
 
-  # SPEC 14.2: a fault must drop one connection, not the process. In Rust that
-  # means the broker is never built with panic = "abort". A workspace profile
-  # setting would apply to it silently, so fail the build instead.
+  # A fault must drop one connection, not the process. In Rust that means the
+  # broker is never built with panic = "abort". A workspace profile setting
+  # would apply to it silently, so fail the build instead.
   #
   # The grep reaches comments too, so a Cargo.toml explains that setting
   # without naming it.
@@ -75,11 +75,17 @@ jobs:
         run: |
           if grep -rn 'panic[[:space:]]*=[[:space:]]*"abort"' --include='Cargo.toml' . ; then
             echo
-            echo 'SPEC 14.2 forbids building the broker with panic = "abort".'
+            echo 'The broker is never built with panic = "abort".'
             echo 'A fault must drop one connection and continue.'
             exit 1
           fi
           echo 'no panic = "abort" found'
+
+      # A comment that cites a frozen document sends the reader somewhere the
+      # build is drifting away from. Say why in the comment instead, and cite a
+      # decision record where the reasoning is too long for one.
+      - name: The code cites no specification
+        run: sh tools/nospecrefs.sh
 
   check:
     name: ${{ matrix.os }}
@@ -128,9 +134,9 @@ jobs:
       - name: Test
         run: cargo test --workspace --no-default-features
 
-      # SPEC 17's *Any (native module)* rows run against a host-native build
-      # opened by a stock Lua 5.1. Task 2.1 lands the load; each row arrives
-      # with the behaviour it describes.
+      # Half of what the broker has to be tested for is checkable off-platform,
+      # against a host-native build opened by a stock Lua 5.1. This is the load
+      # itself; each check arrives with the behaviour it covers.
       #
       # mise.toml already pins the interpreter, and it is the only source that
       # covers both hosts: homebrew dropped lua@5.1, and apt reaches only the
