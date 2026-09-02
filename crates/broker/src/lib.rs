@@ -5,6 +5,7 @@
 //! into a Lua state, and holds every declaration that needs a Lua symbol.
 //! ADR 0005.
 
+pub mod ring;
 pub mod state;
 
 pub use state::bridge;
