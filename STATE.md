@@ -18,7 +18,7 @@ is just deleted. Write entries as one or two lines, never paragraphs.
 
 ## In progress
 
-Nothing. 2.3 is closed; 2.4 is next.
+Nothing. 2.4 is closed; 2.5 is next.
 
 *One task at most. Say what is done, what is not, and where to resume. Say what
 is committed and what is only in the working tree. Say what is knowingly
@@ -26,29 +26,25 @@ broken. Empty this when the task closes.*
 
 ## Just finished
 
-- **2.2** — one `Bridge` per process, two states' tables over it, PRs #12, #13
-  and #14. ADR 0007. Its banner clause is carried forward.
 - **2.3** — a fixed-size ring, one producer, one consumer, drop-oldest with a
   counter, PRs #18 and #19. ADR 0008, which says what Loom does not settle.
+- **2.4** — one commit ring fanned out to a ring per connection by a writer
+  thread, PRs #21 and #22. ADR 0011. The cost figure in #22 is the maintainer's.
 
 *The last three at most, one line each. Git log holds the rest.*
 
 ## Next
 
-**Task 2.4** — one producer ring and a writer thread fanning out to
-per-connection queues. `ring::Ring` is the primitive; what 2.4 adds is who owns
-each end. Decide there whether a per-connection ring is crossed by two threads
-at all, because the specification never says who drains one to its socket.
+**Task 2.5** — put calls emitting protobuf tags and values into a preallocated
+buffer, no protobuf runtime. Done when a stock library decodes the output,
+including a non-minimal length varint.
 
-**An agent sees the fan-out itself**, in a test with no DCS present. The
-done-when is a cost claim — that adding a consumer does not move logic-thread
-cost per record — and a runner's timings cannot carry that. Land a benchmark an
-agent can run, and leave the figure to the maintainer.
+**An agent sees this itself**: a decoder in the test suite, with no DCS present.
 
 ## After that
 
-- **2.5** — put calls emitting protobuf tags and values, decoded by a stock
-  library including a non-minimal length varint.
+- **2.6** — PROBE-3, put-call crossing cost, which also prices the fence and
+  the wake ADR 0011 left unmeasured.
 - **Phase 3** opens on `protoc-gen-dcsbridge-lua`, which reads the four message
   options this schema defines and splits its output by `Target`.
 
@@ -93,5 +89,9 @@ entries at most: an eleventh means something here is finished, or belongs in
   drop decision, so a ring per class reorders nothing that a merge at drain
   cannot restore. What it changes is that a full `LIFECYCLE` ring disconnects
   where one ring would have evicted. Needed before 2.18. ADR 0008 names it.
+- **Two things 2.4 left to later tasks.** The commit ring has no size key and
+  takes a capacity parameter; 2.15 decides. A connection's thread has no way to
+  wait on its ring; 2.7's socket thread needs the writer's flag handshake per
+  connection, or a poll. ADR 0011 settles who drains, not how it waits.
 - **Task 7.10 does not exist.** Phase 7 runs 7.1 to 7.9 then 7.11, with no note
   explaining the gap. Retired ID or omission, unresolved.
