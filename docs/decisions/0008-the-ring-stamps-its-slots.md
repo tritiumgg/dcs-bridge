@@ -125,6 +125,17 @@ blocks for undefined behavior. Neither reaches the shipped artifact: Loom is a
 dev-dependency behind a `cfg` no shipped build sets, and nightly lives in one CI
 job.
 
+Every stamp and index operation is `SeqCst`, which is stronger than the argument
+beside it needs. Loom checks which thread may touch a slot and cannot tell a
+`SeqCst` publish from a `Relaxed` one, so the strength of these labels is the
+one part of the design no tool here checks. Of the two mistakes available, too
+strong is slower and a measurement finds it, while too weak is memory corruption
+inside DCS on hardware that cannot reproduce it. Nothing has measured this path:
+the put-call crossing cost is **[PROBE-3]** at task 2.6 and the rings are
+**[PROBE-7]** at 9.7. Until one of them reports, the ring takes the mistake a
+measurement can find. Relax an operation when a probe prices it, and name the
+measurement in the commit.
+
 Loom establishes less here than it does for most lock-free code. Slots change
 hands through read-modify-writes, and Loom gives one of those more causality
 than the memory model promises, so the model passes with the publishing store
