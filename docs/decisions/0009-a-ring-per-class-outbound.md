@@ -84,6 +84,14 @@ free space inside a ring that `LIFECYCLE` could also grow into by eviction. A
 capacity is a ceiling. Reading one as the other shortens a consumer's survival
 from about an hour to about a minute.
 
+That arithmetic is what prompted ADR 0010. Every figure above is one topic's:
+`CallbackHz` is the only periodic member of a class otherwise made of edges, and
+it is what turns a disconnect threshold into a stopwatch. ADR 0010 moves it to
+`LOSSY`, and the sizes this record settles assume that. Without it the
+`LIFECYCLE` ring is 4096 slots holding a frame-rate gauge; with it the ring is a
+few hundred holding mission boundaries, which is what SPEC 5.2's disconnect is
+about.
+
 ## Decision
 
 Each connection gets three outbound rings, one per class: `LOSSY`, `DURABLE`
@@ -124,21 +132,27 @@ connection, and a broker answer counts as `DURABLE` under the drop rule at
 than about 110 `DURABLE` records a second at a connection, whatever an adopter
 adds on top.
 
-The `LIFECYCLE` ring derives cleanly, because only one of the thirteen topics is
-periodic. `CallbackHz` carries the render-loop rate for the last second and so
-arrives once a second; the other twelve are epoch and mission boundaries, which
-are edges rather than rates. Replay adds up to `max_lifecycle_topics`, 64, at
-the moment a connection authenticates. Capacity is therefore the stall a
-consumer may survive, in seconds, plus 64 for the replay — which makes the
-disconnect threshold a number somebody chooses rather than a figure that falls
-out of a ring size, as it does today.
+The `LIFECYCLE` ring derives cleanly once ADR 0010 moves `CallbackHz` to
+`LOSSY`. What remains are twelve topics that are all edges — mission loads,
+epoch boundaries, resync brackets, sim driver loads — so they arrive a handful
+of times per mission rather than at any rate. Replay adds up to
+`max_lifecycle_topics`, 64, at the moment a connection authenticates. Capacity
+is therefore 64 for the replay plus room for the boundaries a stalled consumer
+may miss before its view is beyond saving, which is what SPEC 5.2 says the
+disconnect is for.
 
 The provisional values, to be replaced by PROBE-7: `ring_out_lossy_records`
-3584, `ring_out_durable_records` 512, `ring_out_lifecycle_records` 4096. The
+3584, `ring_out_durable_records` 512, `ring_out_lifecycle_records` 256. The
 first two preserve today's 4096 total while giving `DURABLE` about five seconds
 against the bridge's own traffic, and their ratio is a placeholder rather than a
-finding. The third reproduces what one ring gave: at one record a second, about
-an hour of stall before a consumer is dropped.
+finding. The third holds the 64-slot replay and 192 boundary records beyond it,
+which at six to ten records per mission cycle is twenty mission rotations —
+generous for a condition that means a consumer has stopped reading entirely.
+
+That leaves 4352 slots a connection against today's 4096, so the split costs
+almost nothing. Had `CallbackHz` stayed `LIFECYCLE`, the same ring would have
+needed 4096 slots on its own to hold the hour that one ring holds today, and the
+split would have doubled the outbound memory to buy it.
 
 The alternatives, and the line that rejected each:
 
@@ -149,10 +163,9 @@ The alternatives, and the line that rejected each:
 - **One ring that refuses the incoming record when its oldest is
   `LIFECYCLE`.** The incoming record is often `LIFECYCLE` too, so this discards
   a boundary record — the exact failure the rule exists to prevent.
-- **Three rings with the `LIFECYCLE` ring sized at the reserve.** It reads the
-  specification literally and disconnects a stalled consumer in about a minute
-  rather than about an hour, and the retained-set replay can fill it before any
-  live record arrives.
+- **Three rings with the `LIFECYCLE` ring sized at the reserve, 64.** The
+  retained-set replay is bounded by 64 and can fill it before a live record
+  arrives, whatever else is emitted.
 - **Two rings, `LIFECYCLE` and everything else.** It leaves `LOSSY` before
   `DURABLE` needing a search inside the second ring, which is the problem this
   record exists to remove.
@@ -162,9 +175,14 @@ The alternatives, and the line that rejected each:
 Capacity stops being shared. Under one ring a quiet `LOSSY` stream left its
 space to `DURABLE`; under three, each class holds what it was given and cannot
 borrow. That is less efficient in memory and it is what buys the O(1) priority.
-Three rings at `ring_out_records` each, across `max_connections` of 8, is a
-slot count in the low hundreds of thousands — a stamp and a handle apiece, so
-megabytes, against the 1 MiB the retention set already stands.
+
+The memory it costs is close to nothing. The three provisional sizes come to
+4352 slots a connection against today's 4096, so across `max_connections` of 8
+the slot overhead is a stamp and a handle apiece — of the order of a megabyte,
+against the 1 MiB the retention set already stands. The records themselves
+dominate either way, and at the roughly 64 bytes SPEC 13.1 implies by pairing
+`drain_max_records` 256 with `drain_max_bytes` 16 KiB, full rings across every
+connection are a couple of megabytes more.
 
 `DURABLE` gains a guarantee it did not have. A `LOSSY` flood can no longer crowd
 it out at all, where before it was protected only by being evicted second. This
@@ -186,6 +204,8 @@ from config", three tasks ahead of 2.18, so how many outbound sizes exist has to
 be settled there. This record is what settles it, and nothing in 2.15 needs the
 drop rule itself.
 
-This reopens if `CallbackHz` stops being `LIFECYCLE`, or stops being periodic.
-The hour-versus-minute arithmetic rests entirely on one topic arriving once a
-second forever. Nothing else in the thirteen is periodic.
+This reopens if a periodic topic joins `LIFECYCLE` again. The `LIFECYCLE` ring
+is sized for edges, and one topic arriving on a timer turns its capacity into a
+countdown, which is how the sizing came to be examined in the first place. An
+adopter registering such a topic is the case to watch, since SPEC 8.1 lets one
+in on the last-value test alone.
