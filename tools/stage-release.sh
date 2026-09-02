@@ -19,7 +19,8 @@
 #
 # Usage: sh tools/stage-release.sh <build-dir> [version] [out-dir] [schema]
 #
-# POSIX sh only, and no tool beyond zip and one of sha256sum or shasum.
+# POSIX sh only, and no required tool beyond zip and one of sha256sum or
+# shasum. llvm-readobj is used for the export check when it is installed.
 set -eu
 
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
@@ -86,6 +87,45 @@ else
     printf 'Check the dcs-lua feature and vendor/lua/lua.def.\n' >&2
     exit 1
 fi
+
+# DCS loads the broker with package.loadlib and an explicit path, asking for
+# luaopen_dcsbridge by name. A DLL that exports nothing stages exactly like a
+# correct one, and the next thing to notice would be DCS itself, at the far end
+# of an install. Read the export table here instead.
+#
+# llvm-readobj reads the real table, and the cross-build already installs LLVM
+# for the import library. Without it, fall back to the name in the export
+# directory's bytes, which is the strength of the lua.dll check above.
+OPENER=luaopen_dcsbridge
+READOBJ=
+for candidate in llvm-readobj /usr/lib/llvm-*/bin/llvm-readobj \
+    /opt/homebrew/opt/llvm/bin/llvm-readobj /usr/local/opt/llvm/bin/llvm-readobj
+do
+    if command -v "$candidate" >/dev/null 2>&1; then READOBJ=$candidate; break; fi
+done
+
+if [ -n "$READOBJ" ]; then
+    FOUND=$("$READOBJ" --coff-exports "$OUT/lua-dcsbridge.dll")
+    READ_AS="its export table"
+elif LC_ALL=C grep -qa "$OPENER" "$OUT/lua-dcsbridge.dll"; then
+    FOUND=$OPENER
+    READ_AS="its bytes, with no llvm-readobj here to read the table"
+else
+    FOUND=
+    READ_AS="its bytes, with no llvm-readobj here to read the table"
+fi
+
+case "$FOUND" in
+    *"$OPENER"*)
+        printf 'lua-dcsbridge.dll exports %s, read from %s\n' "$OPENER" "$READ_AS"
+        ;;
+    *)
+        printf 'lua-dcsbridge.dll exports no %s, read from %s.\n' "$OPENER" "$READ_AS" >&2
+        printf 'package.loadlib asks for that name, so DCS would load nothing.\n' >&2
+        printf 'Check the no_mangle opener in crates/lua-module.\n' >&2
+        exit 1
+        ;;
+esac
 
 # SPEC 13's tree, so installing is one extraction over the write directory.
 # The broker and the schema have a home there so far; the Lua files join them

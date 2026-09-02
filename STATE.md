@@ -1,6 +1,6 @@
 # Working state
 
-**Last updated:** 2026-09-01
+**Last updated:** 2026-09-02
 
 The handoff between sessions. Read it first; update it before a session ends,
 not only when a task finishes. Stamp the date above each time; it carries a
@@ -18,7 +18,7 @@ is just deleted. Write entries as one or two lines, never paragraphs.
 
 ## In progress
 
-Nothing. 2.1 is closed; 2.2 is next.
+Nothing. 2.2 is closed; 2.3 is next.
 
 *One task at most. Say what is done, what is not, and where to resume. Say what
 is committed and what is only in the working tree. Say what is knowingly
@@ -26,28 +26,26 @@ broken. Empty this when the task closes.*
 
 ## Just finished
 
-- **1.7** — `tools/schema-breaking.sh` and `tools/schema-ownership.sh` gate the
-  schema, CI run 33563001197 on PR #7. `UnitDestroyed` moved to `dcs.builtin`.
 - **2.1** — the broker splits in two and `mise run lua` opens the host-native
   module under a stock Lua 5.1, PR #9. ADR 0005 and ADR 0006.
+- **2.2** — one `Bridge` per process, two states' tables over it, PRs #12, #13
+  and #14. ADR 0007. Its banner clause is carried forward.
 
 *The last three at most, one line each. Git log holds the rest.*
 
 ## Next
 
-**Task 2.2** — `luaopen_dcsbridge` over process-global state: rings, sockets,
-threads and the three registration maps shared across both DCS states, and the
-cross-built DLL loaded by `package.loadlib` at an explicit path.
+**Task 2.3** — SPSC ring buffer in `crates/broker`: fixed size, drop-oldest
+with a counter, and a unit test that fills, drains and overflows it. Its size
+comes from config at 2.15, so pick nothing here.
 
-**Only somebody at a live install can see this.** The load banner in `dcs.log`
-and two tables over one set of maps both need DCS running. An agent reaches as
-far as two opens in one process returning distinct tables over shared state,
-which `tests/lua/load.lua` already asks for.
+**An agent sees this itself.** It is a unit test in `dcsbridge-broker`, which
+runs on all three CI hosts with no DCS present.
 
 ## After that
 
-- **2.3** — SPSC ring buffer, fixed size, drop-oldest with a counter. It lands
-  in `crates/broker`, which is where everything testable goes now.
+- **2.4** — one producer ring and a writer thread fanning out to per-connection
+  queues, without changing logic-thread cost per record.
 - **Phase 3** opens on `protoc-gen-dcsbridge-lua`, which reads the four message
   options this schema defines and splits its output by `Target`.
 
@@ -82,5 +80,8 @@ entries at most: an eleventh means something here is finished, or belongs in
   the task implementing what it describes: capability at 2.14, late join at
   2.17, topic filter at 2.20. The plan's 2.1 done-when reads as though all
   seventeen run at 2.1, which none of them can.
+- **Task 2.2's load banner is owed by 4.1.** SPEC §13 addresses the banner to
+  the Lua side and SPEC §15 has `doctor` check it. Nothing makes the DLL write
+  one, and SPEC §4 leaves it no `io`. Delete this when 4.1 closes.
 - **Task 7.10 does not exist.** Phase 7 runs 7.1 to 7.9 then 7.11, with no note
   explaining the gap. Retired ID or omission, unresolved.
