@@ -23,6 +23,22 @@ use std::mem::MaybeUninit;
 
 use crate::sync::{Arc, AtomicU64, Ordering, UnsafeCell};
 
+// Every stamp and index operation below is `SeqCst`, which is stronger than the
+// argument beside each one needs. That is deliberate, and it is not sloppiness
+// to tidy away.
+//
+// The exhaustive check this module gets covers which thread may touch a slot,
+// and it cannot tell a `SeqCst` publish from a `Relaxed` one, so the strength of
+// these labels is the part no tool here checks. The two mistakes available cost
+// wildly different amounts: too strong is slower, and shows up in a measurement;
+// too weak is memory corruption inside the host process, on hardware that
+// cannot reproduce it. Nothing has measured this path yet, so it takes the
+// mistake that a measurement can find.
+//
+// Relax an individual operation when a probe reports what it costs, and say in
+// the commit which measurement licensed it. The drop counter stays `Relaxed`:
+// nothing decides anything by reading it. ADR 0008.
+
 /// The slot holds nothing, and the producer may fill it at the index stamped.
 const EMPTY: u64 = 0;
 /// The slot holds the record its stamp names.
@@ -167,8 +183,8 @@ impl<T> Ring<T> {
     /// has not yet stepped over, and it is capped at the capacity for that
     /// reason.
     fn len(&self) -> usize {
-        let write = self.write.load(Ordering::Acquire);
-        let read = self.read.load(Ordering::Acquire);
+        let write = self.write.load(Ordering::SeqCst);
+        let read = self.read.load(Ordering::SeqCst);
         let depth = usize::try_from(write.saturating_sub(read)).unwrap_or(usize::MAX);
 
         depth.min(self.capacity())
@@ -219,16 +235,16 @@ impl<T> Producer<T> {
         let mut reloaded = false;
 
         loop {
-            let current = slot.stamp.load(Ordering::Acquire);
+            let current = slot.stamp.load(Ordering::SeqCst);
 
             if current == free {
                 // SAFETY: the stamp says the slot is empty and ready for this
                 // index. The consumer stamps a slot empty only after it has
-                // moved the old value out, and the acquire load above pairs
-                // with that release, so nothing is overwritten here. No other
+                // moved the old value out, and reading that stamp puts its move
+                // before this write, so nothing is overwritten here. No other
                 // thread writes a slot stamped for the producer's index.
                 slot.value.with_mut(|slot| unsafe { (*slot).write(value) });
-                slot.stamp.store(stamp(self.index, FULL), Ordering::Release);
+                slot.stamp.store(stamp(self.index, FULL), Ordering::SeqCst);
                 self.advance();
 
                 return Push::Stored;
@@ -251,8 +267,8 @@ impl<T> Producer<T> {
                         .compare_exchange(
                             stamp(oldest, FULL),
                             stamp(oldest, HELD_BY_PRODUCER),
-                            Ordering::AcqRel,
-                            Ordering::Acquire,
+                            Ordering::SeqCst,
+                            Ordering::SeqCst,
                         )
                         .is_ok()
                     {
@@ -267,7 +283,7 @@ impl<T> Producer<T> {
                         // SAFETY: the same ownership. The slot is uninitialized
                         // after the move above, so writing it drops nothing.
                         slot.value.with_mut(|slot| unsafe { (*slot).write(value) });
-                        slot.stamp.store(stamp(self.index, FULL), Ordering::Release);
+                        slot.stamp.store(stamp(self.index, FULL), Ordering::SeqCst);
                         self.ring.dropped.fetch_add(1, Ordering::Relaxed);
                         self.advance();
 
@@ -323,7 +339,7 @@ impl<T> Producer<T> {
         if self.cursor == self.ring.capacity() {
             self.cursor = 0;
         }
-        self.ring.write.store(self.index, Ordering::Release);
+        self.ring.write.store(self.index, Ordering::SeqCst);
     }
 }
 
@@ -347,7 +363,7 @@ impl<T> Consumer<T> {
     pub fn pop(&mut self) -> Option<T> {
         loop {
             let slot = &self.ring.slots[self.cursor];
-            let current = slot.stamp.load(Ordering::Acquire);
+            let current = slot.stamp.load(Ordering::SeqCst);
 
             if current == stamp(self.index, EMPTY) {
                 return None;
@@ -363,22 +379,22 @@ impl<T> Consumer<T> {
                     .compare_exchange(
                         current,
                         stamp(self.index, HELD_BY_CONSUMER),
-                        Ordering::AcqRel,
-                        Ordering::Acquire,
+                        Ordering::SeqCst,
+                        Ordering::SeqCst,
                     )
                     .is_ok()
             {
                 // SAFETY: winning the exchange makes this thread the slot's
                 // only owner until it publishes a new stamp, and the producer's
                 // eviction of the same slot cannot also have won. The stamp
-                // taken said `FULL`, so the producer's release of that stamp is
-                // visible here, the value is initialized, and this is the only
-                // move of it.
+                // taken said `FULL`, which the producer published after writing
+                // the value, so the value is initialized here and this is the
+                // only move of it.
                 let value = slot
                     .value
                     .with_mut(|slot| unsafe { (*slot).assume_init_read() });
                 let next = self.index + self.ring.capacity() as u64;
-                slot.stamp.store(stamp(next, EMPTY), Ordering::Release);
+                slot.stamp.store(stamp(next, EMPTY), Ordering::SeqCst);
                 self.advance();
 
                 return Some(value);
@@ -418,7 +434,7 @@ impl<T> Consumer<T> {
         if self.cursor == self.ring.capacity() {
             self.cursor = 0;
         }
-        self.ring.read.store(self.index, Ordering::Release);
+        self.ring.read.store(self.index, Ordering::SeqCst);
     }
 }
 
