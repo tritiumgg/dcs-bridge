@@ -30,6 +30,9 @@ panic = "unwind"
 [workspace.lints.rust]
 missing_docs = "warn"
 unsafe_op_in_unsafe_fn = "warn"
+# `--cfg loom` swaps the broker's atomics for Loom's models of them, so the
+# compiler is told the flag is one this workspace sets rather than a typo.
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(loom)'] }
 
 [workspace.lints.clippy]
 undocumented_unsafe_blocks = "warn"

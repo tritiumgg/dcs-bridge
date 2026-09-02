@@ -170,6 +170,57 @@ jobs:
 
   # The product target is x86_64 Windows and it is cross-compiled, so no
   # contributor needs a Windows machine to produce a release artifact.
+  # What the three-host matrix cannot establish about the broker's lock-free
+  # ring. Two of those hosts are x86-64, where a missing acquire-release pair is
+  # unobservable in principle, and x86-64 Windows is the only target that ships,
+  # so the host most able to expose an ordering fault is the one that never runs
+  # the product. ADR 0008.
+  verification:
+    name: The ring under a model checker
+    needs: [documents, guards]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Toolchain
+        run: |
+          rustup show
+          rustc -Vv
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: verification-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: verification-cargo-
+
+      # Loom swaps the ring's atomics for its own and enumerates the
+      # interleavings of a ring small enough to exhaust. What it establishes is
+      # the ownership protocol: no schedule lets both ends into one slot, and
+      # none reorders what comes out. It does not settle the acquire-release
+      # pairings, because the protocol hands slots over with read-modify-writes
+      # and Loom gives those more causality than the memory model promises.
+      - name: Loom over the ring's ownership protocol
+        run: cargo test -p dcsbridge-broker --no-default-features --lib ring::loom
+        env:
+          RUSTFLAGS: --cfg loom -D warnings
+
+      # Miri is what reads the unsafe blocks themselves: uninitialised memory,
+      # provenance, a value moved out twice, and the data races Loom's model of
+      # an exchange smooths over. Nightly lives in this job and nowhere else --
+      # rust-toolchain.toml pins the channel every other job and every
+      # contributor builds with. ADR 0003.
+      - name: Miri
+        run: |
+          rustup toolchain install nightly --component miri --profile minimal
+          rustup run nightly cargo miri setup
+      - name: Miri over the ring's tests
+        run: rustup run nightly cargo miri test -p dcsbridge-broker --no-default-features --lib ring::
+        env:
+          MIRIFLAGS: -Zmiri-preemption-rate=0.1
+
   windows-cross:
     name: Windows cross-build from Linux
     needs: [documents, guards]

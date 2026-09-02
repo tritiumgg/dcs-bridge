@@ -67,6 +67,11 @@ run = [
   "sh tools/mkschema.sh",
 ]
 
+[tasks.loom]
+description = "Enumerate the ring's interleavings with Loom"
+env = { RUSTFLAGS = "--cfg loom -D warnings" }
+run = "cargo test -p dcsbridge-broker --no-default-features --lib ring::loom"
+
 [tasks.windows]
 description = "Cross-build the product target, linking DCS's Lua"
 run = "cargo xwin build --release --workspace --target x86_64-pc-windows-msvc"

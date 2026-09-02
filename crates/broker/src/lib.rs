@@ -7,6 +7,7 @@
 
 pub mod ring;
 pub mod state;
+mod sync;
 
 pub use state::bridge;
 
