@@ -35,6 +35,9 @@ mod lua {
         /// Push a fresh table sized for `narr` array and `nrec` hash entries.
         pub unsafe fn lua_createtable(state: *mut c_void, narr: c_int, nrec: c_int);
 
+        /// Push `n`. `lua_Integer` is `ptrdiff_t` in a stock 5.1 build.
+        pub unsafe fn lua_pushinteger(state: *mut c_void, n: isize);
+
         /// Push the `len` bytes at `s` as a string, which Lua copies.
         pub unsafe fn lua_pushlstring(state: *mut c_void, s: *const c_char, len: usize);
 
@@ -45,10 +48,14 @@ mod lua {
 
 /// Open the bridge in `state`, leaving one table on the stack.
 ///
-/// The table carries the broker version and nothing else. The rings, sockets
-/// and registration maps behind it are process-global rather than per-state,
-/// because both DCS states load this module and each `luaopen_*` call gets its
-/// own table over one set of maps (SPEC 5.1.1).
+/// The table is this state's own and the bridge behind it is the process's.
+/// Both DCS states load this module, so this runs more than once and each call
+/// gets its own table over one set of rings, sockets and registration maps.
+/// ADR 0007.
+///
+/// The table carries the broker version and `opens`, the number of times the
+/// module has been opened in this process. The first table reads 1 and the
+/// second reads 2, which is how two tables are shown to sit over one bridge.
 ///
 /// # Safety
 ///
@@ -58,13 +65,14 @@ mod lua {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn luaopen_dcsbridge(state: *mut core::ffi::c_void) -> core::ffi::c_int {
     let version = dcsbridge_broker::BROKER_VERSION;
+    let opens = dcsbridge_broker::bridge().open();
 
     // SAFETY: the caller guarantees a live lua_State with two free slots. The
-    // table takes one, the string the other, and lua_setfield pops the string
-    // back off. Lua copies the bytes it is given, so nothing this crate
-    // allocated crosses the C runtime boundary SPEC 5.1.1 draws.
+    // table takes one, each pushed value the other, and lua_setfield pops the
+    // value back off. Lua copies the bytes it is given, so nothing this crate
+    // allocated is left for DCS's C runtime to free.
     unsafe {
-        lua::lua_createtable(state, 0, 1);
+        lua::lua_createtable(state, 0, 2);
         lua::lua_pushlstring(
             state,
             version.as_ptr().cast::<core::ffi::c_char>(),
@@ -72,6 +80,10 @@ pub unsafe extern "C" fn luaopen_dcsbridge(state: *mut core::ffi::c_void) -> cor
         );
         // -1 is the version string just pushed, so the table is at -2.
         lua::lua_setfield(state, -2, c"version".as_ptr());
+
+        // A count that outgrew isize would need more Lua states than DCS has.
+        lua::lua_pushinteger(state, opens as isize);
+        lua::lua_setfield(state, -2, c"opens".as_ptr());
     }
 
     1
