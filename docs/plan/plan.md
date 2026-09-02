@@ -115,6 +115,17 @@ The class-aware drop rule is not 2.3's. Evicting the oldest non-`LIFECYCLE`
 record and the `ring_out_lifecycle_reserve` watermark are both 2.18, and the
 sizes come from config at 2.15.
 
+**Task 2.4 lands as a sequence of two**, for the same reason:
+
+| Branch | What it holds | Reviewable against |
+|---|---|---|
+| `task/2.4-1-fanout` | The writer thread over one commit ring, fanning each record into a ring per connection; attach and detach at runtime; the flag the writer parks on and the logic thread wakes it through. Thread tests, a Loom model of the wake, and the record deciding who drains a connection's ring. | SPEC §5.2's "The logic thread writes one ring, not N", and ADR 0011 |
+| `task/2.4-2-fanout-cost` | A release-mode benchmark of logic-thread cost per commit against zero to eight consumers, runnable with no DCS, and the CI filters widened so Miri reads the new module. No change in behavior. | The done-when: adding a consumer does not move the per-record figure |
+
+`seq`, the capability filter, framing and the socket itself are 2.7 and 2.14.
+The benchmark reports a figure; whether it satisfies the done-when is the
+maintainer's reading, because a runner's timings cannot carry a cost claim.
+
 ### Phase 3 — Generator
 
 | ID | Task | Done when |
