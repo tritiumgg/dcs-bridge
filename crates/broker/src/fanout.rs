@@ -15,11 +15,12 @@
 //! else. ADR 0011.
 //!
 //! The ring itself has no way to say a record arrived, so the writer thread
-//! parks when the commit ring is empty and the logic thread wakes it. Waking is
-//! a flag the writer raises before it parks and the logic thread reads after
-//! each push, so a push into a ring the writer is already draining costs one
-//! atomic load and no system call. The argument that no wake is lost is beside
-//! [`Commit::push`] and [`Writer::run`], and Loom checks it. ADR 0011.
+//! parks when the commit ring has stayed empty for a while and the logic thread
+//! wakes it. Waking is a flag the writer raises before it parks and the logic
+//! thread reads after each push, so a push into a ring the writer is awake for
+//! costs one atomic load and no system call. The argument that no wake is lost
+//! is beside [`Waker::wake_if_parked`] and [`Writer::run`], and Loom checks it.
+//! ADR 0011.
 
 // Loom's channel returns `std`'s error type rather than a model of its own.
 use std::sync::mpsc::TryRecvError;
@@ -270,10 +271,12 @@ impl<T: Clone + Send + 'static> Writer<T> {
     /// The writer thread's loop.
     ///
     /// Each pass takes every control message, then every record the commit ring
-    /// holds, then sleeps until woken. Control before records, so a detached
-    /// connection stops receiving at the first pass after the detach.
+    /// holds. Control before records, so a detached connection stops receiving
+    /// at the first pass after the detach. An empty pass yields, and only after
+    /// [`LOOKS_BEFORE_PARK`] empty passes in a row does the thread park.
     fn run(mut commit: Consumer<T>, inbox: mpsc::Receiver<Control<T>>, shared: Arc<Shared>) {
         let mut connections: Vec<(ConnectionId, Producer<T>)> = Vec::new();
+        let mut empty_passes = 0;
 
         loop {
             loop {
@@ -285,9 +288,29 @@ impl<T: Clone + Send + 'static> Writer<T> {
                 }
             }
 
+            let mut fanned = false;
             while let Some(record) = commit.pop() {
                 fan_out(&mut connections, record);
+                fanned = true;
             }
+            if fanned {
+                empty_passes = 0;
+                continue;
+            }
+
+            // Records arrive in bursts, one frame's worth at a time with a
+            // frame of quiet after, and within a burst they are microseconds
+            // apart. Parking on the first empty look would put a system call on
+            // the logic thread for every record in the burst, because each one
+            // would find the writer asleep again. Looking a while longer costs
+            // this thread a little idle spinning per burst and the logic thread
+            // one wake per burst instead. ADR 0011.
+            if empty_passes < LOOKS_BEFORE_PARK {
+                empty_passes += 1;
+                thread::yield_now();
+                continue;
+            }
+            empty_passes = 0;
 
             // Raise the flag, then look once more. A record that landed
             // between the drain above and the flag is seen here; one that lands
@@ -302,6 +325,21 @@ impl<T: Clone + Send + 'static> Writer<T> {
         }
     }
 }
+
+/// How many empty passes the writer thread makes, yielding between them,
+/// before it parks.
+///
+/// A yield is a few microseconds on each host, so this is on the order of a
+/// hundred microseconds of looking: longer than the gap between two records in
+/// one frame's drain, and far shorter than the frame of quiet that follows it.
+/// Nothing has measured this; it moves when a probe prices the wake.
+#[cfg(not(loom))]
+const LOOKS_BEFORE_PARK: u32 = 32;
+
+/// Under Loom every yield is a branch, and what the model checks is the park
+/// handshake, which the looking only delays. So the writer parks at once.
+#[cfg(loom)]
+const LOOKS_BEFORE_PARK: u32 = 0;
 
 impl<T> Drop for Writer<T> {
     /// Stop the thread and wait for it.

@@ -72,6 +72,16 @@ the logic thread is one fence and one load per record, and one system call per
 transition from idle to busy rather than per record. The attach side, which
 does not run on the logic thread, wakes unconditionally.
 
+The writer does not park on the first empty look. Records arrive one frame's
+drain at a time, microseconds apart within the burst and a frame of quiet after
+it, and a writer that parked at once would be asleep again before the next
+record in the burst arrived, so every record would cost the logic thread the
+system call. The writer instead yields through a bounded number of empty
+passes, on the order of a hundred microseconds, and parks after that. A burst
+then costs the logic thread one wake and the writer thread a little idle
+spinning, and the quiet frame costs nothing. The bound is a guess until a probe
+prices the wake.
+
 The fences are there for Loom as much as for the hardware. Loom treats a
 `SeqCst` load or store as acquire or release, so a flag handshake written with
 `SeqCst` accesses alone fails its model with a lost wake the memory model
@@ -97,6 +107,9 @@ The alternatives, and the line that rejected each:
 - **The writer thread polls the commit ring on a timer.** Adds the timer's
   period to every record's latency and burns a wake per period on an idle
   server, to save the logic thread one load.
+- **The writer parks on the first empty look.** Simplest, and Loom checks it
+  the same. At a realistic rate it puts a system call on the logic thread per
+  record, which is the cost the whole arrangement exists to avoid.
 - **A condition variable between the logic thread and the writer.** The notify
   side takes the variable's mutex, which is the lock SPEC 5.2 forbids on the
   logic thread.
