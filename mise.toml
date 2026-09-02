@@ -68,9 +68,13 @@ run = [
 ]
 
 [tasks.loom]
-description = "Enumerate the ring's interleavings with Loom"
+description = "Enumerate the ring's and the writer's interleavings with Loom"
 env = { RUSTFLAGS = "--cfg loom -D warnings" }
-run = "cargo test -p dcsbridge-broker --no-default-features --lib ring::loom"
+run = "cargo test -p dcsbridge-broker --no-default-features --lib loom"
+
+[tasks.bench-fanout]
+description = "Time logic-thread cost per commit against zero to eight consumers"
+run = "cargo run --release -p dcsbridge-broker --no-default-features --example fanout_cost"
 
 [tasks.windows]
 description = "Cross-build the product target, linking DCS's Lua"
