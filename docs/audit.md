@@ -79,3 +79,20 @@ correct.
 Phase 7 runs 7.1 to 7.9 and then 7.11. PLAN §1 says a task ID is a name rather
 than a position, which makes a retired ID legitimate, and it explains the case
 where tasks 8.1 to 8.4 sit under Phase 11. It offers no note for 7.10.
+
+## Task 2.16's done-when belongs to 2.18
+
+Found on 2026-09-02, while deciding the outbound ring's shape, so it is later
+than the pass above and not part of it.
+
+2.16 registers the three maps, and its done-when opens "`LOSSY` drops before
+`DURABLE` under pressure and `LIFECYCLE` survives". That is the class-aware
+drop rule, which 2.18 builds. At 2.16 the rings evict by age alone, so the
+clause cannot be observed when it is written, and a reviewer who takes it at
+face value either blocks 2.16 on work two tasks away or waves the check through.
+
+The registration half of that done-when — a second registrar merging, a
+conflicting row refused whole, an outbound-only topic registering with no route
+— is 2.16's own and stands. The plan is not frozen, so moving the first clause
+to 2.18 settles this. It is left here rather than edited because which task owns
+a done-when is a build-order decision.

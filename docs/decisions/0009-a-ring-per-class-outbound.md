@@ -107,6 +107,39 @@ ring that no longer exists. SPEC 13.1 already calls it provisional "because it
 partitions a ring whose size is also provisional", and PROBE-7 at task 9.7 is
 where all three sizes get a measured basis.
 
+Two of the three sizes can be derived from what the documents already state,
+and one cannot. The one that cannot is the split between `LOSSY` and `DURABLE`.
+SPEC 10 models a heavy load as 500 units and 3,040 records per second, but that
+traffic is adopter-registered mission data — unit positions and events — and
+the bridge's own schema says nothing about how it divides by class. Only a
+capture from a real adopter settles it, which is PROBE-7's job at task 9.7.
+
+What is derivable is the total and the two ends of it. At 3,040 records per
+second, today's `ring_out_records` of 4096 is about 1.4 seconds of consumer
+outage, so any split has to preserve roughly that total or say it is changing
+it. The bridge's own `DURABLE` traffic is bounded by keys that are already set:
+`CommandAck` follows inbound commands at `inbound_records_per_sec`, 100 per
+connection, and a broker answer counts as `DURABLE` under the drop rule at
+`rejected_max_per_sec`, 10 per connection. So the bridge alone cannot push more
+than about 110 `DURABLE` records a second at a connection, whatever an adopter
+adds on top.
+
+The `LIFECYCLE` ring derives cleanly, because only one of the thirteen topics is
+periodic. `CallbackHz` carries the render-loop rate for the last second and so
+arrives once a second; the other twelve are epoch and mission boundaries, which
+are edges rather than rates. Replay adds up to `max_lifecycle_topics`, 64, at
+the moment a connection authenticates. Capacity is therefore the stall a
+consumer may survive, in seconds, plus 64 for the replay — which makes the
+disconnect threshold a number somebody chooses rather than a figure that falls
+out of a ring size, as it does today.
+
+The provisional values, to be replaced by PROBE-7: `ring_out_lossy_records`
+3584, `ring_out_durable_records` 512, `ring_out_lifecycle_records` 4096. The
+first two preserve today's 4096 total while giving `DURABLE` about five seconds
+against the bridge's own traffic, and their ratio is a placeholder rather than a
+finding. The third reproduces what one ring gave: at one record a second, about
+an hour of stall before a consumer is dropped.
+
 The alternatives, and the line that rejected each:
 
 - **One ring with a slab and a free list, supporting interior removal.** It is
@@ -147,6 +180,11 @@ Three sizes now need measuring where two did. PROBE-7 was already going to size
 `ring_out_durable_records` and `ring_out_lifecycle_records` instead, and the
 `LIFECYCLE` figure carries the argument above: it is a disconnect threshold in
 seconds of consumer stall, not a buffer.
+
+The keys arrive before the structure does. Task 2.15's done-when is "rings size
+from config", three tasks ahead of 2.18, so how many outbound sizes exist has to
+be settled there. This record is what settles it, and nothing in 2.15 needs the
+drop rule itself.
 
 This reopens if `CallbackHz` stops being `LIFECYCLE`, or stops being periodic.
 The hour-versus-minute arithmetic rests entirely on one topic arriving once a
