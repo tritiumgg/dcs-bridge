@@ -88,10 +88,10 @@ entries at most: an eleventh means something here is finished, or belongs in
   the Lua side and SPEC §15 has `doctor` check it. Nothing makes the DLL write
   one, and SPEC §4 leaves it no `io`. Delete this when 4.1 closes.
 - **Maintainer decision — one outbound ring per connection, or one per class.**
-  Task 2.18 evicts the oldest non-`LIFECYCLE` record, which a single ring can
-  only answer by refusing when its oldest is one. A ring per class makes the
-  rule O(1) and turns `ring_out_lifecycle_reserve` into an allocation, and pays
-  by reordering across classes, which per-connection `seq` may forbid. Needed
-  before 2.18. ADR 0008 names it.
+  A slot is addressed by its record number, so a single ring cannot search for
+  a non-`LIFECYCLE` victim the way 2.18 requires. `seq` is assigned before the
+  drop decision, so a ring per class reorders nothing that a merge at drain
+  cannot restore. What it changes is that a full `LIFECYCLE` ring disconnects
+  where one ring would have evicted. Needed before 2.18. ADR 0008 names it.
 - **Task 7.10 does not exist.** Phase 7 runs 7.1 to 7.9 then 7.11, with no note
   explaining the gap. Retired ID or omission, unresolved.

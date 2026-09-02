@@ -169,9 +169,18 @@ and the answer may be `&self` methods on the ring itself, with the single-caller
 rule documented rather than compiled. The protocol does not change either
 way — only where the cursors live.
 
-This reopens at task 2.18. Evicting the oldest record that is not `LIFECYCLE`
-turns a decision about one slot into a search across several, and the
-alternative is a ring per class, where the rule costs nothing and
-`ring_out_lifecycle_reserve` becomes an allocation rather than a comparison.
-That trade buys O(1) eviction and pays for it by reordering records across
-classes, which per-connection `seq` may not allow.
+This reopens at task 2.18, and probably against this layout. SPEC 5.2 has
+eviction search — "if eviction finds no non-`LIFECYCLE` record to remove" — and
+a slot here is addressed by its record number, so the producer can free only the
+slot holding the oldest record. Freeing an interior slot does not free the slot
+the next record needs. A ring per class is the alternative, and it costs less
+than it first appears: SPEC 5.2 assigns `seq` "before the drop decision", so
+records carry their numbers before they reach a ring and a merge at drain
+restores the total order per connection that the same paragraph requires.
+
+What a ring per class does change is the disconnect. Under one ring a
+`LIFECYCLE` record with nowhere to go evicts a non-`LIFECYCLE` record and the
+connection survives. Under two, a full `LIFECYCLE` ring cannot be relieved from
+the other one, so the connection drops instead. Whether that difference is
+reachable is a question about how fast that ring can fill, and it is what the
+record deciding this has to answer.
