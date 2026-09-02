@@ -217,7 +217,9 @@ jobs:
           rustup toolchain install nightly --component miri --profile minimal
           rustup run nightly cargo miri setup
       - name: Miri over the ring's tests
-        run: rustup run nightly cargo miri test -p dcsbridge-broker --no-default-features --lib ring::
+        # Quoted because the filter ends in a colon, which YAML would otherwise
+        # read as the start of a mapping.
+        run: "rustup run nightly cargo miri test -p dcsbridge-broker --no-default-features --lib ring::"
         env:
           MIRIFLAGS: -Zmiri-preemption-rate=0.1
 
