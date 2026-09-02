@@ -127,7 +127,7 @@ case "$FOUND" in
         ;;
 esac
 
-# SPEC 13's tree, so installing is one extraction over the write directory.
+# The tree mirrors the write directory, so installing is one extraction over it.
 # The broker and the schema have a home there so far; the Lua files join them
 # as they are built. The CLI runs outside DCS and ships as a loose asset.
 ZIP="write-directory-$VERSION.zip"

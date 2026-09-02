@@ -1,6 +1,6 @@
 ; Import library definition for DCS's Lua.
 ; DCS ships its Lua as bin\lua.dll, not lua51.dll, so the import
-; library must carry that name. SPEC 5.1.1.
+; library must carry that name.
 ;
 ; Generated from the export table of bin/lua.dll, DCS 2.9.29.27278,
 ; md5 8e927c721a3417ecb34a69f4c2cf1019 (bin/ and bin-mt/ are identical).
@@ -8,7 +8,8 @@
 ; 7 internal. Only the 114 are listed here.
 ;
 ; Excluded, deliberately:
-;   luaopen_* (9)  - SPEC 4 forbids calling the standard-library openers.
+;   luaopen_* (9)  - the standard-library openers, which the bridge's Lua is
+;                    forbidden to call.
 ;   luaD_growstack, luaF_newproto, luaM_realloc_, luaM_toobig,
 ;   luaS_newlstr, luaU_dump, luaU_print - private in a stock build.
 ;

@@ -1,7 +1,7 @@
 syntax = "proto3";
 
-// SPEC 8.4 bounds this package: the only messages permitted here are the
-// records SPEC 1.2 enumerates and the nested types those records carry.
+// This package is bounded: the only messages permitted here are the bridge's
+// own records and the nested types those records carry.
 // A built-in set's record belongs in dcs.builtin and an adopter's in a package
 // they own. tools/schema-ownership.sh holds the list and enforces it.
 package dcs.bridge;

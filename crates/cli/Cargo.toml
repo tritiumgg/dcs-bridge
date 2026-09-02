@@ -1,5 +1,5 @@
-# SPEC 15: dcsb is one binary with nine verbs. It runs outside the DCS process
-# and links no part of the broker's FFI surface.
+# dcsb is one binary with nine verbs. It runs outside the DCS process and links
+# no part of the broker's FFI surface.
 
 [package]
 name = "dcsb"

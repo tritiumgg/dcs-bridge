@@ -55,6 +55,7 @@ run = [
   "cargo build --workspace --all-targets --no-default-features",
   "cargo test --workspace --no-default-features",
   "sh tools/luatest.sh",
+  "sh tools/nospecrefs.sh",
 ]
 
 [tasks.schema]

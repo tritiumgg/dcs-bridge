@@ -1,9 +1,9 @@
-# SPEC 8.3: protoc-gen-dcsbridge-lua is a protoc plugin. protoc resolves a
-# plugin by executable name, so the binary name is fixed by that contract.
+# protoc-gen-dcsbridge-lua is a protoc plugin. protoc resolves a plugin by
+# executable name, so the binary name is fixed by that contract.
 
 [package]
 name = "protoc-gen-dcsbridge-lua"
-description = "The DCS-Bridge protoc plugin: emits the Lua artefacts SPEC 8.3 lists."
+description = "The DCS-Bridge protoc plugin: emits the bridge's Lua artefacts."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
