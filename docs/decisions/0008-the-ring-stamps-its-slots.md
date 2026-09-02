@@ -120,9 +120,19 @@ A test on three hosts cannot establish that a lock-free structure is correct.
 Two of the three runners are x86-64, where a missing acquire-release pair is
 unobservable in principle, and x86-64 Windows is the only target that ships, so
 the host most able to expose an ordering fault is the host that never runs the
-product. Loom checks the orderings against a model of the memory model instead,
-and Miri checks the unsafe blocks for undefined behavior. Both are
-dev-dependencies of the broker and neither reaches the shipped artifact.
+product. Loom enumerates the interleavings instead, and Miri reads the unsafe
+blocks for undefined behavior. Neither reaches the shipped artifact: Loom is a
+dev-dependency behind a `cfg` no shipped build sets, and nightly lives in one CI
+job.
+
+Loom establishes less here than it does for most lock-free code. Slots change
+hands through read-modify-writes, and Loom gives one of those more causality
+than the memory model promises, so the model passes with the publishing store
+written `Relaxed`. What it does check is the ownership protocol: over every
+interleaving, no schedule lets both ends into one slot and none reorders what
+comes out. The acquire-release pairings rest on the argument written beside each
+of them and on what Miri catches, which is worth knowing before trusting a green
+run.
 
 The evicted record comes back to whoever pushed, so a caller on the logic thread
 that simply drops it has put a deallocation on the frame budget, once per lost

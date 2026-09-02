@@ -19,5 +19,10 @@ authors.workspace = true
 
 [dependencies]
 
+# Loom reaches the broker only under `--cfg loom`, which no shipped build sets,
+# so the artifact that goes into DCS keeps no dependency at all.
+[target.'cfg(loom)'.dev-dependencies]
+loom = "0.7"
+
 [lints]
 workspace = true

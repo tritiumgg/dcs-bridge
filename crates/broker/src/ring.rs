@@ -19,10 +19,9 @@
 //! free slot, and give the record back if there is none. It arrives as its own
 //! method when something needs it.
 
-use std::cell::UnsafeCell;
 use std::mem::MaybeUninit;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+
+use crate::sync::{Arc, AtomicU64, Ordering, UnsafeCell};
 
 /// The slot holds nothing, and the producer may fill it at the index stamped.
 const EMPTY: u64 = 0;
@@ -184,13 +183,15 @@ impl<T> Drop for Ring<T> {
     /// cannot be seen here: between claiming a slot and publishing it again,
     /// each side does nothing but move a value, and a move does not unwind.
     fn drop(&mut self) {
-        for slot in &mut self.slots {
-            if state_of(*slot.stamp.get_mut()) == FULL {
+        for slot in &self.slots {
+            if state_of(slot.stamp.load(Ordering::Relaxed)) == FULL {
                 // SAFETY: the stamp says the slot holds a value, and a slot is
-                // stamped `FULL` only after a value is written into it. Nothing
-                // else in this loop touches the slot, so the value is dropped
-                // once.
-                unsafe { slot.value.get_mut().assume_init_drop() };
+                // stamped `FULL` only after a value is written into it. This
+                // runs behind `&mut self`, so no thread is inside the ring and
+                // nothing else in this loop reaches the same slot: the value is
+                // dropped once.
+                slot.value
+                    .with_mut(|value| unsafe { (*value).assume_init_drop() });
             }
         }
     }
@@ -226,7 +227,7 @@ impl<T> Producer<T> {
                 // moved the old value out, and the acquire load above pairs
                 // with that release, so nothing is overwritten here. No other
                 // thread writes a slot stamped for the producer's index.
-                unsafe { (*slot.value.get()).write(value) };
+                slot.value.with_mut(|slot| unsafe { (*slot).write(value) });
                 slot.stamp.store(stamp(self.index, FULL), Ordering::Release);
                 self.advance();
 
@@ -260,10 +261,12 @@ impl<T> Producer<T> {
                         // the consumer's claim on the same slot cannot also
                         // have won. The stamp taken said `FULL`, so the value
                         // is initialized and this is the only move of it.
-                        let evicted = unsafe { (*slot.value.get()).assume_init_read() };
+                        let evicted = slot
+                            .value
+                            .with_mut(|slot| unsafe { (*slot).assume_init_read() });
                         // SAFETY: the same ownership. The slot is uninitialized
                         // after the move above, so writing it drops nothing.
-                        unsafe { (*slot.value.get()).write(value) };
+                        slot.value.with_mut(|slot| unsafe { (*slot).write(value) });
                         slot.stamp.store(stamp(self.index, FULL), Ordering::Release);
                         self.ring.dropped.fetch_add(1, Ordering::Relaxed);
                         self.advance();
@@ -371,7 +374,9 @@ impl<T> Consumer<T> {
                 // taken said `FULL`, so the producer's release of that stamp is
                 // visible here, the value is initialized, and this is the only
                 // move of it.
-                let value = unsafe { (*slot.value.get()).assume_init_read() };
+                let value = slot
+                    .value
+                    .with_mut(|slot| unsafe { (*slot).assume_init_read() });
                 let next = self.index + self.ring.capacity() as u64;
                 slot.stamp.store(stamp(next, EMPTY), Ordering::Release);
                 self.advance();
@@ -417,10 +422,10 @@ impl<T> Consumer<T> {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(loom)))]
 mod tests {
     use super::*;
-    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::{AtomicBool, AtomicUsize};
 
     /// A record that says when it is dropped, so a test can account for every
     /// value it handed to a ring.
@@ -626,5 +631,108 @@ mod tests {
             7,
             "the ring did not drop the three records it still held"
         );
+    }
+
+    /// Two threads, and the only claims that hold under every schedule: no
+    /// record is invented, duplicated, reordered or quietly lost.
+    ///
+    /// Nothing here asserts how much was dropped or which records went. That
+    /// depends on how the two threads interleave, and a test that pinned it
+    /// would be asserting the scheduler. What every schedule owes is that each
+    /// record either came out of the far end or came back to the pusher, once,
+    /// and that what came out came out in order.
+    #[test]
+    fn two_threads_account_for_every_record() {
+        let pushes: u32 = if cfg!(miri) { 512 } else { 200_000 };
+        let (mut producer, mut consumer) = Ring::split(64);
+        let done = Arc::new(AtomicBool::new(false));
+        let pushing = Arc::clone(&done);
+
+        let pusher = std::thread::spawn(move || {
+            let mut returned = Vec::new();
+            for value in 0..pushes {
+                match producer.push(value) {
+                    Push::Stored => {}
+                    Push::Evicted(record) | Push::Refused(record) => returned.push(record),
+                }
+            }
+            pushing.store(true, Ordering::Release);
+
+            (producer.dropped(), returned)
+        });
+
+        let mut arrived = Vec::new();
+        loop {
+            if let Some(record) = consumer.pop() {
+                arrived.push(record);
+            } else if done.load(Ordering::Acquire) {
+                break;
+            }
+        }
+
+        let (dropped, returned) = pusher.join().expect("the pushing thread only pushes");
+
+        assert!(
+            arrived.windows(2).all(|pair| pair[0] < pair[1]),
+            "records arrived out of order or twice"
+        );
+        assert_eq!(
+            dropped as usize,
+            returned.len(),
+            "the drop counter disagrees with what came back to the pusher"
+        );
+
+        let mut accounted = vec![false; pushes as usize];
+        for record in arrived.iter().chain(returned.iter()) {
+            let seen = &mut accounted[*record as usize];
+            assert!(!*seen, "{record} was accounted for twice");
+            *seen = true;
+        }
+        assert!(
+            accounted.iter().all(|seen| *seen),
+            "a record neither arrived nor came back"
+        );
+    }
+}
+
+/// Loom drives the same protocol over a ring small enough to enumerate, so the
+/// ownership rules are checked against every interleaving rather than against
+/// whatever the CI hosts happen to schedule.
+#[cfg(all(test, loom))]
+mod loom_tests {
+    use super::*;
+
+    /// Every interleaving of a producer that evicts and a consumer that drains
+    /// leaves the records in order, with no slot reached by both ends at once.
+    ///
+    /// The ring holds two and takes three records, so the producer must evict
+    /// while the consumer is somewhere in the ring — which is the case the
+    /// per-slot stamp exists for, and the one no test on real hardware can be
+    /// trusted to reach.
+    #[test]
+    fn a_producer_that_evicts_never_races_its_consumer() {
+        loom::model(|| {
+            let (mut producer, mut consumer) = Ring::split(2);
+
+            let pushing = loom::thread::spawn(move || {
+                for value in 0..3u32 {
+                    producer.push(value);
+                }
+            });
+
+            let mut arrived = Vec::new();
+            while let Some(record) = consumer.pop() {
+                arrived.push(record);
+            }
+            pushing.join().expect("the pushing thread only pushes");
+            while let Some(record) = consumer.pop() {
+                arrived.push(record);
+            }
+
+            assert!(
+                arrived.windows(2).all(|pair| pair[0] < pair[1]),
+                "records arrived out of order or twice: {arrived:?}"
+            );
+        });
     }
 }
