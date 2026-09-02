@@ -665,7 +665,20 @@ mod tests {
         loop {
             if let Some(record) = consumer.pop() {
                 arrived.push(record);
-            } else if done.load(Ordering::Acquire) {
+                continue;
+            }
+
+            // An empty ring is not a finished one, and the two have to be read
+            // in this order. Finding the ring empty says nothing about pushes
+            // that had not happened yet at the moment it was read, so the flag
+            // is what settles it — and the flag is stored after the last push,
+            // so once it reads true every push is visible here and a ring that
+            // drains to empty is a ring that is done.
+            if done.load(Ordering::Acquire) {
+                while let Some(record) = consumer.pop() {
+                    arrived.push(record);
+                }
+
                 break;
             }
         }
