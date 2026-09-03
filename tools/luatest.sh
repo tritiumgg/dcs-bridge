@@ -74,4 +74,10 @@ VERSION=$(awk '
     exit 1
 }
 
-"$LUA" "$ROOT/tests/lua/load.lua" "$MODULE" "$VERSION"
+# Every script under tests/lua, in name order, each given the module and the
+# version. A script that fails stops the run, so the first failure is the one
+# reported.
+for script in "$ROOT"/tests/lua/*.lua; do
+    printf '%s\n' "--- ${script#"$ROOT"/}"
+    "$LUA" "$script" "$MODULE" "$VERSION"
+done

@@ -18,7 +18,7 @@ is just deleted. Write entries as one or two lines, never paragraphs.
 
 ## In progress
 
-Nothing. 2.4 is closed; 2.5 is next.
+Nothing. 2.5 is closed; 2.6 is next.
 
 *One task at most. Say what is done, what is not, and where to resume. Say what
 is committed and what is only in the working tree. Say what is knowingly
@@ -26,25 +26,26 @@ broken. Empty this when the task closes.*
 
 ## Just finished
 
-- **2.3** — a fixed-size ring, one producer, one consumer, drop-oldest with a
-  counter, PRs #18 and #19. ADR 0008, which says what Loom does not settle.
 - **2.4** — one commit ring fanned out to a ring per connection by a writer
   thread, PRs #21 and #22. ADR 0011. The cost figure in #22 is the maintainer's.
+- **2.5** — put calls into one preallocated buffer, nested lengths padded in
+  place, bound into Lua, PRs #23, #24 and #25. ADR 0012.
 
 *The last three at most, one line each. Git log holds the rest.*
 
 ## Next
 
-**Task 2.5** — put calls emitting protobuf tags and values into a preallocated
-buffer, no protobuf runtime. Done when a stock library decodes the output,
-including a non-minimal length varint.
+**Task 2.6** — run PROBE-3, the put-call crossing cost, per the plan's Section
+3.1. Done when the one-call-per-field shape is confirmed or a batched put form
+is scheduled. It also prices the fence and the wake ADR 0011 left unmeasured.
 
-**An agent sees this itself**: a decoder in the test suite, with no DCS present.
+**The maintainer reads the figure**: an agent can run the probe against the
+host-native module, but a runner's timings cannot carry a cost claim.
 
 ## After that
 
-- **2.6** — PROBE-3, put-call crossing cost, which also prices the fence and
-  the wake ADR 0011 left unmeasured.
+- **2.7** — `Envelope` wrapping with an `Any` payload, length-prefixed framing,
+  per-connection `seq`; where `commit` stops returning bytes to Lua.
 - **Phase 3** opens on `protoc-gen-dcsbridge-lua`, which reads the four message
   options this schema defines and splits its output by `Target`.
 
@@ -89,9 +90,10 @@ entries at most: an eleventh means something here is finished, or belongs in
   drop decision, so a ring per class reorders nothing that a merge at drain
   cannot restore. What it changes is that a full `LIFECYCLE` ring disconnects
   where one ring would have evicted. Needed before 2.18. ADR 0008 names it.
-- **Two things 2.4 left to later tasks.** The commit ring has no size key and
-  takes a capacity parameter; 2.15 decides. A connection's thread has no way to
-  wait on its ring; 2.7's socket thread needs the writer's flag handshake per
-  connection, or a poll. ADR 0011 settles who drains, not how it waits.
+- **What 2.4 and 2.5 left to later tasks.** The commit ring takes a capacity
+  parameter and each Lua state's record buffer is 1 MiB at open; 2.15 sizes
+  both from `configure` and allocates there. A connection's thread has no way
+  to wait on its ring, and `commit` returns the body to Lua; 2.7 owns both.
+  ADR 0011 settles who drains, not how it waits.
 - **Task 7.10 does not exist.** Phase 7 runs 7.1 to 7.9 then 7.11, with no note
   explaining the gap. Retired ID or omission, unresolved.
