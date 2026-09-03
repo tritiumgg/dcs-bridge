@@ -155,6 +155,14 @@ should show only what the transport adds:
 The listener binds at open with the specification's defaults until 2.15 moves
 it to `configure`. The handshake is 2.9; nothing here authenticates.
 
+**Task 2.C1 lands as a sequence of two.** The verb and the test that drives a
+real socket into the drop policy are each reviewable alone:
+
+| Branch | What it holds | Reviewable against |
+|---|---|---|
+| `task/2.C1-1-tail` | `dcsb` over clap; `tail` connects, decodes each frame's `Envelope` through prost, prints one line per frame and one per gap in `seq`. Tests over hand-built byte streams. | SPEC §5.2 "Frame format" and "Sequence numbers", SPEC §15's verb list |
+| `task/2.C1-2-stall` | A loopback test: a consumer that stops reading blocks its connection's thread, its ring evicts, and `tail` prints the gap. The live-install steps, in the pull request. `STATE.md`. | The done-when: 2.7's forced drop observed as a `seq` gap by `dcsb tail` |
+
 ### Phase 3 — Generator
 
 | ID | Task | Done when |

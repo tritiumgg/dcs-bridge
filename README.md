@@ -56,6 +56,10 @@ mise run check
 `cargo clippy -D warnings`, `cargo build`, `cargo test` and the Lua load
 below, against the host target. `mise tasks` lists the rest.
 
+`cargo run -p dcsb -- tail` connects to a running bridge on the module's
+default address, `127.0.0.1:7742`, and prints one line per frame and one line
+per gap in its numbering. `--addr` names another.
+
 Rust is the one tool `mise.toml` does not name a version for. `rust-toolchain.toml`
 does, and mise reads it — `mise ls` shows rust sourced from that file, and
 `mise install` provisions the channel it names. The file also carries
