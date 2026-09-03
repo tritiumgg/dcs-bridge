@@ -16,7 +16,7 @@
 //! What a connection can say, and the handshake that precedes any of it, are
 //! later tasks'. A socket that connects here receives from its first frame.
 
-use std::io::{self, Write};
+use std::io::{self, IoSlice, Write};
 use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -231,8 +231,11 @@ fn serve(
 /// Write one frame: the length, then `seq` as the envelope's first field,
 /// then the shared tail.
 ///
-/// Two writes, because the tail is shared and the header is this
-/// connection's. The header is built on the stack.
+/// Two pieces, because the tail is shared and the header is this
+/// connection's, and one system call, because the call is what a frame
+/// costs: a live burst on Windows loopback drained one frame per two calls
+/// at tens of microseconds each, and nothing downstream was slower. The
+/// header is built on the stack and nothing is copied to join them.
 fn write_frame(stream: &mut TcpStream, record: &Numbered<Record>) -> io::Result<()> {
     let tail = &record.record;
     let length = u32::try_from(1 + varint_len(record.seq) + tail.len())
@@ -251,8 +254,32 @@ fn write_frame(stream: &mut TcpStream, record: &Numbered<Record>) -> io::Result<
     }
     header[n] = seq as u8;
 
-    stream.write_all(&header[..=n])?;
-    stream.write_all(tail)
+    write_all_vectored(stream, &header[..=n], tail)
+}
+
+/// Write `first` then `second`, handing the socket both at once and finishing
+/// whatever a short write left.
+///
+/// A socket may take fewer bytes than offered, so the loop advances past what
+/// went and offers the rest; `advance_slices` drops a slice once it is
+/// wholly written, so the second call carries only what remains.
+fn write_all_vectored(stream: &mut TcpStream, first: &[u8], second: &[u8]) -> io::Result<()> {
+    let mut bufs = [IoSlice::new(first), IoSlice::new(second)];
+    let mut pending: &mut [IoSlice<'_>] = &mut bufs;
+    while !pending.is_empty() {
+        match stream.write_vectored(pending) {
+            Ok(0) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::WriteZero,
+                    "the socket took none of the frame",
+                ));
+            }
+            Ok(written) => IoSlice::advance_slices(&mut pending, written),
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
