@@ -90,23 +90,77 @@ install the same files. Both load the sim driver on every mission load.
 mission environment through the DCS API `net.dostring_in`. Route A edits no
 file in the DCS install directory. It survives DCS updates.
 
-Route A depends on a DCS policy setting. Add these two keys to
-`Config\autoexec.cfg` in the Saved Games directory:
+Route A depends on a DCS policy setting in `Config\autoexec.cfg` in the Saved
+Games directory. The setting is two keys. Each key holds a list of names.
+DCS-Bridge needs these names in each list:
+
+| Key | Names DCS-Bridge needs |
+|---|---|
+| `net.allow_unsafe_api` | `"userhooks"` |
+| `net.allow_dostring_in` | `"server"`, `"mission"`, `"gui"` |
+
+If the file does not exist, or has neither key, add these two lines:
 
 ```lua
 net.allow_unsafe_api = {"userhooks"}
 net.allow_dostring_in = {"server", "mission", "gui"}
 ```
 
-Other tools, such as DCS-SRS and DCS Olympus, use the same two keys. If the
-file already has them, add the values above to the existing lists. Do not
-replace the lists. A removed value breaks the tool that needed it.
+If the file already has a key, keep the line and add the missing names to its
+list. Other tools, such as DCS-SRS and DCS Olympus, set the same keys. A name
+you remove breaks the tool that needed it. For example, this line from another
+tool:
+
+```lua
+net.allow_dostring_in = {"server"}
+```
+
+becomes:
+
+```lua
+net.allow_dostring_in = {"server", "mission", "gui"}
+```
+
+Set both keys. A file with `net.allow_dostring_in` and no
+`net.allow_unsafe_api` does not enable the API.
 
 **Route B edits a file in the DCS install directory.** Add one `dofile` line
-to `Scripts\MissionScripting.lua`, before the block that removes `os`, `io`
-and `lfs`. The sim driver then loads as part of the mission scripting
-environment itself. Route B does not use `net.dostring_in` and needs no
-`autoexec.cfg` change. The exact line to add is not final.
+to `Scripts\MissionScripting.lua`, after the line that loads
+`ScriptingSystem.lua` and before the block that removes `os`, `io` and `lfs`.
+The sim driver then loads as part of the mission scripting environment
+itself. Route B does not use `net.dostring_in` and needs no `autoexec.cfg`
+change. The exact line to add is not final.
+
+The edited file looks like this. The `dofile` line is the addition.
+
+```lua
+--Initialization script for the Mission lua Environment (SSE)
+
+dofile('Scripts/ScriptingSystem.lua')
+
+dofile(lfs.writedir() .. 'Mods/services/DCSBridge/lua/SimDriver.lua')
+
+--Sanitize Mission Scripting environment
+--This makes unavailable some unsecure functions.
+--Mission downloaded from server to client may contain potentialy harmful lua code that may use these functions.
+--You can remove the code below and make availble these functions at your own risk.
+
+local function sanitizeModule(name)
+	_G[name] = nil
+	package.loaded[name] = nil
+end
+
+do
+	sanitizeModule('os')
+	sanitizeModule('io')
+	sanitizeModule('lfs')
+	_G['require'] = nil
+	_G['loadlib'] = nil
+	_G['package'] = nil
+end
+```
+
+Do not remove the sanitize block. It keeps mission scripts sandboxed.
 
 Every DCS update overwrites `MissionScripting.lua` and removes the line. The
 bridge then stops loading with no error. Reapply the edit after every update.
