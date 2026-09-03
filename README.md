@@ -23,7 +23,7 @@ A release carries four files.
 
 | File | What it is |
 |---|---|
-| `write-directory-<version>.zip` | The files that go into your DCS Saved Games folder. |
+| `write-directory-<version>.zip` | The files that go into your DCS Saved Games directory. |
 | `dcsb.exe` | The command-line tool. |
 | `lua-dcsbridge.dll` | The broker, on its own. The zip already contains it. |
 | `SHA256SUMS` | Checksums of the three files above. |
@@ -45,11 +45,11 @@ each of those moves only for its own reason.
 Installation is not final. The current releases contain placeholder files.
 The steps below describe the intended procedure.
 
-1. Extract `write-directory-<version>.zip` over your DCS Saved Games folder.
+1. Extract `write-directory-<version>.zip` over your DCS Saved Games directory.
    This is normally `%USERPROFILE%\Saved Games\DCS\` or
    `%USERPROFILE%\Saved Games\DCS.openbeta\`.
 2. Put `dcsb.exe` anywhere on your `PATH`. It does not belong in the Saved
-   Games folder.
+   Games directory.
 3. Configure the injection route. See the next section.
 4. Restart DCS.
 5. Run `dcsb doctor` to check the installation. This command is planned and
@@ -65,7 +65,7 @@ Saved Games\DCS\
 
 A release overwrites every file under `Mods\services\DCSBridge\`. Do not put
 your own files there. Your own extension files go under `DCSBridge\` in the
-Saved Games folder. A release never touches that directory.
+Saved Games directory. A release never touches that directory.
 
 To uninstall, delete `Scripts\Hooks\DCSBridge.lua` and
 `Mods\services\DCSBridge\`. Delete `DCSBridge\`, `Config\DCSBridge.lua` and
@@ -73,7 +73,7 @@ To uninstall, delete `Scripts\Hooks\DCSBridge.lua` and
 
 ### Configure
 
-Settings live in `Config\DCSBridge.lua` in the Saved Games folder. The bridge
+Settings live in `Config\DCSBridge.lua` in the Saved Games directory. The bridge
 runs with the file absent and uses its defaults. The defaults bind the broker
 to `127.0.0.1:7742`. The full set of keys is not final.
 
@@ -91,7 +91,7 @@ mission environment through the DCS API `net.dostring_in`. Route A edits no
 file in the DCS install directory. It survives DCS updates.
 
 Route A depends on a DCS policy setting. Add these two keys to
-`Config\autoexec.cfg` in the Saved Games folder:
+`Config\autoexec.cfg` in the Saved Games directory:
 
 ```lua
 net.allow_unsafe_api = {"userhooks"}
