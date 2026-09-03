@@ -126,6 +126,20 @@ sizes come from config at 2.15.
 The benchmark reports a figure; whether it satisfies the done-when is the
 maintainer's reading, because a runner's timings cannot carry a cost claim.
 
+**Task 2.5 lands as a sequence of three.** Each branch is sized to about 400
+changed lines with its tests counted, because 2.3 and 2.4 were split by
+concept and each half still landed at twice that:
+
+| Branch | What it holds | Reviewable against |
+|---|---|---|
+| `task/2.5-1-encoder` | The encoder: one buffer allocated at construction, the tag and varint writers, the four scalar puts, `begin` and `commit`, and the errors that poison a record. Tests decoding every scalar wire form through a stock library. | The done-when's first half: a stock library decodes the output |
+| `task/2.5-2-nested-messages` | `message` and `end_message` over a preallocated stack of open messages, each length reserved in place at a fixed width and back-patched at close, and the depth cap. Tests for nesting, repetition and the padded length, and the record that argues the departure from a scratch buffer. | The done-when's second half, a non-minimal length varint, and ADR 0012 |
+| `task/2.5-3-put-calls` | The Lua binding of `begin`, the six puts and `commit`, one encoder per Lua state, a second harness script under `tests/lua`, and `tools/luatest.sh` running every script there. | SPEC §5.1's put surface, reachable from a stock Lua 5.1 with no DCS present |
+
+`commit` returns the body to Lua until 2.7 queues it, and the buffer is
+allocated at open until 2.15 allocates it at the first `configure`. Topic
+checks against the registration maps are 2.16.
+
 ### Phase 3 — Generator
 
 | ID | Task | Done when |

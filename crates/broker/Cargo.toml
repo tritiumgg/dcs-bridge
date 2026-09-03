@@ -19,6 +19,13 @@ authors.workspace = true
 
 [dependencies]
 
+# The tests decode the encoder's output through a stock protobuf library,
+# because a decoder written beside the encoder would share its misreadings.
+# A dev-dependency reaches no shipped build, so the broker still links no
+# protobuf runtime.
+[dev-dependencies]
+prost = "0.14"
+
 # Loom reaches the broker only under `--cfg loom`, which no shipped build sets,
 # so the artifact that goes into DCS keeps no dependency at all.
 [target.'cfg(loom)'.dev-dependencies]
