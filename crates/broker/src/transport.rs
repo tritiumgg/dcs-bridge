@@ -22,7 +22,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::thread;
 
-use crate::encode::varint_len;
+use crate::encode::{varint_len, write_varint};
 use crate::fanout::{ConnectionId, Connections, LOOKS_BEFORE_PARK, Numbered, ParkFlag, Waker};
 use crate::ring::Consumer;
 
@@ -244,17 +244,9 @@ fn write_frame(stream: &mut TcpStream, record: &Numbered<Record>) -> io::Result<
     let mut header = [0u8; HEADER_MAX];
     header[..4].copy_from_slice(&length.to_le_bytes());
     header[4] = SEQ_TAG;
-    let mut n = 5;
-    let mut seq = record.seq;
-    while seq >= 0x80 {
-        // Truncation keeps the low seven bits, which is the point.
-        header[n] = (seq as u8) | 0x80;
-        seq >>= 7;
-        n += 1;
-    }
-    header[n] = seq as u8;
+    let end = 5 + write_varint(&mut header[5..], record.seq);
 
-    write_all_vectored(stream, &header[..=n], tail)
+    write_all_vectored(stream, &header[..end], tail)
 }
 
 /// Write `first` then `second`, handing the socket both at once and finishing

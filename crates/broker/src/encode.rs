@@ -360,6 +360,25 @@ fn put_varint(buf: &mut Vec<u8>, mut v: u64) {
     buf.push(v as u8);
 }
 
+/// Write `v` as a minimal varint at the start of `out`, returning how many
+/// bytes it took. For a caller building a header on the stack rather than in
+/// a `Vec`, so the frame writer and the encoder agree on what a varint is.
+///
+/// # Panics
+///
+/// If `out` is shorter than [`varint_len`] of `v`; ten bytes always suffice.
+pub(crate) fn write_varint(out: &mut [u8], mut v: u64) -> usize {
+    let mut n = 0;
+    while v >= 0x80 {
+        // Truncation keeps the low seven bits, which is the point.
+        out[n] = (v as u8) | 0x80;
+        v >>= 7;
+        n += 1;
+    }
+    out[n] = v as u8;
+    n + 1
+}
+
 /// Write `v` as a varint filling all of `gap`: every byte but the last has
 /// the continuation bit, whether or not the bits above it are zero.
 ///
@@ -609,6 +628,10 @@ mod tests {
             put_varint(&mut buf, v);
             assert_eq!(buf.len(), varint_len(v), "{v:#x}");
             assert_eq!(prost::encoding::decode_varint(&mut &buf[..]).unwrap(), v);
+
+            let mut out = [0u8; 10];
+            let n = write_varint(&mut out, v);
+            assert_eq!(&out[..n], &buf[..], "{v:#x} differs between writers");
         }
     }
 
