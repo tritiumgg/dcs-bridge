@@ -5,10 +5,12 @@
 //! value by hand into a buffer allocated once, at construction. A put call
 //! allocates nothing.
 //!
-//! What `commit` hands back is a message body: the payload's fields, one
-//! after another, with no length prefix. Wrapping that body in an `Any`
-//! inside an `Envelope` and framing it for the socket happen later and
-//! elsewhere.
+//! What `commit` hands back is the tail of an `Envelope`: every field but
+//! `seq`, which differs per connection and is written where the frame is.
+//! Today that tail is one field, the `Any` payload, whose type URL is the
+//! topic `begin` was given and whose value is the record's own fields. The
+//! wrapper is written at `begin`, ahead of the record, so a put appends to a
+//! body that is already in its place and `commit` copies nothing.
 //!
 //! Every integer is written as a plain varint, which is the wire form of
 //! `int32`, `int64`, `uint32`, `uint64`, `bool` and every enum. There is no
@@ -34,6 +36,18 @@ const MAX_FIELD: u32 = (1 << 29) - 1;
 /// bound and not a tunable. A generated emitter nests as deep as its schema
 /// and no schema in this project comes near it.
 pub const MAX_DEPTH: usize = 64;
+
+/// What protobuf writes in front of a fully-qualified type name to make an
+/// `Any` type URL. The topic is the name, and this is what every runtime
+/// expects to find before it.
+pub const TYPE_URL_PREFIX: &[u8] = b"type.googleapis.com/";
+
+/// `Envelope.payload`, the `Any` the record goes in.
+const ENVELOPE_PAYLOAD: u32 = 4;
+/// `Any.type_url`.
+const ANY_TYPE_URL: u32 = 1;
+/// `Any.value`.
+const ANY_VALUE: u32 = 2;
 
 /// The wire type of a varint value.
 const WIRE_VARINT: u64 = 0;
@@ -89,8 +103,9 @@ enum State {
 
 /// One record at a time, encoded into a buffer sized once.
 ///
-/// `begin` opens a record, the puts append fields, and `commit` closes it and
-/// returns the body. A record that `begin` finds still open, or that `commit`
+/// `begin` opens a record on a topic, the puts append fields, and `commit`
+/// closes it and returns the envelope tail holding it. A record that `begin`
+/// finds still open, or that `commit`
 /// refuses, is discarded and counted, because the caller that abandoned it is
 /// the caller that needs to know.
 #[derive(Debug)]
@@ -101,6 +116,11 @@ pub struct Encoder {
     open: Vec<usize>,
     /// Bytes every length gap takes: enough for the largest body possible.
     len_width: usize,
+    /// Where the payload's length gap starts, and where the `Any` value's
+    /// does. Both are written at `begin` and filled at `commit`. They are
+    /// not on the `open` stack, so no `end_message` can close them.
+    payload_gap: usize,
+    value_gap: usize,
     state: State,
     discarded: u64,
 }
@@ -114,6 +134,8 @@ impl Encoder {
             capacity: bytes,
             open: Vec::with_capacity(MAX_DEPTH),
             len_width: varint_len(bytes as u64),
+            payload_gap: 0,
+            value_gap: 0,
             state: State::Idle,
             discarded: 0,
         }
@@ -130,8 +152,15 @@ impl Encoder {
         self.discarded
     }
 
-    /// Open a record, discarding one left open. Returns whether it did.
-    pub fn begin(&mut self) -> bool {
+    /// Open a record on `topic`, discarding one left open. Returns whether it
+    /// did.
+    ///
+    /// The topic is the record's fully-qualified type name, and it goes into
+    /// the wrapper here: the payload field, the `Any` type URL built from the
+    /// topic, and the `Any` value field the puts then fill. A topic the buffer
+    /// cannot hold poisons the record with [`Error::Full`], so every later
+    /// put reports it and `commit` refuses it.
+    pub fn begin(&mut self, topic: &[u8]) -> bool {
         let abandoned = self.state != State::Idle;
         if abandoned {
             self.discarded += 1;
@@ -139,6 +168,34 @@ impl Encoder {
         self.buf.clear();
         self.open.clear();
         self.state = State::Open;
+
+        let width = self.len_width;
+        let url_len = TYPE_URL_PREFIX.len() + topic.len();
+        let wrapper = self
+            .put(ENVELOPE_PAYLOAD, WIRE_LENGTH, width, |buf| {
+                buf.resize(buf.len() + width, 0);
+            })
+            .and_then(|()| {
+                self.payload_gap = self.buf.len() - width;
+                self.put(
+                    ANY_TYPE_URL,
+                    WIRE_LENGTH,
+                    varint_len(url_len as u64) + url_len,
+                    |buf| {
+                        put_varint(buf, url_len as u64);
+                        buf.extend_from_slice(TYPE_URL_PREFIX);
+                        buf.extend_from_slice(topic);
+                    },
+                )
+            })
+            .and_then(|()| {
+                self.put(ANY_VALUE, WIRE_LENGTH, width, |buf| {
+                    buf.resize(buf.len() + width, 0);
+                })
+            });
+        if wrapper.is_ok() {
+            self.value_gap = self.buf.len() - width;
+        }
         abandoned
     }
 
@@ -206,12 +263,13 @@ impl Encoder {
         Ok(())
     }
 
-    /// Close the record and return its body, or refuse and discard it.
+    /// Close the record and return the envelope tail holding it, or refuse
+    /// and discard it.
     ///
     /// A record with a message still open is refused: closing it here would
     /// commit a shape the caller did not finish.
     ///
-    /// The body stays readable until the next `begin`.
+    /// The tail stays readable until the next `begin`.
     pub fn commit(&mut self) -> Result<&[u8], Error> {
         match self.state {
             State::Idle => Err(Error::NotOpen),
@@ -224,6 +282,12 @@ impl Encoder {
                 Err(Error::Unbalanced)
             }
             State::Open => {
+                let width = self.len_width;
+                let end = self.buf.len();
+                for gap in [self.value_gap, self.payload_gap] {
+                    let body = end - (gap + width);
+                    put_padded_varint(&mut self.buf[gap..gap + width], body as u64);
+                }
                 self.state = State::Idle;
                 Ok(&self.buf)
             }
@@ -320,6 +384,26 @@ mod tests {
     use super::*;
     use prost::Message;
 
+    /// The topic every test opens on, unless it is counting bytes.
+    const TOPIC: &[u8] = b"dcs.builtin.UnitDestroyed";
+
+    /// A one-byte topic, for the tests that count bytes against capacity.
+    const SHORT: &[u8] = b"t";
+
+    /// What the wrapper takes for [`SHORT`] under a capacity below 128, where
+    /// a length gap is one byte: the payload tag and gap, the type URL tag,
+    /// length and 21 bytes, and the value tag and gap.
+    const SHORT_WRAPPER: usize = 2 + 23 + 2;
+
+    /// `dcs.bridge.Envelope` without `seq`, which the connection writes. The
+    /// `Any` is the library's own, so the type URL is read the way every
+    /// consumer reads it.
+    #[derive(Clone, PartialEq, Message)]
+    struct Tail {
+        #[prost(message, optional, tag = "4")]
+        payload: Option<prost_types::Any>,
+    }
+
     /// One field of each wire form, plus the field numbers at the edges of a
     /// one-byte tag and of the whole numbering space.
     #[derive(Clone, PartialEq, Message)]
@@ -355,14 +439,30 @@ mod tests {
         inner: Option<Box<Inner>>,
     }
 
-    fn decode(body: &[u8]) -> Scalars {
-        Scalars::decode(body).expect("a stock decoder reads the body")
+    /// The `Any` out of a committed tail, with its type URL checked against
+    /// the topic the record was opened on.
+    fn any(tail: &[u8], topic: &[u8]) -> prost_types::Any {
+        let tail = Tail::decode(tail).expect("a stock decoder reads the tail");
+        let any = tail.payload.expect("the tail carries a payload");
+        let mut url = TYPE_URL_PREFIX.to_vec();
+        url.extend_from_slice(topic);
+        assert_eq!(any.type_url.as_bytes(), url, "the type URL names the topic");
+        any
+    }
+
+    /// The record's own bytes, out of the wrapper.
+    fn body(tail: &[u8]) -> Vec<u8> {
+        any(tail, TOPIC).value
+    }
+
+    fn decode(tail: &[u8]) -> Scalars {
+        Scalars::decode(&body(tail)[..]).expect("a stock decoder reads the body")
     }
 
     #[test]
     fn every_scalar_decodes() {
         let mut e = Encoder::with_capacity(256);
-        e.begin();
+        e.begin(TOPIC);
         e.integer(1, -7).unwrap();
         e.double(2, 2.5).unwrap();
         e.string(3, "über".as_bytes()).unwrap();
@@ -389,12 +489,12 @@ mod tests {
             (128, 2),
             (i64::MAX, 9),
         ] {
-            let mut e = Encoder::with_capacity(16);
-            e.begin();
+            let mut e = Encoder::with_capacity(256);
+            e.begin(TOPIC);
             e.integer(1, n).unwrap();
-            let body = e.commit().unwrap();
-            assert_eq!(body.len(), 1 + bytes, "{n}");
-            assert_eq!(decode(body).n, n, "{n}");
+            let tail = e.commit().unwrap();
+            assert_eq!(body(tail).len(), 1 + bytes, "{n}");
+            assert_eq!(decode(tail).n, n, "{n}");
         }
     }
 
@@ -407,40 +507,40 @@ mod tests {
             f64::INFINITY,
             f64::NEG_INFINITY,
         ] {
-            let mut e = Encoder::with_capacity(16);
-            e.begin();
+            let mut e = Encoder::with_capacity(256);
+            e.begin(TOPIC);
             e.double(2, x).unwrap();
             let got = decode(e.commit().unwrap()).x;
             assert_eq!(got.to_bits(), x.to_bits(), "{x}");
         }
 
-        let mut e = Encoder::with_capacity(16);
-        e.begin();
+        let mut e = Encoder::with_capacity(256);
+        e.begin(TOPIC);
         e.double(2, f64::NAN).unwrap();
         assert!(decode(e.commit().unwrap()).x.is_nan());
     }
 
     #[test]
     fn defaults_decode_whether_written_or_omitted() {
-        let mut e = Encoder::with_capacity(16);
-        e.begin();
-        assert!(e.commit().unwrap().is_empty());
+        let mut e = Encoder::with_capacity(256);
+        e.begin(TOPIC);
+        assert!(body(e.commit().unwrap()).is_empty());
 
-        e.begin();
+        e.begin(TOPIC);
         e.string(3, b"").unwrap();
         e.boolean(4, false).unwrap();
-        let body = e.commit().unwrap();
+        let tail = e.commit().unwrap();
         // proto3 would omit both, and the explicit form must read the same.
-        assert_eq!(body, [0x1a, 0x00, 0x20, 0x00]);
-        assert_eq!(decode(body), Scalars::default());
+        assert_eq!(body(tail), [0x1a, 0x00, 0x20, 0x00]);
+        assert_eq!(decode(tail), Scalars::default());
     }
 
     #[test]
     fn a_put_needs_an_open_record() {
-        let mut e = Encoder::with_capacity(16);
+        let mut e = Encoder::with_capacity(256);
         assert_eq!(e.integer(1, 1), Err(Error::NotOpen));
         assert_eq!(e.commit(), Err(Error::NotOpen));
-        e.begin();
+        e.begin(TOPIC);
         e.commit().unwrap();
         assert_eq!(e.boolean(1, true), Err(Error::NotOpen));
         assert_eq!(e.discarded(), 0);
@@ -449,8 +549,8 @@ mod tests {
     #[test]
     fn a_bad_field_number_poisons_the_record() {
         for field in [0, MAX_FIELD + 1] {
-            let mut e = Encoder::with_capacity(16);
-            e.begin();
+            let mut e = Encoder::with_capacity(256);
+            e.begin(TOPIC);
             assert_eq!(e.integer(field, 1), Err(Error::FieldNumber));
             assert_eq!(e.integer(1, 1), Err(Error::FieldNumber));
             assert_eq!(e.commit(), Err(Error::FieldNumber));
@@ -460,37 +560,40 @@ mod tests {
 
     #[test]
     fn a_record_fills_its_buffer_exactly_and_no_further() {
-        let mut e = Encoder::with_capacity(3);
-        e.begin();
+        // The wrapper counts against the capacity: three bytes are left.
+        let mut e = Encoder::with_capacity(SHORT_WRAPPER + 3);
+        e.begin(SHORT);
         e.string(1, b"x").unwrap();
-        assert_eq!(e.commit().unwrap(), [0x0a, 0x01, b'x']);
+        let tail = e.commit().unwrap();
+        assert_eq!(tail.len(), SHORT_WRAPPER + 3);
+        assert_eq!(any(tail, SHORT).value, [0x0a, 0x01, b'x']);
 
-        e.begin();
+        e.begin(SHORT);
         e.string(1, b"xy").unwrap_err();
         assert_eq!(e.string(1, b"xy"), Err(Error::Full));
         assert_eq!(e.boolean(2, true), Err(Error::Full));
         assert_eq!(e.commit(), Err(Error::Full));
         assert_eq!(e.discarded(), 1);
-        assert!(!e.begin(), "the refused record was already discarded");
+        assert!(!e.begin(TOPIC), "the refused record was already discarded");
     }
 
     #[test]
     fn begin_discards_an_open_record_and_counts_it() {
-        let mut e = Encoder::with_capacity(16);
-        e.begin();
+        let mut e = Encoder::with_capacity(256);
+        e.begin(TOPIC);
         e.integer(1, 1).unwrap();
-        assert!(e.begin());
+        assert!(e.begin(TOPIC));
         assert_eq!(e.discarded(), 1);
-        assert!(e.commit().unwrap().is_empty());
-        assert!(!e.begin());
+        assert!(body(e.commit().unwrap()).is_empty());
+        assert!(!e.begin(TOPIC));
     }
 
     #[test]
     fn puts_allocate_nothing() {
-        let mut e = Encoder::with_capacity(64);
+        let mut e = Encoder::with_capacity(256);
         let before = e.buf.capacity();
         for _ in 0..3 {
-            e.begin();
+            e.begin(TOPIC);
             e.integer(1, i64::MIN).unwrap();
             e.string(3, b"0123456789").unwrap();
             e.double(2, 1.0).unwrap();
@@ -511,14 +614,14 @@ mod tests {
 
     #[test]
     fn distinct_fields_decode_in_any_order() {
-        let mut forward = Encoder::with_capacity(64);
-        forward.begin();
+        let mut forward = Encoder::with_capacity(256);
+        forward.begin(TOPIC);
         forward.integer(1, 4).unwrap();
         forward.string(3, b"x").unwrap();
         let forward = decode(forward.commit().unwrap());
 
-        let mut backward = Encoder::with_capacity(64);
-        backward.begin();
+        let mut backward = Encoder::with_capacity(256);
+        backward.begin(TOPIC);
         backward.string(3, b"x").unwrap();
         backward.integer(1, 4).unwrap();
         assert_eq!(decode(backward.commit().unwrap()), forward);
@@ -526,8 +629,8 @@ mod tests {
 
     #[test]
     fn a_repeated_field_keeps_put_order() {
-        let mut e = Encoder::with_capacity(64);
-        e.begin();
+        let mut e = Encoder::with_capacity(256);
+        e.begin(TOPIC);
         for n in [3, 1, 2] {
             e.integer(5, n).unwrap();
         }
@@ -540,16 +643,51 @@ mod tests {
     fn a_nested_length_is_padded_and_decodes() {
         // The product buffer, whose largest length takes three varint bytes.
         let mut e = Encoder::with_capacity(1 << 20);
-        e.begin();
+        e.begin(TOPIC);
         e.message(6).unwrap();
         e.string(1, b"a").unwrap();
         e.end_message().unwrap();
-        let body = e.commit().unwrap();
+        let tail = e.commit().unwrap();
 
         // Tag, then a three-byte varint for a body of three bytes.
+        let body = body(tail);
         assert_eq!(body, [0x32, 0x83, 0x80, 0x00, 0x0a, 0x01, b'a']);
         assert_eq!(prost::encoding::decode_varint(&mut &body[1..4]).unwrap(), 3);
-        assert_eq!(decode(body).inner.unwrap().s, "a");
+        assert_eq!(decode(tail).inner.unwrap().s, "a");
+    }
+
+    /// The wrapper `begin` writes: the payload field over an `Any` whose
+    /// type URL is the topic behind protobuf's prefix, with the two lengths
+    /// padded the way a nested message's is. A stock decoder reads it, and
+    /// reads the topic out of it with no schema for the record.
+    #[test]
+    fn the_wrapper_names_the_topic_behind_two_padded_lengths() {
+        let mut e = Encoder::with_capacity(1 << 20);
+        e.begin(SHORT);
+        e.integer(1, 1).unwrap();
+        let tail = e.commit().unwrap();
+
+        let mut want = vec![0x22, 0x9d, 0x80, 0x00];
+        want.extend_from_slice(b"\x0a\x15type.googleapis.com/t");
+        want.extend_from_slice(&[0x12, 0x82, 0x80, 0x00, 0x08, 0x01]);
+        assert_eq!(tail, want);
+        assert_eq!(
+            prost::encoding::decode_varint(&mut &tail[1..4]).unwrap(),
+            29
+        );
+
+        let any = any(tail, SHORT);
+        assert_eq!(any.type_url, "type.googleapis.com/t");
+        assert_eq!(any.value, [0x08, 0x01]);
+    }
+
+    #[test]
+    fn a_topic_the_buffer_cannot_hold_poisons_the_record() {
+        let mut e = Encoder::with_capacity(8);
+        assert!(!e.begin(TOPIC));
+        assert_eq!(e.integer(1, 1), Err(Error::Full));
+        assert_eq!(e.commit(), Err(Error::Full));
+        assert_eq!(e.discarded(), 1);
     }
 
     #[test]
@@ -558,7 +696,7 @@ mod tests {
         for len in [0, 127, 128, 200] {
             let s = vec![b'z'; len];
             let mut e = Encoder::with_capacity(4096);
-            e.begin();
+            e.begin(TOPIC);
             e.message(6).unwrap();
             if len > 0 {
                 e.string(1, &s).unwrap();
@@ -572,7 +710,7 @@ mod tests {
     #[test]
     fn repeated_messages_keep_put_order() {
         let mut e = Encoder::with_capacity(256);
-        e.begin();
+        e.begin(TOPIC);
         for s in ["c", "a", "b"] {
             e.message(7).unwrap();
             e.string(1, s.as_bytes()).unwrap();
@@ -586,7 +724,7 @@ mod tests {
     #[test]
     fn messages_nest_and_puts_land_in_the_innermost() {
         let mut e = Encoder::with_capacity(256);
-        e.begin();
+        e.begin(TOPIC);
         e.message(6).unwrap();
         e.string(1, b"outer").unwrap();
         e.message(2).unwrap();
@@ -613,7 +751,7 @@ mod tests {
     fn depth_is_capped_at_construction() {
         let mut e = Encoder::with_capacity(4096);
         let stack = e.open.capacity();
-        e.begin();
+        e.begin(TOPIC);
         for _ in 0..MAX_DEPTH {
             e.message(2).unwrap();
         }
@@ -624,22 +762,22 @@ mod tests {
 
     #[test]
     fn unbalanced_messages_are_refused() {
-        let mut e = Encoder::with_capacity(64);
-        e.begin();
+        let mut e = Encoder::with_capacity(256);
+        e.begin(TOPIC);
         assert_eq!(e.end_message(), Err(Error::Unbalanced));
         assert_eq!(e.commit(), Err(Error::Unbalanced));
 
-        e.begin();
+        e.begin(TOPIC);
         e.message(6).unwrap();
         assert_eq!(e.commit(), Err(Error::Unbalanced));
         assert_eq!(e.discarded(), 2);
-        assert!(!e.begin());
+        assert!(!e.begin(TOPIC));
     }
 
     #[test]
     fn a_message_that_does_not_fit_is_refused_whole() {
-        let mut e = Encoder::with_capacity(4);
-        e.begin();
+        let mut e = Encoder::with_capacity(SHORT_WRAPPER + 4);
+        e.begin(SHORT);
         e.string(1, b"xy").unwrap();
         // Nothing is left for a tag and its length gap.
         assert_eq!(e.message(6), Err(Error::Full));

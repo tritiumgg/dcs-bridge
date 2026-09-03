@@ -33,6 +33,22 @@ local function expect(got, want, what)
   assert(hex(got) == want, what .. ': got ' .. hex(got) .. ', want ' .. want)
 end
 
+-- A length padded to three bytes, the width of the largest record the buffer
+-- holds, as hex. ADR 0012.
+local function padded(n)
+  return string.format('%02x%02x%02x', n % 128 + 128, math.floor(n / 128) % 128 + 128, math.floor(n / 16384))
+end
+
+-- What commit returns: the envelope's payload field, an Any whose type URL is
+-- the topic behind protobuf's prefix and whose value is the record's fields.
+-- Both lengths are padded like a nested message's.
+local function wrap(topic, body)
+  local url = 'type.googleapis.com/' .. topic
+  local value = '12' .. padded(#body / 2) .. body
+  local type_url = string.format('0a%02x', #url) .. hex(url)
+  return '22' .. padded(#type_url / 2 + #value / 2) .. type_url .. value
+end
+
 local shim = open(path)
 for _, name in ipairs({
   'begin', 'integer', 'double', 'string', 'boolean', 'message', 'end_message', 'commit',
@@ -44,7 +60,11 @@ end
 shim.begin('dcs.builtin.UnitDestroyed')
 shim.string(1, 'x')
 shim.integer(2, 3)
-expect(shim.commit(), '0a0178' .. '1003', 'a string and an integer')
+expect(
+  shim.commit(),
+  wrap('dcs.builtin.UnitDestroyed', '0a0178' .. '1003'),
+  'a string and an integer, wrapped in the payload'
+)
 
 -- A negative integer is ten bytes, a double eight behind its tag, a boolean
 -- one, and a two-byte tag starts at field 16.
@@ -55,7 +75,7 @@ shim.boolean(3, true)
 shim.integer(16, 0)
 expect(
   shim.commit(),
-  '08ffffffffffffffffff01' .. '11000000000000f83f' .. '1801' .. '800100',
+  wrap('t', '08ffffffffffffffffff01' .. '11000000000000f83f' .. '1801' .. '800100'),
   'the scalar wire forms'
 )
 
@@ -65,11 +85,11 @@ shim.begin('t')
 shim.message(3)
 shim.string(1, 'a')
 shim.end_message()
-expect(shim.commit(), '1a838000' .. '0a0161', 'a nested message')
+expect(shim.commit(), wrap('t', '1a838000' .. '0a0161'), 'a nested message')
 
--- An empty record is an empty body.
+-- An empty record is an empty Any value behind the topic.
 shim.begin('t')
-expect(shim.commit(), '', 'an empty record')
+expect(shim.commit(), wrap('t', ''), 'an empty record')
 
 -- A put before begin, a stray end_message and a non-boolean all raise.
 local function raises(what, f, ...)
@@ -95,13 +115,13 @@ shim.message(3)
 assert(shim.commit() == nil, 'a commit with a message open returned a body')
 shim.begin('t')
 shim.integer(1, 1)
-expect(shim.commit(), '0801', 'the record after a refused one')
+expect(shim.commit(), wrap('t', '0801'), 'the record after a refused one')
 
 -- A begin over an open record discards it.
 shim.begin('t')
 shim.integer(1, 1)
 shim.begin('t')
-expect(shim.commit(), '', 'a record begun over another')
+expect(shim.commit(), wrap('t', ''), 'a record begun over another')
 
 -- Each state has its own record in progress.
 local second = open(path)
@@ -109,8 +129,8 @@ shim.begin('t')
 shim.integer(1, 1)
 second.begin('t')
 second.integer(1, 2)
-expect(second.commit(), '0802', "the second table's record")
-expect(shim.commit(), '0801', "the first table's record, after the second committed")
+expect(second.commit(), wrap('t', '0802'), "the second table's record")
+expect(shim.commit(), wrap('t', '0801'), "the first table's record, after the second committed")
 
 print('ok  the eight put calls are on the table')
 print('ok  scalars, a padded nested length and an empty record match by hand')

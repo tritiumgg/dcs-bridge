@@ -97,8 +97,10 @@ end)
 
 -- commit allocates the returned string and nothing else. Lua interns short
 -- strings, so the body is made long enough to be allocated on every call, and
--- the check is that the growth is the body and nothing more.
+-- the check is that the growth is the body, the wrapper naming the topic,
+-- and nothing more.
 local body = text .. text
+local wrapper = #('type.googleapis.com/' .. topic) + 16
 local kb = growth(function()
   begin(topic)
   string_(1, body)
@@ -106,7 +108,7 @@ local kb = growth(function()
 end)
 local per_call = kb * 1024 / N
 assert(
-  per_call > 0 and per_call < #body + 64,
+  per_call > 0 and per_call < #body + wrapper + 64,
   'commit grew the heap by ' .. per_call .. ' bytes per call for a ' .. #body .. ' byte body'
 )
 

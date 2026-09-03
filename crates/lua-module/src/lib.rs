@@ -266,14 +266,17 @@ mod put {
         0
     }
 
-    /// `shim.begin(topic)`: open a record, discarding and counting one left
-    /// open. The topic is required and, until registration exists, unused.
+    /// `shim.begin(topic)`: open a record on the topic, discarding and
+    /// counting one left open. The topic names the record's type on the wire.
+    /// Whether it is a registered one is a check registration brings.
     unsafe extern "C" fn begin(state: *mut c_void) -> c_int {
-        // SAFETY: a Lua call over the closure `install` built.
+        // SAFETY: a Lua call over the closure `install` built. The topic is
+        // an argument, so Lua keeps it alive for the whole call.
         unsafe {
             let mut len = 0;
-            lua::luaL_checklstring(state, 1, &mut len);
-            encoder(state).begin();
+            let s = lua::luaL_checklstring(state, 1, &mut len);
+            let topic = core::slice::from_raw_parts(s.cast::<u8>(), len);
+            encoder(state).begin(topic);
         }
         0
     }
