@@ -24,7 +24,11 @@ RUSTUP_TOOLCHAIN = ""
 
 [tools]
 buf = "1.72.0"
-lua = "5.1"
+# Lua is here for tools/luatest.sh, which opens the host-native module with a
+# stock interpreter. That step does not run on Windows, where a module resolves
+# no symbol at load, and the lua plugin builds the interpreter from source with
+# make, which a Windows host does not have. So the tool is not installed there.
+lua = { version = "5.1", os = ["linux", "macos"] }
 
 # --no-default-features below turns the Lua module's dcs-lua feature off, which
 # is what the host-native build is. Leaving it on links DCS's lua.dll into the
