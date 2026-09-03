@@ -1,5 +1,12 @@
-# Build, test, rustfmt and clippy across all three hosts against host-native
-# targets, and a cross-build of the Windows target from a Linux runner.
+# Preflight, then a Linux job that builds, tests, lints, runs the ring under
+# a model checker and cross-builds the Windows target, then a Windows job that
+# builds and tests host-native. The macOS job runs on a schedule and by hand.
+#
+# The shape is chosen for the resources it takes. A job is billed by the
+# minute and rounded up, a Windows minute counts double and a macOS minute
+# counts ten times, so the Linux work sits in one job rather than three, and
+# the macOS leg, which establishes nothing the Linux leg does not except that
+# the module opens on macOS, stays off the pull request path.
 #
 # Action versions were current on 2026-09-01. Pin them to commit SHAs before
 # this repository has anything worth attacking.
@@ -10,67 +17,81 @@ on:
   push:
     branches: [main]
   pull_request:
+  schedule:
+    # Mondays, 06:00 UTC. The macOS job and nothing else.
+    - cron: '0 6 * * 1'
   workflow_dispatch:
 
 permissions:
   contents: read
+
+# A push to a branch supersedes the run its previous push started.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -D warnings
 
 jobs:
-  # Cheap checks that need no toolchain. They run first so a broken document or
-  # a broken .def fails in seconds rather than after three host builds.
-  documents:
-    name: Documents
+  # Cheap checks that need no toolchain. They run first so a broken document
+  # fails in seconds rather than after a build, and they decide whether the
+  # build jobs run at all.
+  preflight:
+    name: Preflight
     runs-on: ubuntu-latest
+    outputs:
+      code: ${{ steps.changed.outputs.code }}
     steps:
       # buf breaking compares against the newest release tag and reads that
       # tag's tree out of git, so the whole history and every tag have to be
-      # here. A shallow clone carries neither.
+      # here. A shallow clone carries neither. The change detection below
+      # needs the base branch for the same reason.
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
-      # docs/ is frozen, so this is tamper detection rather than maintenance:
-      # a failure means somebody edited a document that should not change.
-      - name: The frozen documents are unchanged
-        run: sh tools/ledger.sh lint
-      - name: STATE.md is within budget
-        run: sh tools/statecheck.sh
 
-      - name: The .def yields an import library
+      # A change that touches only documents needs none of the toolchain jobs.
+      # A pull request is compared against its base; a push against the commit
+      # before it, or built in full when that commit is unknown, as after a
+      # force push. Anything else runs everything.
+      - name: Does the change reach the code
+        id: changed
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE: ${{ github.base_ref }}
+          BEFORE: ${{ github.event.before }}
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends llvm
-          sh tools/mkimplib.sh
+          set -eu
+          range=""
+          case "$EVENT" in
+            pull_request) range="origin/$BASE...HEAD" ;;
+            push)
+              case "$BEFORE" in
+                0000000000000000000000000000000000000000|"") ;;
+                *) git cat-file -e "$BEFORE^{commit}" 2>/dev/null && range="$BEFORE..HEAD" ;;
+              esac ;;
+          esac
+          code=true
+          if [ -n "$range" ]; then
+            code=false
+            for f in $(git diff --name-only "$range"); do
+              case "$f" in
+                docs/*|.claude/*|*.md) ;;
+                *) code=true; break ;;
+              esac
+            done
+          fi
+          printf 'code=%s\n' "$code" >> "$GITHUB_OUTPUT"
+          printf 'code=%s (%s)\n' "$code" "${range:-everything}"
 
-      # buf lint is what enforces snake_case fields, the enum-name value
-      # prefix and the _UNSPECIFIED zero value. ADR 0004 says why one standard
-      # rule is excepted.
-      - uses: ./.github/actions/buf
-      - name: The schema lints
-        run: buf lint
-
-      # The two remaining schema gates. Ownership is a naming check over the
-      # sources and needs no buf; the comparison reads the newest release tag's
-      # tree out of git.
-      - name: The bridge owns what dcs.bridge holds
-        run: sh tools/schema-ownership.sh
-      - name: The schema breaks no consumer built against the last release
-        run: sh tools/schema-breaking.sh
-
-  # A fault must drop one connection, not the process. In Rust that means the
-  # broker is never built with panic = "abort". A workspace profile setting
-  # would apply to it silently, so fail the build instead.
-  #
-  # The grep reaches comments too, so a Cargo.toml explains that setting
-  # without naming it.
-  guards:
-    name: Guards
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
+      # A fault must drop one connection, not the process. In Rust that means
+      # the broker is never built with panic = "abort". A workspace profile
+      # setting would apply to it silently, so fail the build instead.
+      #
+      # The grep reaches comments too, so a Cargo.toml explains that setting
+      # without naming it.
       - name: No panic = "abort" in any profile
         run: |
           if grep -rn 'panic[[:space:]]*=[[:space:]]*"abort"' --include='Cargo.toml' . ; then
@@ -87,14 +108,37 @@ jobs:
       - name: The code cites no specification
         run: sh tools/nospecrefs.sh
 
-  check:
-    name: ${{ matrix.os }}
-    needs: [documents, guards]
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+      # docs/ is frozen, so this is tamper detection rather than maintenance:
+      # a failure means somebody edited a document that should not change.
+      - name: The frozen documents are unchanged
+        run: sh tools/ledger.sh lint
+      - name: STATE.md is within budget
+        run: sh tools/statecheck.sh
+
+      # buf lint is what enforces snake_case fields, the enum-name value
+      # prefix and the _UNSPECIFIED zero value. ADR 0004 says why one standard
+      # rule is excepted.
+      - uses: ./.github/actions/buf
+      - name: The schema lints
+        run: buf lint
+
+      # The two remaining schema gates. Ownership is a naming check over the
+      # sources and needs no buf; the comparison reads the newest release tag's
+      # tree out of git.
+      - name: The bridge owns what dcs.bridge holds
+        run: sh tools/schema-ownership.sh
+      - name: The schema breaks no consumer built against the last release
+        run: sh tools/schema-breaking.sh
+
+  # Everything a Linux host can establish, in one job: format, lint, build and
+  # test host-native; open the module under a stock Lua 5.1; run the ring
+  # under Loom and Miri; cross-build the Windows target and stage the release
+  # artifacts. Each part is commented where it starts.
+  linux:
+    name: Linux
+    needs: preflight
+    if: needs.preflight.outputs.code == 'true'
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
 
@@ -106,25 +150,55 @@ jobs:
           rustc -Vv
           cargo -V
 
-      - uses: actions/cache@v4
+      # Caches are restored on every run and saved from main only. A pull
+      # request's own cache is readable by nothing but that pull request, so
+      # saving one spends storage that a later run never reads back; storage
+      # is capped, and past the cap main's entries are evicted with the rest.
+      - uses: actions/cache/restore@v4
+        id: cargo
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
+            ~/.cargo/bin/cargo-xwin
+            ~/.cache/cargo-xwin
             target
-          key: ${{ matrix.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ matrix.os }}-cargo-
+          key: linux-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: linux-cargo-
+
+      # Nightly moves daily and Miri's sysroot is built against it, so the two
+      # are cached together under a key that turns over weekly.
+      - name: Week
+        id: week
+        run: printf 'week=%s\n' "$(date -u +%G-%V)" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache/restore@v4
+        id: nightly
+        with:
+          path: |
+            ~/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu
+            ~/.cache/miri
+          key: linux-nightly-${{ steps.week.outputs.week }}
+
+      # llvm-dlltool turns vendor/lua/lua.def into the import library the
+      # broker links against, and clang and lld back cargo-xwin.
+      #
+      # mise builds Lua from source, and Lua's own linux target links the
+      # interactive interpreter against readline. That same target is what
+      # passes -Wl,-E, which is what lets the module resolve its symbols
+      # against the interpreter at load, so this is not a dependency to drop
+      # by picking a plainer target.
+      - name: LLVM and readline headers
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends llvm clang lld libreadline-dev
 
       - name: Format
         run: cargo fmt --all --check
 
       # --no-default-features turns the Lua module's dcs-lua feature off, which
-      # is what a host-native build is: the same source without DCS's Lua. On a
-      # Windows runner the feature would otherwise link lua.dll into the
-      # module, and no runner has one to load. ADR 0002.
-      #
-      # On Linux and macOS this also lints and builds the module's Lua surface,
-      # which the Windows leg has cfg'd out. ADR 0006.
+      # is what a host-native build is: the same source without DCS's Lua.
+      # ADR 0002. This also lints and builds the module's Lua surface, which
+      # the Windows leg has cfg'd out. ADR 0006.
       - name: Clippy
         run: cargo clippy --workspace --all-targets --no-default-features
 
@@ -138,64 +212,23 @@ jobs:
       # against a host-native build opened by a stock Lua 5.1. This is the load
       # itself; each check arrives with the behaviour it covers.
       #
-      # mise.toml already pins the interpreter, and it is the only source that
-      # covers both hosts: homebrew dropped lua@5.1, and apt reaches only the
-      # Linux leg. install: false keeps mise off the Rust toolchain, which
-      # rust-toolchain.toml and rustup handle above.
-      #
-      # Windows is excluded: a module there resolves no symbol at load, so this
-      # would need a fetched lua51.dll and a second .def for a configuration
-      # that never ships. ADR 0006.
-      # mise builds Lua from source, and Lua's own linux target links the
-      # interactive interpreter against readline. That same target is what
-      # passes -Wl,-E, which is what lets the module resolve its symbols
-      # against the interpreter at load, so this is not a dependency to drop
-      # by picking a plainer target.
-      - name: Readline headers
-        if: matrix.os == 'ubuntu-latest'
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends libreadline-dev
-
+      # mise.toml already pins the interpreter. install: false keeps mise off
+      # the Rust toolchain, which rust-toolchain.toml and rustup handle above.
       - uses: jdx/mise-action@v2
-        if: matrix.os != 'windows-latest'
         with:
           install: false
           cache: false
       - name: The module opens under a stock Lua 5.1
-        if: matrix.os != 'windows-latest'
         run: |
           mise install lua
           mise exec -- sh tools/luatest.sh
 
-  # The product target is x86_64 Windows and it is cross-compiled, so no
-  # contributor needs a Windows machine to produce a release artifact.
-  # What the three-host matrix cannot establish about the broker's lock-free
-  # ring. Two of those hosts are x86-64, where a missing acquire-release pair is
-  # unobservable in principle, and x86-64 Windows is the only target that ships,
-  # so the host most able to expose an ordering fault is the one that never runs
-  # the product. ADR 0008.
-  verification:
-    name: The ring under a model checker
-    needs: [documents, guards]
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-
-      - name: Toolchain
-        run: |
-          rustup show
-          rustc -Vv
-
-      - uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: verification-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: verification-cargo-
-
+      # What a host build cannot establish about the broker's lock-free ring.
+      # x86-64 is where a missing acquire-release pair is unobservable in
+      # principle, and x86-64 Windows is the only target that ships, so the
+      # host most able to expose an ordering fault is the one that never runs
+      # the product. ADR 0008.
+      #
       # Loom swaps the broker's atomics for its own and enumerates the
       # interleavings of a ring small enough to exhaust. What it establishes is
       # the ownership protocol: no schedule lets both ends into one slot, and
@@ -212,12 +245,16 @@ jobs:
 
       # Miri is what reads the unsafe blocks themselves: uninitialised memory,
       # provenance, a value moved out twice, and the data races Loom's model of
-      # an exchange smooths over. Nightly lives in this job and nowhere else --
-      # rust-toolchain.toml pins the channel every other job and every
+      # an exchange smooths over. Nightly lives in these steps and nowhere
+      # else -- rust-toolchain.toml pins the channel every other step and every
       # contributor builds with. ADR 0003.
+      #
+      # rustup would update a nightly it finds installed, so the install is
+      # skipped when the cached one already carries Miri.
       - name: Miri
         run: |
-          rustup toolchain install nightly --component miri --profile minimal
+          rustup run nightly cargo miri --version >/dev/null 2>&1 \
+            || rustup toolchain install nightly --component miri --profile minimal
           rustup run nightly cargo miri setup
       - name: Miri over the ring's and the fan-out's tests
         # Quoted because a filter ends in a colon, which YAML would otherwise
@@ -228,34 +265,8 @@ jobs:
         env:
           MIRIFLAGS: -Zmiri-preemption-rate=0.1
 
-  windows-cross:
-    name: Windows cross-build from Linux
-    needs: [documents, guards]
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-
-      - name: Toolchain
-        run: rustup show
-
-      # llvm-dlltool turns vendor/lua/lua.def into the import library the
-      # broker links against. clang and lld back cargo-xwin.
-      - name: LLVM
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends llvm clang lld
-
-      - uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            ~/.cargo/bin/cargo-xwin
-            ~/.cache/cargo-xwin
-            target
-          key: xwin-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: xwin-
-
+      # The product target is x86_64 Windows and it is cross-compiled, so no
+      # contributor needs a Windows machine to produce a release artifact.
       - name: cargo-xwin
         run: command -v cargo-xwin || cargo install --locked cargo-xwin
 
@@ -271,7 +282,7 @@ jobs:
 
       # Default features, so the broker's build.rs generates its own copy of
       # the import library and links the DLL against DCS's Lua.
-      - name: Build
+      - name: Cross-build the Windows target
         run: cargo xwin build --release --workspace --target x86_64-pc-windows-msvc
 
       # The same script the release workflow runs, so a pull request exercises
@@ -286,3 +297,125 @@ jobs:
           name: windows-x86_64
           path: dist/
           if-no-files-found: error
+
+      - uses: actions/cache/save@v4
+        if: github.event_name == 'push' && steps.cargo.outputs.cache-hit != 'true'
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.cargo/bin/cargo-xwin
+            ~/.cache/cargo-xwin
+            target
+          key: linux-cargo-${{ hashFiles('**/Cargo.lock') }}
+      - uses: actions/cache/save@v4
+        if: github.event_name == 'push' && steps.nightly.outputs.cache-hit != 'true'
+        with:
+          path: |
+            ~/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu
+            ~/.cache/miri
+          key: linux-nightly-${{ steps.week.outputs.week }}
+
+  # Host-native on the one host the product ships to. --no-default-features
+  # keeps lua.dll out of the module's link, because no runner has one to load.
+  # ADR 0002. The module's Lua surface is cfg'd out here and the stock Lua
+  # load is not attempted: a module on Windows resolves no symbol at load, so
+  # it would need a fetched lua51.dll and a second .def for a configuration
+  # that never ships. ADR 0006.
+  windows:
+    name: Windows
+    needs: preflight
+    if: needs.preflight.outputs.code == 'true'
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Toolchain
+        run: |
+          rustup show
+          rustc -Vv
+          cargo -V
+
+      - uses: actions/cache/restore@v4
+        id: cargo
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: windows-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: windows-cargo-
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --no-default-features
+
+      - name: Build
+        run: cargo build --workspace --all-targets --no-default-features
+
+      - name: Test
+        run: cargo test --workspace --no-default-features
+
+      - uses: actions/cache/save@v4
+        if: github.event_name == 'push' && steps.cargo.outputs.cache-hit != 'true'
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: windows-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+  # The same host-native build and stock Lua 5.1 load as the Linux job, on the
+  # host contributors develop on. Everything it checks, the Linux job checks
+  # too, except that the module opens on macOS, which a contributor sees
+  # before pushing. So it runs weekly and on request rather than on every
+  # change.
+  macos:
+    name: macOS
+    needs: preflight
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Toolchain
+        run: |
+          rustup show
+          rustc -Vv
+          cargo -V
+
+      - uses: actions/cache/restore@v4
+        id: cargo
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: macos-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: macos-cargo-
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --no-default-features
+
+      - name: Build
+        run: cargo build --workspace --all-targets --no-default-features
+
+      - name: Test
+        run: cargo test --workspace --no-default-features
+
+      - uses: jdx/mise-action@v2
+        with:
+          install: false
+          cache: false
+      - name: The module opens under a stock Lua 5.1
+        run: |
+          mise install lua
+          mise exec -- sh tools/luatest.sh
+
+      - uses: actions/cache/save@v4
+        if: steps.cargo.outputs.cache-hit != 'true'
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: macos-cargo-${{ hashFiles('**/Cargo.lock') }}

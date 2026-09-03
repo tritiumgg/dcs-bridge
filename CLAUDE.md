@@ -97,9 +97,9 @@ words. `SPEC §5.1.1` sends the reader to a document the build is drifting away
 from, to find a reason that would have fitted in the comment. Where the
 argument is too long for one, cite the decision record holding it.
 
-`tools/nospecrefs.sh` enforces that and the CI `Guards` job runs it. Everything
-under `docs/`, plus this file, `README.md` and `STATE.md`, is exempt, because
-documents cite documents.
+`tools/nospecrefs.sh` enforces that and the CI `Preflight` job runs it.
+Everything under `docs/`, plus this file, `README.md` and `STATE.md`, is
+exempt, because documents cite documents.
 
 ## Never read a specification whole
 

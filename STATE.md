@@ -63,9 +63,8 @@ entries at most: an eleventh means something here is finished, or belongs in
 - **Maintainer decision — task 1.2's gate cannot be set on this plan.**
   `dcs-bridge` is private on GitHub Free, so branch protection and rulesets
   both answer 403. Make the repository public or upgrade to Pro; an agent can
-  set the rule after that. Require `Guards`, `Documents`, `ubuntu-latest`,
-  `macos-latest`, `windows-latest`, `Windows cross-build from Linux`, `The ring
-  under a model checker`.
+  set the rule after that. Require `Preflight`, `Linux` and `Windows`;
+  `macOS` runs weekly and on request, so it cannot be required.
 - **Maintainer decision — the policy gate is unmeasured and no probe covers
   it.** Tasks 4.8, 4.9, 9.C1 and 10.2 rest on which `net.allow_dostring_in`
   value list is correct. Measure it, or ship the wider union and state the
