@@ -340,7 +340,7 @@ impl Encoder {
 }
 
 /// How many bytes `v` takes as a varint: one per seven bits, at least one.
-fn varint_len(mut v: u64) -> usize {
+pub(crate) fn varint_len(mut v: u64) -> usize {
     let mut n = 1;
     while v >= 0x80 {
         v >>= 7;
