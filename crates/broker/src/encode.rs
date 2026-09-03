@@ -14,11 +14,26 @@
 //! `int32`, `int64`, `uint32`, `uint64`, `bool` and every enum. There is no
 //! zigzag put, so a schema must not declare `sint32` or `sint64` fields: a
 //! negative value on one would decode as a large positive number.
+//!
+//! A nested message needs its length in front of its body, and the body is
+//! not known until `end_message`. Rather than write the body elsewhere and
+//! copy it in behind its length, `message` leaves a fixed-width gap for the
+//! length and `end_message` fills it in. The gap is as wide as the largest
+//! length the buffer can hold, so the varint written there is padded: it
+//! carries continuation bytes a minimal encoding would not. Protobuf permits
+//! that, and the tests show a stock decoder reading it. ADR 0012.
 
 use std::fmt;
 
 /// Field numbers above this do not fit the 29 bits a tag leaves them.
 const MAX_FIELD: u32 = (1 << 29) - 1;
+
+/// The most nested messages a record may hold open at once.
+///
+/// The stack of open messages is sized once, at construction, so this is a
+/// bound and not a tunable. A generated emitter nests as deep as its schema
+/// and no schema in this project comes near it.
+pub const MAX_DEPTH: usize = 64;
 
 /// The wire type of a varint value.
 const WIRE_VARINT: u64 = 0;
@@ -41,6 +56,10 @@ pub enum Error {
     Full,
     /// A field number outside 1 to 2^29 - 1.
     FieldNumber,
+    /// More than [`MAX_DEPTH`] messages open at once.
+    Depth,
+    /// An `end_message` with no message open, or a `commit` with one open.
+    Unbalanced,
 }
 
 impl fmt::Display for Error {
@@ -49,6 +68,8 @@ impl fmt::Display for Error {
             Error::NotOpen => "no record is open",
             Error::Full => "the record outgrew its buffer",
             Error::FieldNumber => "field number outside 1 to 2^29 - 1",
+            Error::Depth => "too many nested messages open",
+            Error::Unbalanced => "message and end_message do not pair",
         })
     }
 }
@@ -76,16 +97,23 @@ enum State {
 pub struct Encoder {
     buf: Vec<u8>,
     capacity: usize,
+    /// For each open message, innermost last, where its length gap starts.
+    open: Vec<usize>,
+    /// Bytes every length gap takes: enough for the largest body possible.
+    len_width: usize,
     state: State,
     discarded: u64,
 }
 
 impl Encoder {
-    /// An encoder holding at most `bytes` per record. The one allocation.
+    /// An encoder holding at most `bytes` per record. The two allocations:
+    /// the buffer, and the stack of open messages.
     pub fn with_capacity(bytes: usize) -> Self {
         Self {
             buf: Vec::with_capacity(bytes),
             capacity: bytes,
+            open: Vec::with_capacity(MAX_DEPTH),
+            len_width: varint_len(bytes as u64),
             state: State::Idle,
             discarded: 0,
         }
@@ -109,6 +137,7 @@ impl Encoder {
             self.discarded += 1;
         }
         self.buf.clear();
+        self.open.clear();
         self.state = State::Open;
         abandoned
     }
@@ -145,7 +174,42 @@ impl Encoder {
         self.put(field, WIRE_VARINT, 1, |buf| buf.push(u8::from(b)))
     }
 
+    /// Open a nested message on `field`. Every put until the matching
+    /// `end_message` lands inside it, and a message may open another.
+    ///
+    /// A repeated message field is one pair per element, all on one field
+    /// number, and put order is element order.
+    pub fn message(&mut self, field: u32) -> Result<(), Error> {
+        self.ready()?;
+        if self.open.len() == MAX_DEPTH {
+            return self.poison(Error::Depth);
+        }
+        let width = self.len_width;
+        self.put(field, WIRE_LENGTH, width, |buf| {
+            // The gap the length is written into at end_message. Within
+            // capacity, so this grows the length and not the allocation.
+            buf.resize(buf.len() + width, 0);
+        })?;
+        self.open.push(self.buf.len() - width);
+        Ok(())
+    }
+
+    /// Close the innermost open message, writing its length into the gap
+    /// `message` left, padded to the gap's width.
+    pub fn end_message(&mut self) -> Result<(), Error> {
+        self.ready()?;
+        let Some(gap) = self.open.pop() else {
+            return self.poison(Error::Unbalanced);
+        };
+        let body = self.buf.len() - (gap + self.len_width);
+        put_padded_varint(&mut self.buf[gap..gap + self.len_width], body as u64);
+        Ok(())
+    }
+
     /// Close the record and return its body, or refuse and discard it.
+    ///
+    /// A record with a message still open is refused: closing it here would
+    /// commit a shape the caller did not finish.
     ///
     /// The body stays readable until the next `begin`.
     pub fn commit(&mut self) -> Result<&[u8], Error> {
@@ -154,6 +218,10 @@ impl Encoder {
             State::Poisoned(error) => {
                 self.discard();
                 Err(error)
+            }
+            State::Open if !self.open.is_empty() => {
+                self.discard();
+                Err(Error::Unbalanced)
             }
             State::Open => {
                 self.state = State::Idle;
@@ -173,11 +241,7 @@ impl Encoder {
         size: usize,
         write: impl FnOnce(&mut Vec<u8>),
     ) -> Result<(), Error> {
-        match self.state {
-            State::Open => {}
-            State::Idle => return Err(Error::NotOpen),
-            State::Poisoned(error) => return Err(error),
-        }
+        self.ready()?;
         if field == 0 || field > MAX_FIELD {
             return self.poison(Error::FieldNumber);
         }
@@ -188,6 +252,15 @@ impl Encoder {
         put_varint(&mut self.buf, tag);
         write(&mut self.buf);
         Ok(())
+    }
+
+    /// Whether a put may proceed: a record is open and nothing has failed.
+    fn ready(&self) -> Result<(), Error> {
+        match self.state {
+            State::Open => Ok(()),
+            State::Idle => Err(Error::NotOpen),
+            State::Poisoned(error) => Err(error),
+        }
     }
 
     fn poison(&mut self, error: Error) -> Result<(), Error> {
@@ -223,6 +296,22 @@ fn put_varint(buf: &mut Vec<u8>, mut v: u64) {
     buf.push(v as u8);
 }
 
+/// Write `v` as a varint filling all of `gap`: every byte but the last has
+/// the continuation bit, whether or not the bits above it are zero.
+///
+/// The caller sizes the gap for the largest value it can hold, so a value
+/// that does not fit is a defect here rather than a runtime condition.
+fn put_padded_varint(gap: &mut [u8], mut v: u64) {
+    let last = gap.len() - 1;
+    for (i, byte) in gap.iter_mut().enumerate() {
+        let more = if i < last { 0x80 } else { 0 };
+        // Truncation keeps the low seven bits, which is the point.
+        *byte = ((v as u8) & 0x7f) | more;
+        v >>= 7;
+    }
+    debug_assert_eq!(v, 0, "the length outgrew its gap");
+}
+
 /// The done-when is that a stock library decodes the output, so these tests
 /// decode through `prost` rather than through a decoder written beside the
 /// encoder, which would share its misreadings.
@@ -243,12 +332,27 @@ mod tests {
         s: String,
         #[prost(bool, tag = "4")]
         b: bool,
+        #[prost(int64, repeated, tag = "5")]
+        seq: Vec<i64>,
+        #[prost(message, optional, tag = "6")]
+        inner: Option<Inner>,
+        #[prost(message, repeated, tag = "7")]
+        items: Vec<Inner>,
         #[prost(int32, tag = "15")]
         near: i32,
         #[prost(int32, tag = "16")]
         far: i32,
         #[prost(uint64, tag = "536870911")]
         last: u64,
+    }
+
+    /// A nested message that can hold itself, for depth.
+    #[derive(Clone, PartialEq, Message)]
+    struct Inner {
+        #[prost(string, tag = "1")]
+        s: String,
+        #[prost(message, optional, boxed, tag = "2")]
+        inner: Option<Box<Inner>>,
     }
 
     fn decode(body: &[u8]) -> Scalars {
@@ -403,5 +507,142 @@ mod tests {
             assert_eq!(buf.len(), varint_len(v), "{v:#x}");
             assert_eq!(prost::encoding::decode_varint(&mut &buf[..]).unwrap(), v);
         }
+    }
+
+    #[test]
+    fn distinct_fields_decode_in_any_order() {
+        let mut forward = Encoder::with_capacity(64);
+        forward.begin();
+        forward.integer(1, 4).unwrap();
+        forward.string(3, b"x").unwrap();
+        let forward = decode(forward.commit().unwrap());
+
+        let mut backward = Encoder::with_capacity(64);
+        backward.begin();
+        backward.string(3, b"x").unwrap();
+        backward.integer(1, 4).unwrap();
+        assert_eq!(decode(backward.commit().unwrap()), forward);
+    }
+
+    #[test]
+    fn a_repeated_field_keeps_put_order() {
+        let mut e = Encoder::with_capacity(64);
+        e.begin();
+        for n in [3, 1, 2] {
+            e.integer(5, n).unwrap();
+        }
+        assert_eq!(decode(e.commit().unwrap()).seq, [3, 1, 2]);
+    }
+
+    /// The done-when's second half: the length in front of a nested message
+    /// is padded to the gap's width, and a stock decoder reads it anyway.
+    #[test]
+    fn a_nested_length_is_padded_and_decodes() {
+        // The product buffer, whose largest length takes three varint bytes.
+        let mut e = Encoder::with_capacity(1 << 20);
+        e.begin();
+        e.message(6).unwrap();
+        e.string(1, b"a").unwrap();
+        e.end_message().unwrap();
+        let body = e.commit().unwrap();
+
+        // Tag, then a three-byte varint for a body of three bytes.
+        assert_eq!(body, [0x32, 0x83, 0x80, 0x00, 0x0a, 0x01, b'a']);
+        assert_eq!(prost::encoding::decode_varint(&mut &body[1..4]).unwrap(), 3);
+        assert_eq!(decode(body).inner.unwrap().s, "a");
+    }
+
+    #[test]
+    fn nested_bodies_of_every_length_decode() {
+        // Zero, the one-byte edge, and past it.
+        for len in [0, 127, 128, 200] {
+            let s = vec![b'z'; len];
+            let mut e = Encoder::with_capacity(4096);
+            e.begin();
+            e.message(6).unwrap();
+            if len > 0 {
+                e.string(1, &s).unwrap();
+            }
+            e.end_message().unwrap();
+            let got = decode(e.commit().unwrap()).inner.unwrap();
+            assert_eq!(got.s.len(), len);
+        }
+    }
+
+    #[test]
+    fn repeated_messages_keep_put_order() {
+        let mut e = Encoder::with_capacity(256);
+        e.begin();
+        for s in ["c", "a", "b"] {
+            e.message(7).unwrap();
+            e.string(1, s.as_bytes()).unwrap();
+            e.end_message().unwrap();
+        }
+        let items = decode(e.commit().unwrap()).items;
+        let got: Vec<&str> = items.iter().map(|i| i.s.as_str()).collect();
+        assert_eq!(got, ["c", "a", "b"]);
+    }
+
+    #[test]
+    fn messages_nest_and_puts_land_in_the_innermost() {
+        let mut e = Encoder::with_capacity(256);
+        e.begin();
+        e.message(6).unwrap();
+        e.string(1, b"outer").unwrap();
+        e.message(2).unwrap();
+        e.string(1, b"middle").unwrap();
+        e.message(2).unwrap();
+        e.string(1, b"inner").unwrap();
+        e.end_message().unwrap();
+        e.end_message().unwrap();
+        e.end_message().unwrap();
+        e.integer(1, 1).unwrap();
+
+        let got = decode(e.commit().unwrap());
+        assert_eq!(got.n, 1);
+        let outer = got.inner.unwrap();
+        let middle = outer.inner.unwrap();
+        let inner = middle.inner.unwrap();
+        assert_eq!(outer.s, "outer");
+        assert_eq!(middle.s, "middle");
+        assert_eq!(inner.s, "inner");
+        assert!(inner.inner.is_none());
+    }
+
+    #[test]
+    fn depth_is_capped_at_construction() {
+        let mut e = Encoder::with_capacity(4096);
+        let stack = e.open.capacity();
+        e.begin();
+        for _ in 0..MAX_DEPTH {
+            e.message(2).unwrap();
+        }
+        assert_eq!(e.message(2), Err(Error::Depth));
+        assert_eq!(e.commit(), Err(Error::Depth));
+        assert_eq!(e.open.capacity(), stack);
+    }
+
+    #[test]
+    fn unbalanced_messages_are_refused() {
+        let mut e = Encoder::with_capacity(64);
+        e.begin();
+        assert_eq!(e.end_message(), Err(Error::Unbalanced));
+        assert_eq!(e.commit(), Err(Error::Unbalanced));
+
+        e.begin();
+        e.message(6).unwrap();
+        assert_eq!(e.commit(), Err(Error::Unbalanced));
+        assert_eq!(e.discarded(), 2);
+        assert!(!e.begin());
+    }
+
+    #[test]
+    fn a_message_that_does_not_fit_is_refused_whole() {
+        let mut e = Encoder::with_capacity(4);
+        e.begin();
+        e.string(1, b"xy").unwrap();
+        // Nothing is left for a tag and its length gap.
+        assert_eq!(e.message(6), Err(Error::Full));
+        assert!(e.open.is_empty());
     }
 }
