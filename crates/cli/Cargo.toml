@@ -1,7 +1,8 @@
 # dcsb is one binary with nine verbs. It runs outside the DCS process and links
 # no part of the broker: what it knows of the wire it decodes through a stock
 # protobuf library, so a misreading in the encoder cannot be shared by the tool
-# that checks it.
+# that checks it. The broker is reached only by the tests, which stand a real
+# listener up over loopback.
 
 [package]
 name = "dcsb"
@@ -21,6 +22,9 @@ path = "src/main.rs"
 clap = { version = "4", features = ["derive"] }
 prost = "0.14"
 prost-types = "0.14"
+
+[dev-dependencies]
+dcsbridge-broker = { path = "../broker" }
 
 [lints]
 workspace = true

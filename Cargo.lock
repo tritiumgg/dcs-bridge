@@ -140,6 +140,7 @@ name = "dcsb"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "dcsbridge-broker",
  "prost",
  "prost-types",
 ]

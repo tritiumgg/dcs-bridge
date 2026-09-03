@@ -173,6 +173,12 @@ fn write_frame_line(out: &mut impl Write, envelope: &Envelope) -> io::Result<()>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use dcsbridge_broker::encode::Encoder;
+    use dcsbridge_broker::fanout::{Commit, Writer};
+    use dcsbridge_broker::transport::{Listener, Record};
+    use std::net::{SocketAddr, TcpStream};
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
 
     const TOPIC: &str = "dcs.builtin.UnitDestroyed";
 
@@ -237,5 +243,111 @@ mod tests {
 
         let error = read_frame(&mut &whole[..2]).unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::UnexpectedEof);
+    }
+
+    /// A record on [`TOPIC`] carrying `bytes` of string in field 1.
+    fn record(bytes: usize) -> Record {
+        let mut e = Encoder::with_capacity(bytes + 64);
+        e.begin(TOPIC.as_bytes());
+        e.string(1, &vec![b'x'; bytes]).unwrap();
+        Arc::from(e.commit().unwrap())
+    }
+
+    fn client(addr: SocketAddr) -> TcpStream {
+        TcpStream::connect(addr).expect("the listener accepts")
+    }
+
+    /// Commit small records until `client` has a frame waiting. A record
+    /// committed before the writer thread knows the connection is not
+    /// delivered to it, and nothing outside that thread says when that is.
+    fn warm_up(commit: &mut Commit<Record>, client: &TcpStream) {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        client
+            .set_read_timeout(Some(Duration::from_millis(20)))
+            .expect("a read timeout is set");
+        let mut length = [0u8; 4];
+        loop {
+            assert!(Instant::now() < deadline, "no frame arrived");
+            drop(commit.push(record(1)));
+            if matches!(client.peek(&mut length), Ok(4)) {
+                return;
+            }
+        }
+    }
+
+    /// Everything `client` receives until it has been quiet for a while.
+    fn drain(client: &mut TcpStream) -> Vec<u8> {
+        client
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .expect("a read timeout is set");
+        let mut bytes = Vec::new();
+        let mut chunk = [0u8; 1 << 16];
+        loop {
+            match client.read(&mut chunk) {
+                Ok(0) => break,
+                Ok(n) => bytes.extend_from_slice(&chunk[..n]),
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                    ) =>
+                {
+                    break;
+                }
+                Err(error) => panic!("the read failed: {error}"),
+            }
+        }
+        bytes
+    }
+
+    /// The forced drop, observed the way an operator observes it: a consumer
+    /// stops reading, its ring evicts behind the blocked socket, and when it
+    /// reads again `tail` prints a gap where the evicted records were.
+    ///
+    /// The ring holds four records and the burst is far larger than the
+    /// loopback socket can buffer, so the connection's thread blocks on the
+    /// socket while the writer thread pushes the rest of the burst past it.
+    #[test]
+    fn a_stalled_consumer_sees_its_evictions_as_a_gap() {
+        let (writer, mut commit, connections) = Writer::spawn(4096);
+        let listener = Listener::spawn("127.0.0.1:0", connections, 4).unwrap();
+        let mut client = client(listener.local_addr());
+        warm_up(&mut commit, &client);
+
+        let big = record(64 << 10);
+        for _ in 0..512 {
+            drop(commit.push(Arc::clone(&big)));
+        }
+
+        let bytes = drain(&mut client);
+        drop(listener);
+        drop(writer);
+
+        let mut out = Vec::new();
+        let summary = run(&bytes[..], &mut out).unwrap();
+        let out = String::from_utf8(out).unwrap();
+
+        assert!(summary.frames >= 1, "no frame was read");
+        assert!(summary.gaps >= 1, "the stall left no gap:\n{out}");
+        assert!(summary.dropped >= 1, "a gap dropped nothing:\n{out}");
+        assert!(
+            out.contains("gap: ") && out.contains(" records dropped between seq "),
+            "the gap was not printed:\n{out}"
+        );
+        assert!(
+            out.contains(&format!(" topic={TOPIC} bytes=")),
+            "the topic was not printed without its prefix:\n{out}"
+        );
+        assert!(!out.contains("out of order"), "seq went backwards:\n{out}");
+
+        let seqs: Vec<u64> = out
+            .lines()
+            .filter_map(|line| line.strip_prefix("seq="))
+            .map(|rest| rest.split(' ').next().unwrap().parse().unwrap())
+            .collect();
+        assert!(
+            seqs.windows(2).all(|pair| pair[0] < pair[1]),
+            "seq did not rise strictly:\n{out}"
+        );
     }
 }
