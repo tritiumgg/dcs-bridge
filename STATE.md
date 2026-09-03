@@ -18,7 +18,7 @@ is just deleted. Write entries as one or two lines, never paragraphs.
 
 ## In progress
 
-Nothing. 2.7 is closed; 2.C1 is next.
+Nothing. 2.C1 is closed; 2.8 is next.
 
 *One task at most. Say what is done, what is not, and where to resume. Say what
 is committed and what is only in the working tree. Say what is knowingly
@@ -26,27 +26,30 @@ broken. Empty this when the task closes.*
 
 ## Just finished
 
-- **2.6** — PROBE-3 in DCS and host-native, `mise run bench-put`: 25 ns a
-  crossing, zero bytes; one put per field stands, PR #26. ADR 0013.
 - **2.7** — `Any` wrapper, per-connection `seq`, the listener, a frame per
   record; `commit` queues and returns a boolean. PRs #27 to #31. ADR 0014.
+- **2.C1** — `dcsb tail` over clap and prost; a stalled socket's evictions
+  read as a `seq` gap in a loopback test. PRs #32 and #33; #33 carries the live steps.
 
 *The last three at most, one line each. Git log holds the rest.*
 
 ## Next
 
-**Task 2.C1** — `dcsb`: the binary, a connection, and `tail`. Done when 2.7's
-forced drop is observed as a `seq` gap by `dcsb tail`. The module listens on
-`127.0.0.1:7742` from its first open, with no handshake until 2.9.
+**Task 2.8** — `begin_to` and per-connection addressing; `poll` returns the
+connection id; ids unique for the process and never reused. A `begin_to` on a
+topic the schema did not mark a reply or an acknowledgement is refused and
+counted in `misaddressed_total`. Done when two `dcsb tail` sessions show a
+`begin_to` record reaching one and a `begin` record reaching both, and a
+hand-written `begin_to` on a fan-out topic is refused.
 
-**An agent verifies the decoder** against the broker over loopback from a Rust
-test; **the gap in a live DCS needs a person** running `dcsb tail` against an
-install, with a consumer stalled long enough to fill a 4096-record ring.
+**An agent verifies both** with two loopback connections from a Rust test and
+a refused `begin_to` from a stock Lua; **a person repeats the two-session
+check** against an install, since no handshake exists to name a connection.
 
 ## After that
 
-- **2.8** — `begin_to` and per-connection addressing, `poll` returning the
-  connection id, ids unique for the process and never reused.
+- **2.9** — handshake, then auth, then the five reader-thread answers: `Ping`,
+  `Auth`, `GetSchema`, `SeqAck`, `SetEnabled`.
 - **Phase 3** opens on `protoc-gen-dcsbridge-lua`, which reads the four message
   options this schema defines and splits its output by `Target`.
 
@@ -96,6 +99,12 @@ entries at most: an eleventh means something here is finished, or belongs in
   Lua state's record buffer is 1 MiB at open; `configure` owns all of it, and
   an open that cannot bind raises until then. `commit` allocates once per
   record on the logic thread, the copy the rings share; PROBE-7 at 9.7 prices
-  it and would schedule a slab. ADR 0014.
+  it and would schedule a slab. ADR 0014. A connection drains one frame per
+  socket call, and 2.C1's live check priced that: a 20000-record single-frame
+  burst kept one record in about forty on Windows loopback with a consumer
+  that never stalled, because a push is nanoseconds and a call is tens of
+  microseconds. PR #36's one call per frame took it from seventy to forty.
+  Batching a drain pass into one call is the rest; 2.18 or 9.7 owns it, and
+  the ring size 2.15 picks should count it.
 - **Task 7.10 does not exist.** Phase 7 runs 7.1 to 7.9 then 7.11, with no note
   explaining the gap. Retired ID or omission, unresolved.
