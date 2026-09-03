@@ -1,6 +1,6 @@
 # Working state
 
-**Last updated:** 2026-09-02
+**Last updated:** 2026-09-03
 
 The handoff between sessions. Read it first; update it before a session ends,
 not only when a task finishes. Stamp the date above each time; it carries a
@@ -18,7 +18,7 @@ is just deleted. Write entries as one or two lines, never paragraphs.
 
 ## In progress
 
-Nothing. 2.6 is closed; 2.7 is next.
+Nothing. 2.7 is closed; 2.C1 is next.
 
 *One task at most. Say what is done, what is not, and where to resume. Say what
 is committed and what is only in the working tree. Say what is knowingly
@@ -26,22 +26,22 @@ broken. Empty this when the task closes.*
 
 ## Just finished
 
-- **2.5** — put calls into one preallocated buffer, nested lengths padded in
-  place, bound into Lua, PRs #23, #24 and #25. ADR 0012.
 - **2.6** — PROBE-3 in DCS and host-native, `mise run bench-put`: 25 ns a
   crossing, zero bytes; one put per field stands, PR #26. ADR 0013.
+- **2.7** — `Any` wrapper, per-connection `seq`, the listener, a frame per
+  record; `commit` queues and returns a boolean. PRs #27 to #31. ADR 0014.
 
 *The last three at most, one line each. Git log holds the rest.*
 
 ## Next
 
-**Task 2.7** — `Envelope` wrapping with an `Any` payload, length-prefixed
-framing, per-connection `seq`. Done when a forced drop shows as a gap and a
-capture names its record types with no schema loaded. `commit` stops returning
-bytes to Lua here and pushes into the commit ring instead.
+**Task 2.C1** — `dcsb`: the binary, a connection, and `tail`. Done when 2.7's
+forced drop is observed as a `seq` gap by `dcsb tail`. The module listens on
+`127.0.0.1:7742` from its first open, with no handshake until 2.9.
 
-**An agent verifies most of it** from Rust tests and a stock Lua; the capture
-naming its types wants `dcsb tail` or a decoder, which 2.C1 brings.
+**An agent verifies the decoder** against the broker over loopback from a Rust
+test; **the gap in a live DCS needs a person** running `dcsb tail` against an
+install, with a consumer stalled long enough to fill a 4096-record ring.
 
 ## After that
 
@@ -91,10 +91,11 @@ entries at most: an eleventh means something here is finished, or belongs in
   drop decision, so a ring per class reorders nothing that a merge at drain
   cannot restore. What it changes is that a full `LIFECYCLE` ring disconnects
   where one ring would have evicted. Needed before 2.18. ADR 0008 names it.
-- **What 2.4 and 2.5 left to later tasks.** The commit ring takes a capacity
-  parameter and each Lua state's record buffer is 1 MiB at open; 2.15 sizes
-  both from `configure` and allocates there. A connection's thread has no way
-  to wait on its ring, and `commit` returns the body to Lua; 2.7 owns both.
-  ADR 0011 settles who drains, not how it waits; ADR 0013 priced its fence.
+- **What 2.4, 2.5 and 2.7 left to 2.15 and 9.7.** The module's first open
+  starts the outbound path on `127.0.0.1:7742` with 4096-record rings, and each
+  Lua state's record buffer is 1 MiB at open; `configure` owns all of it, and
+  an open that cannot bind raises until then. `commit` allocates once per
+  record on the logic thread, the copy the rings share; PROBE-7 at 9.7 prices
+  it and would schedule a slab. ADR 0014.
 - **Task 7.10 does not exist.** Phase 7 runs 7.1 to 7.9 then 7.11, with no note
   explaining the gap. Retired ID or omission, unresolved.

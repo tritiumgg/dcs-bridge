@@ -1,11 +1,12 @@
 -- The put calls, from a stock Lua 5.1.
 --
 -- A record opens with begin, takes typed puts and closes with commit, which
--- returns the body until the commit ring takes it. The bytes are compared
--- against hand-assembled protobuf, because a harness that only checks the
--- calls return is a harness that exercised nothing. The Rust tests decode the
--- same encoder through a stock library; this checks the Lua side of the
--- crossing delivers the same bytes.
+-- queues it for every connection and says whether it did. The bytes are not
+-- observable from here: the Rust tests decode the same encoder through a
+-- stock library and read the frames off a socket. What this checks is the
+-- Lua side of the crossing: the calls are on the table, each argument is
+-- checked, a defect raises, a refused record says so, and each state has its
+-- own record in progress.
 --
 -- Run it through tools/luatest.sh, which builds the module and finds it.
 
@@ -23,32 +24,6 @@ local function open(module)
   error('no opener in ' .. module, 0)
 end
 
-local function hex(s)
-  return (s:gsub('.', function(c)
-    return string.format('%02x', c:byte())
-  end))
-end
-
-local function expect(got, want, what)
-  assert(hex(got) == want, what .. ': got ' .. hex(got) .. ', want ' .. want)
-end
-
--- A length padded to three bytes, the width of the largest record the buffer
--- holds, as hex. ADR 0012.
-local function padded(n)
-  return string.format('%02x%02x%02x', n % 128 + 128, math.floor(n / 128) % 128 + 128, math.floor(n / 16384))
-end
-
--- What commit returns: the envelope's payload field, an Any whose type URL is
--- the topic behind protobuf's prefix and whose value is the record's fields.
--- Both lengths are padded like a nested message's.
-local function wrap(topic, body)
-  local url = 'type.googleapis.com/' .. topic
-  local value = '12' .. padded(#body / 2) .. body
-  local type_url = string.format('0a%02x', #url) .. hex(url)
-  return '22' .. padded(#type_url / 2 + #value / 2) .. type_url .. value
-end
-
 local shim = open(path)
 for _, name in ipairs({
   'begin', 'integer', 'double', 'string', 'boolean', 'message', 'end_message', 'commit',
@@ -56,40 +31,25 @@ for _, name in ipairs({
   assert(type(shim[name]) == 'function', 'shim.' .. name .. ' is missing')
 end
 
--- Two scalars, minimal tags and values.
+local function queued(what, result)
+  assert(result == true, what .. ': commit returned ' .. tostring(result))
+end
+
+-- One of every put, then a commit that queues.
 shim.begin('dcs.builtin.UnitDestroyed')
 shim.string(1, 'x')
 shim.integer(2, 3)
-expect(
-  shim.commit(),
-  wrap('dcs.builtin.UnitDestroyed', '0a0178' .. '1003'),
-  'a string and an integer, wrapped in the payload'
-)
-
--- A negative integer is ten bytes, a double eight behind its tag, a boolean
--- one, and a two-byte tag starts at field 16.
-shim.begin('t')
-shim.integer(1, -1)
-shim.double(2, 1.5)
-shim.boolean(3, true)
-shim.integer(16, 0)
-expect(
-  shim.commit(),
-  wrap('t', '08ffffffffffffffffff01' .. '11000000000000f83f' .. '1801' .. '800100'),
-  'the scalar wire forms'
-)
-
--- A nested message carries its length padded to three bytes, the width of
--- the largest record the buffer holds. ADR 0012.
-shim.begin('t')
-shim.message(3)
+shim.double(3, 1.5)
+shim.boolean(4, true)
+shim.message(5)
 shim.string(1, 'a')
 shim.end_message()
-expect(shim.commit(), wrap('t', '1a838000' .. '0a0161'), 'a nested message')
+shim.integer(16, 0)
+queued('a record of every put', shim.commit())
 
--- An empty record is an empty Any value behind the topic.
+-- An empty record queues too.
 shim.begin('t')
-expect(shim.commit(), wrap('t', ''), 'an empty record')
+queued('an empty record', shim.commit())
 
 -- A put before begin, a stray end_message and a non-boolean all raise.
 local function raises(what, f, ...)
@@ -108,20 +68,20 @@ raises('a number for a boolean', shim.boolean, 1, 1)
 shim.begin('t')
 raises('field zero', shim.integer, 0, 1)
 
--- A commit with a message open is refused: nil back, and the next record
+-- A commit with a message open is refused: false back, and the next record
 -- starts clean.
 shim.begin('t')
 shim.message(3)
-assert(shim.commit() == nil, 'a commit with a message open returned a body')
+assert(shim.commit() == false, 'a commit with a message open was not refused')
 shim.begin('t')
 shim.integer(1, 1)
-expect(shim.commit(), wrap('t', '0801'), 'the record after a refused one')
+queued('the record after a refused one', shim.commit())
 
--- A begin over an open record discards it.
+-- A begin over an open record discards it, and the new one queues.
 shim.begin('t')
 shim.integer(1, 1)
 shim.begin('t')
-expect(shim.commit(), wrap('t', ''), 'a record begun over another')
+queued('a record begun over another', shim.commit())
 
 -- Each state has its own record in progress.
 local second = open(path)
@@ -129,10 +89,10 @@ shim.begin('t')
 shim.integer(1, 1)
 second.begin('t')
 second.integer(1, 2)
-expect(second.commit(), wrap('t', '0802'), "the second table's record")
-expect(shim.commit(), wrap('t', '0801'), "the first table's record, after the second committed")
+queued("the second table's record", second.commit())
+queued("the first table's record, after the second committed", shim.commit())
 
 print('ok  the eight put calls are on the table')
-print('ok  scalars, a padded nested length and an empty record match by hand')
-print('ok  a defect raises, a refused commit returns nil, a begin discards')
+print('ok  a record of every put queues, and so does an empty one')
+print('ok  a defect raises, a refused commit returns false, a begin discards')
 print('ok  two tables hold two records in progress')

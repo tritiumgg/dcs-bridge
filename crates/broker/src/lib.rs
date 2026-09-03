@@ -8,14 +8,17 @@
 pub mod encode;
 pub mod fanout;
 pub mod ring;
-pub mod state;
 mod sync;
 // Sockets and the threads on them are std's, not Loom's, so the transport
-// stays out of the model: what it shares with the model is the park flag,
-// which the fan-out's Loom test drives from both sides.
+// and the process state that starts it stay out of the model: what they
+// share with the model is the park flag, which the fan-out's Loom test
+// drives from both sides.
+#[cfg(not(loom))]
+pub mod state;
 #[cfg(not(loom))]
 pub mod transport;
 
+#[cfg(not(loom))]
 pub use state::bridge;
 
 /// The broker build, carried in the handshake for bug reports.

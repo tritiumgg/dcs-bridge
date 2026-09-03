@@ -140,6 +140,21 @@ concept and each half still landed at twice that:
 allocated at open until 2.15 allocates it at the first `configure`. Topic
 checks against the registration maps are 2.16.
 
+**Task 2.7 lands as a sequence of five**, sized the same way. The park-flag
+refactor takes its own branch because it changes no behavior and the transport
+should show only what the transport adds:
+
+| Branch | What it holds | Reviewable against |
+|---|---|---|
+| `task/2.7-1-envelope` | `begin(topic)` writes the payload field, the `Any` type URL and the `Any` value field ahead of the record, each length a padded gap filled at `commit`. Tests decode the tail through a stock `Any`. | SPEC §5.2's `Envelope` and `Any`, and ADR 0012 |
+| `task/2.7-2-seq` | The writer thread numbers each connection's records from one, before the push. A stalled ring's survivors show the gap. | SPEC §5.2 "Sequence numbers" |
+| `task/2.7-3-park-flag` | The writer's park flag and waker factored out for any drainer; `attach_with` takes a waker. A second Loom model. No change in behavior. | ADR 0011 |
+| `task/2.7-4-transport` | The listener, a thread per connection, and the frame: length, `seq`, then the shared tail. Tests read frames off loopback. | SPEC §5.2 "Frame format", and the done-when's capture |
+| `task/2.7-5-commit-queues` | The bridge starts the outbound path at open; Lua `commit` pushes and returns a boolean. ADR 0014, this table, `STATE.md`. | SPEC §5.1's `commit`, and ADR 0014 |
+
+The listener binds at open with the specification's defaults until 2.15 moves
+it to `configure`. The handshake is 2.9; nothing here authenticates.
+
 ### Phase 3 — Generator
 
 | ID | Task | Done when |

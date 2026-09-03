@@ -54,8 +54,8 @@ mod lua {
         /// Push the `len` bytes at `s` as a string, which Lua copies.
         pub unsafe fn lua_pushlstring(state: *mut c_void, s: *const c_char, len: usize);
 
-        /// Push nil.
-        pub unsafe fn lua_pushnil(state: *mut c_void);
+        /// Push a boolean; any non-zero `b` is true.
+        pub unsafe fn lua_pushboolean(state: *mut c_void, b: c_int);
 
         /// Push a copy of the value at `index`.
         pub unsafe fn lua_pushvalue(state: *mut c_void, index: c_int);
@@ -111,6 +111,11 @@ mod lua {
 /// reads 1 and the second reads 2, which is how two tables are shown to sit
 /// over one bridge.
 ///
+/// The first open also starts the outbound path, listening on the default
+/// address, with the ring sizes below. That belongs to the first
+/// `shim.configure`, which does not exist yet; until it does, an open that
+/// cannot bind raises rather than loading a module nothing can connect to.
+///
 /// # Safety
 ///
 /// `state` must be a live `lua_State` from the Lua that opened this module,
@@ -120,6 +125,24 @@ mod lua {
 pub unsafe extern "C" fn luaopen_dcsbridge(state: *mut core::ffi::c_void) -> core::ffi::c_int {
     let version = dcsbridge_broker::BROKER_VERSION;
     let opens = dcsbridge_broker::bridge().open();
+
+    if let Err(error) = dcsbridge_broker::bridge().start_outbound(
+        outbound::LISTEN,
+        outbound::COMMIT_RING_RECORDS,
+        outbound::RING_OUT_RECORDS,
+    ) {
+        let message = format!("cannot listen on {}: {error}", outbound::LISTEN);
+        let message = std::ffi::CString::new(message).unwrap_or_default();
+        // SAFETY: the caller guarantees a live lua_State, and the format
+        // string names one argument and one is passed. luaL_error does not
+        // return, and nothing on this stack needs dropping: the CString
+        // leaks by design, because Lua copies the message before the jump
+        // and the leak is once per failed open.
+        unsafe {
+            lua::luaL_error(state, c"%s".as_ptr(), message.into_raw());
+        }
+        unreachable!("luaL_error does not return")
+    }
 
     // SAFETY: the caller guarantees a live lua_State with four free slots. The
     // table takes one, each pushed value the other, and lua_setfield pops the
@@ -143,6 +166,23 @@ pub unsafe extern "C" fn luaopen_dcsbridge(state: *mut core::ffi::c_void) -> cor
     }
 
     1
+}
+
+/// What the outbound path is started with at the first open.
+///
+/// Every value here is provisional. The first `shim.configure` is where
+/// `bind_address`, `port` and `ring_out_records` arrive and where the rings
+/// are meant to be allocated, and the commit ring has no configuration key
+/// yet. Until that call exists these are the specification's defaults, and
+/// the commit ring takes the per-connection size.
+#[cfg(any(unix, feature = "dcs-lua"))]
+mod outbound {
+    /// Loopback, on the port the CLI needs no argument for.
+    pub const LISTEN: &str = "127.0.0.1:7742";
+    /// Records the commit ring holds.
+    pub const COMMIT_RING_RECORDS: usize = 4096;
+    /// Records each connection's ring holds.
+    pub const RING_OUT_RECORDS: usize = 4096;
 }
 
 /// The put calls: one record at a time, built by typed puts into this state's
@@ -336,19 +376,26 @@ mod put {
         unsafe { check(state, encoder(state).end_message()) }
     }
 
-    /// `shim.commit()`: close the record and return its body as a string,
-    /// until the commit ring takes it instead. A record refused at commit is
-    /// discarded and counted, and the call returns nil. A commit with no
+    /// `shim.commit()`: close the record and queue it for every connection.
+    /// Returns true when the record was queued and false when it was not: a
+    /// record refused at commit is discarded and counted, and one the
+    /// outbound path could not take is counted there. A commit with no
     /// record open is a defect and raises.
+    ///
+    /// Queued is not delivered. A record queued with no connection attached
+    /// is dropped on the writer thread, and one a connection's ring evicts
+    /// shows there as a gap in `seq`.
     unsafe extern "C" fn commit(state: *mut c_void) -> c_int {
-        // SAFETY: a Lua call over the closure `install` built. The body is
-        // pushed before anything else touches the encoder, and Lua copies it.
+        // SAFETY: a Lua call over the closure `install` built. The tail is
+        // copied out of the encoder before the call returns, and nothing
+        // else touches the encoder meanwhile.
         unsafe {
-            match encoder(state).commit() {
-                Ok(body) => lua::lua_pushlstring(state, body.as_ptr().cast(), body.len()),
+            let queued = match encoder(state).commit() {
+                Ok(tail) => dcsbridge_broker::bridge().commit(tail).is_ok(),
                 Err(Error::NotOpen) => raise(state, Error::NotOpen),
-                Err(_) => lua::lua_pushnil(state),
-            }
+                Err(_) => false,
+            };
+            lua::lua_pushboolean(state, c_int::from(queued));
         }
         1
     }

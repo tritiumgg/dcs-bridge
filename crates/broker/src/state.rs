@@ -7,13 +7,25 @@
 //! to what the other had done.
 //!
 //! `Bridge` is where everything process-global lives. The three maps are here,
-//! and the rings, the listener and the threads join them as they are built. An
-//! open creates none of it, because the first `shim.configure` is what
-//! allocates. ADR 0007.
+//! and the outbound path, the writer thread over the commit ring and the
+//! listener that fans it out, joins them once [`Bridge::start_outbound`] is
+//! called. The inbound rings and the reader thread arrive as they are built.
+//! ADR 0007.
+//!
+//! Both DCS states commit records, and they run on one thread, so the commit
+//! ring's one producer is shared between them behind a lock that is never
+//! waited on: `try_lock`, with contention refused and counted, because a
+//! second thread committing is a defect rather than a case. ADR 0014.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::{OnceLock, PoisonError, RwLock, RwLockReadGuard};
+use std::fmt;
+use std::io;
+use std::net::{SocketAddr, ToSocketAddrs};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError, RwLock, RwLockReadGuard, TryLockError};
+
+use crate::fanout::{Commit, Writer};
+use crate::transport::{Listener, Record};
 
 /// A topic: the fully-qualified protobuf type name of a record's payload.
 ///
@@ -110,7 +122,64 @@ impl Registry {
 pub struct Bridge {
     opens: AtomicU32,
     registry: RwLock<Registry>,
+    outbound: OnceLock<Outbound>,
+    /// Held while the outbound path is being started, so two starters
+    /// cannot both bind.
+    starting: Mutex<()>,
 }
+
+/// The outbound path: the writer thread, the logic thread's end of the
+/// commit ring, and the listener whose connections the writer fans out to.
+pub struct Outbound {
+    /// Dropping it stops the writer thread; nothing else reaches it.
+    _writer: Writer<Record>,
+    commit: Mutex<Commit<Record>>,
+    listener: Listener,
+    contended: AtomicU64,
+}
+
+impl fmt::Debug for Outbound {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Outbound")
+            .field("listening", &self.listener.local_addr())
+            .field("contended", &self.contended.load(Ordering::Relaxed))
+            .finish_non_exhaustive()
+    }
+}
+
+impl Outbound {
+    /// The address the listener is bound to.
+    pub fn local_addr(&self) -> SocketAddr {
+        self.listener.local_addr()
+    }
+
+    /// How many commits were refused because another thread held the
+    /// commit ring's producer at that moment.
+    pub fn contended(&self) -> u64 {
+        self.contended.load(Ordering::Relaxed)
+    }
+}
+
+/// Why a record was not queued.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CommitError {
+    /// The outbound path has not been started.
+    NotStarted,
+    /// Another thread was committing. Refused, because waiting would put a
+    /// lock on the logic thread and a second committer is a defect.
+    Busy,
+}
+
+impl fmt::Display for CommitError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            CommitError::NotStarted => "the outbound path is not started",
+            CommitError::Busy => "another thread is committing",
+        })
+    }
+}
+
+impl std::error::Error for CommitError {}
 
 static BRIDGE: OnceLock<Bridge> = OnceLock::new();
 
@@ -122,10 +191,74 @@ pub fn bridge() -> &'static Bridge {
     BRIDGE.get_or_init(|| Bridge {
         opens: AtomicU32::new(0),
         registry: RwLock::new(Registry::default()),
+        outbound: OnceLock::new(),
+        starting: Mutex::new(()),
     })
 }
 
 impl Bridge {
+    /// Start the outbound path, or return the address it is already bound
+    /// to: the writer thread over a commit ring of `commit_capacity` records,
+    /// and a listener on `addr` giving each connection a ring of
+    /// `ring_capacity` records.
+    ///
+    /// The bind is what fails, and it fails with nothing started. A second
+    /// call, from the other Lua state or a racing thread, changes nothing
+    /// and returns the first call's address.
+    pub fn start_outbound(
+        &self,
+        addr: impl ToSocketAddrs,
+        commit_capacity: usize,
+        ring_capacity: usize,
+    ) -> io::Result<SocketAddr> {
+        let _starting = self.starting.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(outbound) = self.outbound.get() {
+            return Ok(outbound.local_addr());
+        }
+
+        let (writer, commit, connections) = Writer::spawn(commit_capacity);
+        let listener = Listener::spawn(addr, connections, ring_capacity)?;
+        let addr = listener.local_addr();
+        // The lock above makes this the only setter.
+        let _ = self.outbound.set(Outbound {
+            _writer: writer,
+            commit: Mutex::new(commit),
+            listener,
+            contended: AtomicU64::new(0),
+        });
+
+        Ok(addr)
+    }
+
+    /// The outbound path, once started.
+    pub fn outbound(&self) -> Option<&Outbound> {
+        self.outbound.get()
+    }
+
+    /// Queue an envelope tail for every connection.
+    ///
+    /// The tail is copied once, into the allocation the rings share by
+    /// reference; that is the one allocation on the commit path. A record the
+    /// commit ring evicts to make room comes back here and is dropped on the
+    /// calling thread. ADR 0014.
+    pub fn commit(&self, tail: &[u8]) -> Result<(), CommitError> {
+        let outbound = self.outbound.get().ok_or(CommitError::NotStarted)?;
+        let record: Record = Arc::from(tail);
+
+        let mut commit = match outbound.commit.try_lock() {
+            Ok(commit) => commit,
+            // A panic under the lock left the producer as it was; the ring
+            // itself is sound, so committing through the poison is right.
+            Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+            Err(TryLockError::WouldBlock) => {
+                outbound.contended.fetch_add(1, Ordering::Relaxed);
+                return Err(CommitError::Busy);
+            }
+        };
+        drop(commit.push(record));
+        Ok(())
+    }
+
     /// Record that a Lua state has opened the module, and number this open.
     ///
     /// The first open is 1. Nothing is allocated and nothing is re-initialized,
@@ -252,6 +385,53 @@ mod tests {
                 .unwrap_or_else(|| panic!("{member} is not in {path}"));
             assert_eq!(theirs, ours, "{member} is {theirs} in the schema");
         }
+    }
+
+    /// The outbound path starts once, and a record committed after that
+    /// reaches a connection as a frame carrying that connection's `seq`.
+    ///
+    /// The bridge is the process's, so this shares it with every other test
+    /// in the binary; none of the others starts the outbound path or commits,
+    /// and a second start returns the first's address rather than failing.
+    #[test]
+    fn the_outbound_path_starts_once_and_commits_reach_a_connection() {
+        use std::io::Read;
+        use std::net::TcpStream;
+        use std::time::Duration;
+
+        let addr = bridge()
+            .start_outbound("127.0.0.1:0", 64, 64)
+            .expect("loopback binds");
+        assert_eq!(
+            bridge().start_outbound("127.0.0.1:0", 64, 64).unwrap(),
+            addr,
+            "a second start bound a second listener"
+        );
+        assert_eq!(bridge().outbound().unwrap().local_addr(), addr);
+
+        let mut client = TcpStream::connect(addr).expect("the listener accepts");
+        client
+            .set_read_timeout(Some(Duration::from_millis(20)))
+            .unwrap();
+
+        // A record committed before the writer thread knows the connection
+        // is not delivered to it, so commit until one arrives.
+        let tail = [0x22, 0x00];
+        let mut length = [0u8; 4];
+        for _ in 0..1000 {
+            bridge().commit(&tail).expect("the path is started");
+            if matches!(client.peek(&mut length), Ok(4)) {
+                break;
+            }
+        }
+        client.read_exact(&mut length).expect("a frame arrives");
+        assert_eq!(u32::from_le_bytes(length), 2 + tail.len() as u32);
+        let mut frame = vec![0u8; u32::from_le_bytes(length) as usize];
+        client
+            .read_exact(&mut frame)
+            .expect("the frame's body arrives");
+        assert_eq!(frame, [0x08, 0x01, 0x22, 0x00], "seq 1 then the tail");
+        assert_eq!(bridge().outbound().unwrap().contended(), 0);
     }
 
     /// The number `schema` gives `member`, out of a line reading `NAME = N;`.

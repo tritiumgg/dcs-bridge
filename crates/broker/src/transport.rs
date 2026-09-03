@@ -11,7 +11,7 @@
 //! connection's thread writes the envelope in two pieces: `seq`, which is
 //! this connection's and comes from the number the writer thread assigned,
 //! and the tail the record was committed as, which every connection shares by
-//! reference and none copies.
+//! reference and none copies. ADR 0014.
 //!
 //! What a connection can say, and the handshake that precedes any of it, are
 //! later tasks'. A socket that connects here receives from its first frame.
@@ -31,7 +31,7 @@ use crate::ring::Consumer;
 ///
 /// One allocation per record, at `commit`, where the tail is copied out of
 /// the encoder's buffer. A slab that hands the allocation back is a later
-/// task's.
+/// task's. ADR 0014.
 pub type Record = Arc<[u8]>;
 
 /// `Envelope.seq`'s tag: field 1, varint.

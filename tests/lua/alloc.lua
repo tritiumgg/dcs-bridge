@@ -9,8 +9,8 @@
 -- allocated, so the delta is taken with the collector stopped, and a delta of
 -- zero then means zero allocation.
 --
--- commit is the exception. It returns the body as a Lua string, which
--- allocates once per call, until the commit ring takes the body instead.
+-- commit allocates on the Rust heap, once, for the copy the rings share, and
+-- nothing on the Lua heap: it returns a boolean.
 --
 -- Run it through tools/luatest.sh, which builds the module and finds it.
 
@@ -95,23 +95,18 @@ zero('a ten-field record', function()
   double(10, 0)
 end)
 
--- commit allocates the returned string and nothing else. Lua interns short
--- strings, so the body is made long enough to be allocated on every call, and
--- the check is that the growth is the body, the wrapper naming the topic,
--- and nothing more.
+-- commit hands the record to the broker and returns a boolean, so the Lua
+-- heap does not move for it either. Nothing is connected, so the writer
+-- thread drops every record; the commit ring evicting under a burst faster
+-- than it drains is the path the logic thread pays on, and it is the one
+-- this runs.
 local body = text .. text
-local wrapper = #('type.googleapis.com/' .. topic) + 16
-local kb = growth(function()
+zero('begin, a string and commit', function()
   begin(topic)
   string_(1, body)
-  commit()
+  assert(commit(), 'commit refused a record')
 end)
-local per_call = kb * 1024 / N
-assert(
-  per_call > 0 and per_call < #body + wrapper + 64,
-  'commit grew the heap by ' .. per_call .. ' bytes per call for a ' .. #body .. ' byte body'
-)
 
 print('ok  the six puts and begin allocate nothing, over ' .. N .. ' calls each')
 print('ok  a ten-field record allocates nothing')
-print('ok  commit allocates its returned body and nothing more')
+print('ok  commit allocates nothing on the Lua heap')
