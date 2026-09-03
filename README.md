@@ -52,8 +52,8 @@ The steps below describe the intended procedure.
    Games directory.
 3. Configure the injection route. See the next section.
 4. Restart DCS.
-5. Run `dcsb doctor` to check the installation. This command is planned and
-   not yet built.
+5. Run `dcsb doctor` to check the installation. This command is planned,
+   not built.
 
 The zip places these files.
 
@@ -83,8 +83,8 @@ installed but inactive.
 ## The Stock route and the Modified route
 
 The bridge loads its mission-side script, the sim driver, in one of two ways.
-The `route` key in `Config\DCSBridge.lua` selects one. Its values are not
-final. Both routes install the same files. Both load the sim driver on every
+The `route` key in `Config\DCSBridge.lua` selects one. Its values are not final.
+Both routes install the same files. Both load the sim driver on every
 mission load.
 
 ### Which route to use

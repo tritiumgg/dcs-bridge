@@ -20,7 +20,7 @@ docs/
 proto/                 the record schema. buf.yaml configures the lint
 vendor/lua/lua.def     the import definition for DCS's Lua
 tests/lua/             the module opened by a stock Lua 5.1, no DCS present
-tools/                 ledger.sh, luatest.sh, mkimplib.sh, mkschema.sh, statecheck.sh
+tools/                 ledger.sh, luatest.sh, mkimplib.sh, mkschema.sh, readmeopen.sh, statecheck.sh
 .github/workflows/     CI, release, version bump
 .claude/               the read guard
 ```
@@ -68,6 +68,17 @@ belongs in this file, not that one. A resolved carry-forward is deleted.
 
 Never write a paragraph where a line will do, and never copy a fact into
 `STATE.md` that already lives in `CLAUDE.md`.
+
+## `README.md` is for users, and the change that moves it updates it
+
+The README says what a user downloads, installs, configures and runs. A task
+that changes any of that updates the README in the same pull request. Where
+the build has not reached something the README describes, the sentence says
+so, on one line, with "not final", "not built" or "planned";
+`tools/readmeopen.sh` lists those lines, and the task that settles one takes
+the note out. Every pull request body answers the `README` heading of
+`.github/PULL_REQUEST_TEMPLATE.md`. `docs/developing.md` is the contributor
+document, and what a user does not need goes there instead.
 
 ## The specifications are frozen. Nothing else is.
 
@@ -235,7 +246,8 @@ DCS, then with DCS) and by platform (PowerShell on Windows, bash elsewhere).
 Each step is an imperative sentence: an action, or a `Verify ...` naming what
 the tester sees when the steps before it worked. Put a Verify wherever the
 tester needs to know that before going on. The With DCS steps go build,
-install, files to edit, then what to do in DCS. Each heading reads `none`
+install, files to edit, then what to do in DCS. README names the paragraph the
+change updated and any note it took out. Each heading reads `none`
 where nothing applies.
 
 Do these without asking: branch, commit, rebase onto `main`, push a topic

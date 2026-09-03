@@ -14,6 +14,15 @@ it passed over, what the diff leaves alone and why, and anything the
 reviewer needs to know before reading it. Not a file list.
 -->
 
+## README
+
+<!--
+What this change alters in what a user downloads, installs, configures or
+runs, and the README paragraph that now says so. Name any "not final" or
+"planned" note the change takes out. Write "none" when nothing a user
+sees changed.
+-->
+
 ## Testing
 
 <!--
