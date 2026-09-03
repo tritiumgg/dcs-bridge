@@ -26,8 +26,10 @@
 //! wakes it. Waking is a flag the writer raises before it parks and the logic
 //! thread reads after each push, so a push into a ring the writer is awake for
 //! costs one atomic load and no system call. The argument that no wake is lost
-//! is beside [`Waker::wake_if_parked`] and [`Writer::run`], and Loom checks it.
-//! ADR 0011.
+//! is beside [`Waker::wake_if_parked`] and [`ParkFlag::park_unless`], and Loom
+//! checks it. A connection's thread sleeps on its ring the same way, with the
+//! writer thread as the side that wakes it, through the [`Waker`] it hands
+//! [`Connections::attach_with`]. ADR 0011.
 
 // Loom's channel returns `std`'s error type rather than a model of its own.
 use std::sync::mpsc::TryRecvError;
@@ -70,43 +72,78 @@ pub struct Numbered<T> {
 /// the logic thread, so a channel's allocation and its lock cost nothing that
 /// matters here.
 enum Control<T> {
-    /// A connection exists; push every record from here on into this ring.
-    Attach(ConnectionId, Producer<Numbered<T>>),
+    /// A connection exists; push every record from here on into this ring,
+    /// and wake the thread draining it if it sleeps.
+    Attach(ConnectionId, Producer<Numbered<T>>, Option<Waker>),
     /// A connection is gone; drop its ring's producer.
     Detach(ConnectionId),
     /// Return from the loop.
     Stop,
 }
 
-/// What the three handles share with the writer thread.
-struct Shared {
-    /// Raised by the writer thread before it parks, lowered after it wakes.
+/// The sleeping side of the wake protocol: a flag a thread raises before it
+/// parks on an empty ring, so that the thread filling the ring can tell a
+/// sleeper from a thread still looking.
+#[derive(Debug, Default)]
+pub struct ParkFlag {
+    /// Raised before the park, lowered after the wake.
     parked: AtomicBool,
-    /// The last connection id handed out.
-    last_id: AtomicU64,
 }
 
-/// A way to wake the writer thread, held by every handle that may need to.
-struct Waker {
-    shared: Arc<Shared>,
-    writer: thread::Thread,
+impl ParkFlag {
+    /// A flag that is down.
+    pub fn new() -> Self {
+        Self {
+            parked: AtomicBool::new(false),
+        }
+    }
+
+    /// Raise the flag, look once more, and park unless `has_work` says there
+    /// is something to do.
+    ///
+    /// The look after the flag is what keeps a wake from being lost: a record
+    /// that landed between the caller's last look and the flag is seen here,
+    /// and one that lands after the flag finds it raised and wakes us.
+    /// [`Waker::wake_if_parked`] has the argument.
+    pub fn park_unless(&self, has_work: impl FnOnce() -> bool) {
+        self.parked.store(true, Ordering::SeqCst);
+        fence(Ordering::SeqCst);
+        if !has_work() {
+            thread::park();
+        }
+        self.parked.store(false, Ordering::SeqCst);
+    }
+}
+
+/// The waking side: a way to wake one sleeping thread, held by whoever fills
+/// the ring it sleeps on.
+#[derive(Debug)]
+pub struct Waker {
+    flag: Arc<ParkFlag>,
+    sleeper: thread::Thread,
 }
 
 impl Waker {
-    /// Wake the writer thread if it is parked, or about to be.
+    /// A waker for `sleeper`, which parks through `flag`.
+    pub fn new(flag: Arc<ParkFlag>, sleeper: thread::Thread) -> Self {
+        Self { flag, sleeper }
+    }
+
+    /// Wake the sleeper if it is parked, or about to be.
     ///
-    /// This is the logic thread's half of the protocol, so it costs one load in
-    /// the common case and a system call only when the writer thread has
-    /// actually gone to sleep. Both sides use `SeqCst`, for the reason `ring.rs`
-    /// gives: the strength is unmeasured and the cheaper mistake is the slow
-    /// one.
+    /// This is the pushing side's half of the protocol, so it costs one load
+    /// in the common case and a system call only when the sleeper has
+    /// actually gone to sleep. Both sides use `SeqCst`, for the reason
+    /// `ring.rs` gives: the strength is unmeasured and the cheaper mistake is
+    /// the slow one.
     ///
-    /// Why no wake is lost: the writer raises `parked` and then reads the ring's
-    /// depth; the pusher publishes the ring's write index and then reads
-    /// `parked`. Under one total order of those four operations, either the
-    /// pusher's load comes after the writer's store and sees the flag, or the
-    /// writer's load comes after the pusher's store and sees the record. A
-    /// wake that arrives before the park makes the park return at once.
+    /// Why no wake is lost: the sleeper raises the flag and then reads the
+    /// ring's depth; the pusher publishes the ring's write index and then
+    /// reads the flag. Under one total order of those four operations, either
+    /// the pusher's load comes after the sleeper's store and sees the flag,
+    /// or the sleeper's load comes after the pusher's store and sees the
+    /// record. A wake that arrives before the park makes the park return at
+    /// once.
     ///
     /// The fence between the store and the load is what carries that total
     /// order. `SeqCst` on the accesses alone would too, but Loom models those as
@@ -114,21 +151,30 @@ impl Waker {
     /// while a `SeqCst` fence it models in full. On the product target the
     /// fence is one more full barrier per push, which is the measurable
     /// mistake rather than the corrupting one.
-    fn wake_if_parked(&self) {
+    pub fn wake_if_parked(&self) {
         fence(Ordering::SeqCst);
-        if self.shared.parked.load(Ordering::SeqCst) {
-            self.writer.unpark();
+        if self.flag.parked.load(Ordering::SeqCst) {
+            self.sleeper.unpark();
         }
     }
 
-    /// Wake the writer thread whether or not it is parked.
+    /// Wake the sleeper whether or not it is parked.
     ///
-    /// For the attach side, which does not run on the logic thread and does not
-    /// publish through the ring, so the flag argument above does not cover it.
-    /// An unconditional wake does: the token is stored if the writer is not
-    /// parked yet and the next park returns at once.
-    fn wake(&self) {
-        self.writer.unpark();
+    /// For a side that does not publish through the ring, so the flag argument
+    /// above does not cover it. An unconditional wake does: the token is
+    /// stored if the sleeper is not parked yet and the next park returns at
+    /// once.
+    pub fn wake(&self) {
+        self.sleeper.unpark();
+    }
+}
+
+impl Clone for Waker {
+    fn clone(&self) -> Self {
+        Self {
+            flag: Arc::clone(&self.flag),
+            sleeper: self.sleeper.clone(),
+        }
     }
 }
 
@@ -180,16 +226,16 @@ impl<T> Commit<T> {
 pub struct Connections<T> {
     control: mpsc::Sender<Control<T>>,
     waker: Waker,
+    /// The last connection id handed out.
+    last_id: Arc<AtomicU64>,
 }
 
 impl<T> Clone for Connections<T> {
     fn clone(&self) -> Self {
         Self {
             control: self.control.clone(),
-            waker: Waker {
-                shared: Arc::clone(&self.waker.shared),
-                writer: self.waker.writer.clone(),
-            },
+            waker: self.waker.clone(),
+            last_id: Arc::clone(&self.last_id),
         }
     }
 }
@@ -211,9 +257,28 @@ impl<T> Connections<T> {
     ///
     /// If `capacity` is zero, for the reason [`Ring::split`] gives.
     pub fn attach(&self, capacity: usize) -> (ConnectionId, Consumer<Numbered<T>>) {
+        self.attach_inner(capacity, None)
+    }
+
+    /// [`attach`](Self::attach), with a thread to wake: the writer thread
+    /// wakes it through `waker` after each push into the new ring, so the
+    /// thread draining the ring may park on it through the waker's flag.
+    pub fn attach_with(
+        &self,
+        capacity: usize,
+        waker: Waker,
+    ) -> (ConnectionId, Consumer<Numbered<T>>) {
+        self.attach_inner(capacity, Some(waker))
+    }
+
+    fn attach_inner(
+        &self,
+        capacity: usize,
+        waker: Option<Waker>,
+    ) -> (ConnectionId, Consumer<Numbered<T>>) {
         let (producer, consumer) = Ring::split(capacity);
-        let id = ConnectionId(self.waker.shared.last_id.fetch_add(1, Ordering::Relaxed) + 1);
-        self.send(Control::Attach(id, producer));
+        let id = ConnectionId(self.last_id.fetch_add(1, Ordering::Relaxed) + 1);
+        self.send(Control::Attach(id, producer, waker));
 
         (id, consumer)
     }
@@ -256,29 +321,24 @@ impl<T: Clone + Send + 'static> Writer<T> {
     pub fn spawn(capacity: usize) -> (Self, Commit<T>, Connections<T>) {
         let (producer, consumer) = Ring::split(capacity);
         let (control, inbox) = mpsc::channel();
-        let shared = Arc::new(Shared {
-            parked: AtomicBool::new(false),
-            last_id: AtomicU64::new(0),
-        });
+        let flag = Arc::new(ParkFlag::new());
 
-        let running = Arc::clone(&shared);
+        let sleeping = Arc::clone(&flag);
         let handle = thread::Builder::new()
             .name("dcsbridge-writer".into())
-            .spawn(move || Self::run(consumer, inbox, running))
+            .spawn(move || Self::run(consumer, inbox, sleeping))
             .expect("the writer thread spawns");
         let thread = handle.thread().clone();
 
-        let waker = || Waker {
-            shared: Arc::clone(&shared),
-            writer: thread.clone(),
-        };
+        let waker = Waker::new(flag, thread.clone());
         let commit = Commit {
             producer,
-            waker: waker(),
+            waker: waker.clone(),
         };
         let connections = Connections {
             control: control.clone(),
-            waker: waker(),
+            waker,
+            last_id: Arc::new(AtomicU64::new(0)),
         };
         let writer = Self {
             handle: Some(handle),
@@ -295,17 +355,18 @@ impl<T: Clone + Send + 'static> Writer<T> {
     /// holds. Control before records, so a detached connection stops receiving
     /// at the first pass after the detach. An empty pass yields, and only after
     /// [`LOOKS_BEFORE_PARK`] empty passes in a row does the thread park.
-    fn run(mut commit: Consumer<T>, inbox: mpsc::Receiver<Control<T>>, shared: Arc<Shared>) {
+    fn run(mut commit: Consumer<T>, inbox: mpsc::Receiver<Control<T>>, flag: Arc<ParkFlag>) {
         let mut connections: Vec<Connection<T>> = Vec::new();
         let mut empty_passes = 0;
 
         loop {
             loop {
                 match inbox.try_recv() {
-                    Ok(Control::Attach(id, producer)) => connections.push(Connection {
+                    Ok(Control::Attach(id, producer, waker)) => connections.push(Connection {
                         id,
                         producer,
                         next_seq: 1,
+                        waker,
                     }),
                     Ok(Control::Detach(id)) => connections.retain(|held| held.id != id),
                     Ok(Control::Stop) | Err(TryRecvError::Disconnected) => return,
@@ -337,21 +398,12 @@ impl<T: Clone + Send + 'static> Writer<T> {
             }
             empty_passes = 0;
 
-            // Raise the flag, then look once more. A record that landed
-            // between the drain above and the flag is seen here; one that lands
-            // after the flag finds it raised and wakes us. `Waker::wake_if_parked`
-            // has the argument.
-            shared.parked.store(true, Ordering::SeqCst);
-            fence(Ordering::SeqCst);
-            if commit.is_empty() {
-                thread::park();
-            }
-            shared.parked.store(false, Ordering::SeqCst);
+            flag.park_unless(|| !commit.is_empty());
         }
     }
 }
 
-/// How many empty passes the writer thread makes, yielding between them,
+/// How many empty passes a draining thread makes, yielding between them,
 /// before it parks.
 ///
 /// A yield is a few microseconds on each host, so this is on the order of a
@@ -359,12 +411,12 @@ impl<T: Clone + Send + 'static> Writer<T> {
 /// one frame's drain, and far shorter than the frame of quiet that follows it.
 /// Nothing has measured this; it moves when a probe prices the wake.
 #[cfg(not(loom))]
-const LOOKS_BEFORE_PARK: u32 = 32;
+pub const LOOKS_BEFORE_PARK: u32 = 32;
 
 /// Under Loom every yield is a branch, and what the model checks is the park
-/// handshake, which the looking only delays. So the writer parks at once.
+/// handshake, which the looking only delays. So the sleeper parks at once.
 #[cfg(loom)]
-const LOOKS_BEFORE_PARK: u32 = 0;
+pub const LOOKS_BEFORE_PARK: u32 = 0;
 
 impl<T> Drop for Writer<T> {
     /// Stop the thread and wait for it.
@@ -386,10 +438,13 @@ struct Connection<T> {
     producer: Producer<Numbered<T>>,
     /// The `seq` the next record pushed here takes.
     next_seq: u64,
+    /// The thread draining the ring, if it sleeps on it.
+    waker: Option<Waker>,
 }
 
 impl<T> Connection<T> {
-    /// Number a record and push it, whether or not the ring keeps it.
+    /// Number a record and push it, whether or not the ring keeps it, then
+    /// wake the drainer if it sleeps.
     ///
     /// The number is taken before the push, so an evicted record leaves the
     /// gap that tells its consumer it was lost.
@@ -397,6 +452,9 @@ impl<T> Connection<T> {
         let seq = self.next_seq;
         self.next_seq += 1;
         drop(self.producer.push(Numbered { seq, record }));
+        if let Some(waker) = &self.waker {
+            waker.wake_if_parked();
+        }
     }
 }
 
@@ -720,6 +778,48 @@ mod loom_tests {
                 ],
                 "records arrived out of order"
             );
+
+            drop(writer);
+        });
+    }
+
+    /// The same protocol with the writer thread on the waking side: no
+    /// schedule leaves a record in a connection's ring with its drainer
+    /// parked.
+    #[test]
+    fn a_fanned_record_always_wakes_the_connection() {
+        let mut model = loom::model::Builder::new();
+        model.max_branches = 100_000;
+        model.preemption_bound = Some(3);
+
+        model.check(|| {
+            let (writer, mut commit, connections) = Writer::spawn(2);
+
+            let flag = Arc::new(ParkFlag::new());
+            let sleeping = Arc::clone(&flag);
+            let (hand, take) = mpsc::channel::<Consumer<Numbered<u32>>>();
+            let drainer = thread::spawn(move || {
+                let mut consumer = take.recv().expect("the consumer is handed over");
+                let mut arrived = Vec::new();
+                while arrived.len() < 2 {
+                    match consumer.pop() {
+                        Some(record) => arrived.push(record.seq),
+                        None => sleeping.park_unless(|| !consumer.is_empty()),
+                    }
+                }
+                arrived
+            });
+
+            let waker = Waker::new(flag, drainer.thread().clone());
+            let (_, consumer) = connections.attach_with(2, waker);
+            hand.send(consumer).expect("the drainer is waiting");
+
+            for value in 0..2u32 {
+                commit.push(value);
+            }
+
+            let arrived = drainer.join().expect("the drainer only pops");
+            assert_eq!(arrived, vec![1, 2], "records arrived out of order");
 
             drop(writer);
         });
