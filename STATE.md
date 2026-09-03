@@ -107,3 +107,4 @@ entries at most: an eleventh means something here is finished, or belongs in
   the ring size 2.15 picks should count it.
 - **Task 7.10 does not exist.** Phase 7 runs 7.1 to 7.9 then 7.11, with no note
   explaining the gap. Retired ID or omission, unresolved.
+
