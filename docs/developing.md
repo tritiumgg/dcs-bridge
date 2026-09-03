@@ -144,7 +144,7 @@ version suffix without renaming every topic. ADR 0004 has the argument.
 ## Releases
 
 A tag carries four assets: `lua-dcsbridge.dll`, `dcsb.exe`,
-`write-directory-<version>.zip` and `SHA256SUMS` over the three. The zip
+`dcs-bridge-<version>.zip` and `SHA256SUMS` over the three. The zip
 mirrors the write directory described in SPEC §13, so installing it is one
 extraction over `Saved Games\<write dir>\`, and it carries the broker and
 `schema.pb`. `dcsb` runs outside DCS and has no home in that tree, so it ships

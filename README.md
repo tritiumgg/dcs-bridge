@@ -23,7 +23,7 @@ A release carries four files.
 
 | File | What it is |
 |---|---|
-| `write-directory-<version>.zip` | The files that go into your DCS Saved Games directory. |
+| `dcs-bridge-<version>.zip` | The files that go into your DCS Saved Games directory. |
 | `dcsb.exe` | The command-line tool. |
 | `lua-dcsbridge.dll` | The broker, on its own. The zip already contains it. |
 | `SHA256SUMS` | Checksums of the three files above. |
@@ -45,7 +45,7 @@ each of those moves only for its own reason.
 Installation is not final. The current releases contain placeholder files.
 The steps below describe the intended procedure.
 
-1. Extract `write-directory-<version>.zip` over your DCS Saved Games directory.
+1. Extract `dcs-bridge-<version>.zip` over your DCS Saved Games directory.
    This is normally `%USERPROFILE%\Saved Games\DCS\` or
    `%USERPROFILE%\Saved Games\DCS.openbeta\`.
 2. Put `dcsb.exe` anywhere on your `PATH`. It does not belong in the Saved

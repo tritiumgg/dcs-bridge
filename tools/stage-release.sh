@@ -7,7 +7,7 @@
 #
 #   lua-dcsbridge.dll             the broker
 #   dcsb.exe                      the CLI
-#   write-directory-<v>.zip       the tree that extracts over the write directory
+#   dcs-bridge-<v>.zip            the tree that extracts over the write directory
 #   SHA256SUMS                    over all three
 #
 # Only those two binaries ship. protoc-gen-dcsbridge-lua is a build-time protoc
@@ -66,7 +66,7 @@ fi
 mkdir -p "$OUT"
 rm -rf "$OUT/.writedir"
 rm -f "$OUT/lua-dcsbridge.dll" "$OUT/dcsb.exe" "$OUT/SHA256SUMS"
-rm -f "$OUT"/write-directory-*.zip
+rm -f "$OUT"/dcs-bridge-*.zip
 
 # Cargo rejects a hyphen in a library target name, so the broker lands as
 # lua_dcsbridge.dll and is renamed on the way out.
@@ -130,7 +130,7 @@ esac
 # The tree mirrors the write directory, so installing is one extraction over it.
 # The broker and the schema have a home there so far; the Lua files join them
 # as they are built. The CLI runs outside DCS and ships as a loose asset.
-ZIP="write-directory-$VERSION.zip"
+ZIP="dcs-bridge-$VERSION.zip"
 STAGE=$OUT/.writedir
 mkdir -p "$STAGE/Mods/services/DCSBridge/bin"
 cp "$OUT/lua-dcsbridge.dll" "$STAGE/Mods/services/DCSBridge/bin/"
