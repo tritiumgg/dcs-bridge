@@ -7,7 +7,7 @@
 
 mod tail;
 
-use std::io::{self, Write};
+use std::io::{self, BufReader, Write};
 use std::net::TcpStream;
 use std::process::ExitCode;
 
@@ -56,9 +56,15 @@ fn tail_verb(args: &TailArgs) -> ExitCode {
         }
     };
 
+    // A frame is a few dozen bytes and a burst is thousands of them, so the
+    // socket is read through a buffer: one system call fills it with a few
+    // hundred frames rather than two per frame. Without it the reader, not
+    // the bridge, can be what a burst outruns.
+    let reader = BufReader::with_capacity(1 << 16, stream);
+
     let stdout = io::stdout();
     let mut out = stdout.lock();
-    let result = tail::run(stream, &mut out);
+    let result = tail::run(reader, &mut out);
     let _ = out.flush();
     match result {
         Ok(summary) => {
