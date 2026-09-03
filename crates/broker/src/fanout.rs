@@ -14,6 +14,13 @@
 //! taking bytes fills its own ring, which evicts and counts, and stalls nothing
 //! else. ADR 0011.
 //!
+//! The writer thread numbers what it pushes. Each connection has its own
+//! `seq`, rising by one per record from one, assigned before the push and so
+//! before the ring decides whether the record stays. A record the ring evicts
+//! took its number with it, and the consumer reads the loss as a gap. Two
+//! connections see different record streams once addressing exists, so the
+//! numbering is per connection rather than global.
+//!
 //! The ring itself has no way to say a record arrived, so the writer thread
 //! parks when the commit ring has stayed empty for a while and the logic thread
 //! wakes it. Waking is a flag the writer raises before it parks and the logic
@@ -43,6 +50,20 @@ impl ConnectionId {
     }
 }
 
+/// A record as one connection receives it: numbered in that connection's
+/// sequence.
+///
+/// `seq` starts at one and rises by one per record the writer thread pushed
+/// into the connection's ring, whether or not the ring kept it. A consumer
+/// that reads 4 after 2 has lost 3, and only 3.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Numbered<T> {
+    /// The record's place in this connection's stream.
+    pub seq: u64,
+    /// The record itself.
+    pub record: T,
+}
+
 /// What the attach side tells the writer thread.
 ///
 /// These cross a channel rather than a ring because none of them is sent from
@@ -50,7 +71,7 @@ impl ConnectionId {
 /// matters here.
 enum Control<T> {
     /// A connection exists; push every record from here on into this ring.
-    Attach(ConnectionId, Producer<T>),
+    Attach(ConnectionId, Producer<Numbered<T>>),
     /// A connection is gone; drop its ring's producer.
     Detach(ConnectionId),
     /// Return from the loop.
@@ -189,7 +210,7 @@ impl<T> Connections<T> {
     /// # Panics
     ///
     /// If `capacity` is zero, for the reason [`Ring::split`] gives.
-    pub fn attach(&self, capacity: usize) -> (ConnectionId, Consumer<T>) {
+    pub fn attach(&self, capacity: usize) -> (ConnectionId, Consumer<Numbered<T>>) {
         let (producer, consumer) = Ring::split(capacity);
         let id = ConnectionId(self.waker.shared.last_id.fetch_add(1, Ordering::Relaxed) + 1);
         self.send(Control::Attach(id, producer));
@@ -275,14 +296,18 @@ impl<T: Clone + Send + 'static> Writer<T> {
     /// at the first pass after the detach. An empty pass yields, and only after
     /// [`LOOKS_BEFORE_PARK`] empty passes in a row does the thread park.
     fn run(mut commit: Consumer<T>, inbox: mpsc::Receiver<Control<T>>, shared: Arc<Shared>) {
-        let mut connections: Vec<(ConnectionId, Producer<T>)> = Vec::new();
+        let mut connections: Vec<Connection<T>> = Vec::new();
         let mut empty_passes = 0;
 
         loop {
             loop {
                 match inbox.try_recv() {
-                    Ok(Control::Attach(id, producer)) => connections.push((id, producer)),
-                    Ok(Control::Detach(id)) => connections.retain(|(held, _)| *held != id),
+                    Ok(Control::Attach(id, producer)) => connections.push(Connection {
+                        id,
+                        producer,
+                        next_seq: 1,
+                    }),
+                    Ok(Control::Detach(id)) => connections.retain(|held| held.id != id),
                     Ok(Control::Stop) | Err(TryRecvError::Disconnected) => return,
                     Err(TryRecvError::Empty) => break,
                 }
@@ -355,22 +380,42 @@ impl<T> Drop for Writer<T> {
     }
 }
 
-/// Push one record into every connection's ring.
+/// One connection, as the writer thread holds it.
+struct Connection<T> {
+    id: ConnectionId,
+    producer: Producer<Numbered<T>>,
+    /// The `seq` the next record pushed here takes.
+    next_seq: u64,
+}
+
+impl<T> Connection<T> {
+    /// Number a record and push it, whether or not the ring keeps it.
+    ///
+    /// The number is taken before the push, so an evicted record leaves the
+    /// gap that tells its consumer it was lost.
+    fn push(&mut self, record: T) {
+        let seq = self.next_seq;
+        self.next_seq += 1;
+        drop(self.producer.push(Numbered { seq, record }));
+    }
+}
+
+/// Push one record into every connection's ring, numbered per connection.
 ///
 /// Each connection but the last gets a clone, and the last gets the record
 /// itself, so a single connection costs no clone at all. A record a ring turns
 /// away is dropped here, on the writer thread, and the ring has already counted
 /// it against that connection. With no connection attached the record is
 /// dropped and counted nowhere: there was no one to lose it.
-fn fan_out<T: Clone>(connections: &mut [(ConnectionId, Producer<T>)], record: T) {
-    let Some(((_, last), rest)) = connections.split_last_mut() else {
+fn fan_out<T: Clone>(connections: &mut [Connection<T>], record: T) {
+    let Some((last, rest)) = connections.split_last_mut() else {
         return;
     };
 
-    for (_, producer) in rest {
-        drop(producer.push(record.clone()));
+    for connection in rest {
+        connection.push(record.clone());
     }
-    drop(last.push(record));
+    last.push(record);
 }
 
 #[cfg(all(test, not(loom)))]
@@ -384,8 +429,17 @@ mod tests {
     const ROOMY: usize = 4096;
 
     /// Pop until `count` records have arrived, or fail after a while rather
-    /// than hang the suite.
-    fn drain_until<T>(consumer: &mut Consumer<T>, count: usize) -> Vec<T> {
+    /// than hang the suite. The records alone, for the tests that are not
+    /// about numbering.
+    fn drain_until<T>(consumer: &mut Consumer<Numbered<T>>, count: usize) -> Vec<T> {
+        drain_numbered(consumer, count)
+            .into_iter()
+            .map(|numbered| numbered.record)
+            .collect()
+    }
+
+    /// Pop until `count` records have arrived, with their numbers.
+    fn drain_numbered<T>(consumer: &mut Consumer<Numbered<T>>, count: usize) -> Vec<Numbered<T>> {
         let deadline = Instant::now() + Duration::from_secs(30);
         let mut arrived = Vec::with_capacity(count);
 
@@ -448,9 +502,10 @@ mod tests {
     }
 
     /// A consumer that stops reading costs its own records and nobody else's,
-    /// and the loss is counted on its ring.
+    /// the loss is counted on its ring, and it shows in the numbering as a
+    /// gap: the forced drop is what a consumer sees as missing `seq` values.
     #[test]
-    fn a_stalled_consumer_loses_only_its_own_records() {
+    fn a_stalled_consumer_loses_only_its_own_records_and_sees_the_gap() {
         let (writer, mut commit, connections) = Writer::spawn(ROOMY);
         let (_, mut stalled) = connections.attach(4);
         let (_, mut reading) = connections.attach(ROOMY);
@@ -459,11 +514,18 @@ mod tests {
             commit.push(value);
         }
 
-        let arrived = drain_until(&mut reading, 10);
+        let arrived = drain_numbered(&mut reading, 10);
+        let records: Vec<u32> = arrived.iter().map(|n| n.record).collect();
+        let seqs: Vec<u64> = arrived.iter().map(|n| n.seq).collect();
         assert_eq!(
-            arrived,
+            records,
             (0..10).collect::<Vec<_>>(),
             "the reader lost records"
+        );
+        assert_eq!(
+            seqs,
+            (1..=10).collect::<Vec<_>>(),
+            "the reader's seq skipped"
         );
         assert_eq!(reading.dropped(), 0, "a roomy ring turned a record away");
 
@@ -474,11 +536,18 @@ mod tests {
             6,
             "six evictions were not counted as six"
         );
-        let survivors: Vec<u32> = std::iter::from_fn(|| stalled.pop()).collect();
+        let survivors: Vec<Numbered<u32>> = std::iter::from_fn(|| stalled.pop()).collect();
+        let records: Vec<u32> = survivors.iter().map(|n| n.record).collect();
+        let seqs: Vec<u64> = survivors.iter().map(|n| n.seq).collect();
         assert_eq!(
-            survivors,
-            vec![6, 7, 8, 9],
+            records,
+            [6, 7, 8, 9],
             "the wrong records survived the stall"
+        );
+        assert_eq!(
+            seqs,
+            [7, 8, 9, 10],
+            "the evictions did not leave a gap of six before the survivors"
         );
 
         drop(writer);
@@ -505,12 +574,21 @@ mod tests {
         for value in 5..10u32 {
             commit.push(value);
         }
-        assert_eq!(drain_until(&mut first, 5), (5..10).collect::<Vec<_>>());
-        assert_eq!(
-            drain_until(&mut second, 5),
-            (5..10).collect::<Vec<_>>(),
-            "the late connection saw records from before it attached"
-        );
+        let on_first = drain_numbered(&mut first, 5);
+        let on_second = drain_numbered(&mut second, 5);
+        for (arrived, what) in [(&on_first, "first"), (&on_second, "second")] {
+            let records: Vec<u32> = arrived.iter().map(|n| n.record).collect();
+            assert_eq!(
+                records,
+                (5..10).collect::<Vec<_>>(),
+                "on the {what} connection"
+            );
+        }
+        // Numbering is per connection: the late one starts at one while the
+        // first carries on from where it was.
+        let seqs = |arrived: &[Numbered<u32>]| arrived.iter().map(|n| n.seq).collect::<Vec<_>>();
+        assert_eq!(seqs(&on_first), (6..=10).collect::<Vec<_>>());
+        assert_eq!(seqs(&on_second), (1..=5).collect::<Vec<_>>());
 
         connections.detach(second_id);
         for value in 10..15u32 {
@@ -523,7 +601,7 @@ mod tests {
         // schedule owes is order, and nothing from before the detach going
         // missing.
         drop(writer);
-        let late: Vec<u32> = std::iter::from_fn(|| second.pop()).collect();
+        let late: Vec<u32> = std::iter::from_fn(|| second.pop().map(|n| n.record)).collect();
         assert!(
             late.len() <= 5 && late.iter().zip(10..).all(|(got, want)| *got == want),
             "a detached connection received out of order: {late:?}"
@@ -634,7 +712,14 @@ mod loom_tests {
                     None => thread::yield_now(),
                 }
             }
-            assert_eq!(arrived, vec![0, 1], "records arrived out of order");
+            assert_eq!(
+                arrived,
+                vec![
+                    Numbered { seq: 1, record: 0 },
+                    Numbered { seq: 2, record: 1 }
+                ],
+                "records arrived out of order"
+            );
 
             drop(writer);
         });
