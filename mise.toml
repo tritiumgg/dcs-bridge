@@ -84,9 +84,13 @@ run = "cargo run --release -p dcsbridge-broker --no-default-features --example f
 description = "Time one put call crossing from Lua into the broker, in release"
 run = "sh tools/putcost.sh"
 
+# cargo-xwin is the cross-compiler for a Linux or macOS host: it fetches the
+# MSVC CRT and SDK the target links against. A Windows host has them in the
+# Build Tools, so plain cargo builds the same target there.
 [tasks.windows]
-description = "Cross-build the product target, linking DCS's Lua"
+description = "Build the product target, linking DCS's Lua"
 run = "cargo xwin build --release --workspace --target x86_64-pc-windows-msvc"
+run_windows = "cargo build --release --workspace --target x86_64-pc-windows-msvc"
 
 [tasks.docs]
 description = "Lint the ledgers and hold STATE.md to its budget"

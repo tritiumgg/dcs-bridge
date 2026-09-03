@@ -101,6 +101,10 @@ sh tools/mkimplib.sh                   # check this machine can build the import
 mise run windows
 ```
 
+On a Windows host the same task runs plain `cargo build` for the target, and
+the MSVC Build Tools stand in for both `cargo-xwin` and LLVM: `build.rs` finds
+`lib.exe` and builds the import library with it.
+
 `vendor/lua/lua.def` pins the 114 Lua symbols the broker may link against.
 `crates/lua-module/build.rs` turns it into the import library the DLL links, and
 `tools/mkimplib.sh` does the same from a shell to report whether the machine you
