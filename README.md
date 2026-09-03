@@ -86,9 +86,31 @@ The bridge loads its mission-side script, the sim driver, in one of two ways.
 Set the `route` key in `Config\DCSBridge.lua` to `A` or `B`. Both routes
 install the same files. Both load the sim driver on every mission load.
 
-**Route A is the default.** The hook script injects the sim driver into the
-mission environment through the DCS API `net.dostring_in`. Route A edits no
-file in the DCS install directory. It survives DCS updates.
+### Which route to use
+
+**Use Route A unless you have a reason not to.** It is the default. Use Route
+B in these two cases:
+
+- You will not, or cannot, enable `net.dostring_in` in DCS.
+- Your mission-side code must share an environment with a mission framework
+  such as MOOSE or MIST. Route A runs the sim driver in a separate
+  environment, and it cannot reach those globals.
+
+| | Route A | Route B |
+|---|---|---|
+| Edits a file in the DCS install directory | No | Yes |
+| Survives a DCS update | Yes | No. Reapply the edit after every update. |
+| Needs `net.dostring_in` enabled in `autoexec.cfg` | Yes | No |
+| Sim driver shares globals with MOOSE, MIST and the mission | No | Yes |
+| Reload the sim driver without a mission reload | Yes | No |
+| Mission-adjacent files, server-side eval files, mission name and filename | Yes | No |
+| Mission date and magnetic declination in the coordinate calibration record | Yes | No |
+
+### Route A
+
+The hook script injects the sim driver into the mission environment through
+the DCS API `net.dostring_in`. Route A edits no file in the DCS install
+directory. It survives DCS updates.
 
 Route A depends on a DCS policy setting in `Config\autoexec.cfg` in the Saved
 Games directory. The setting is two keys. Each key holds a list of names.
@@ -124,7 +146,9 @@ net.allow_dostring_in = {"server", "mission", "gui"}
 Set both keys. A file with `net.allow_dostring_in` and no
 `net.allow_unsafe_api` does not enable the API.
 
-**Route B edits a file in the DCS install directory.** Add one `dofile` line
+### Route B
+
+Route B edits a file in the DCS install directory. Add one `dofile` line
 to `Scripts\MissionScripting.lua`, after the line that loads
 `ScriptingSystem.lua` and before the block that removes `os`, `io` and `lfs`.
 The sim driver then loads as part of the mission scripting environment
@@ -164,18 +188,6 @@ Do not remove the sanitize block. It keeps mission scripts sandboxed.
 
 Every DCS update overwrites `MissionScripting.lua` and removes the line. The
 bridge then stops loading with no error. Reapply the edit after every update.
-
-Use Route A when you can enable the API. Use Route B in these two cases:
-
-- You will not or cannot enable `net.dostring_in`.
-- Your mission-side code must share the environment with a mission framework
-  such as MOOSE or MIST. Route A runs the sim driver in a separate
-  environment, and it cannot reach those globals.
-
-Route B does without some features. Reloading the sim driver without a mission
-reload, mission-adjacent files, server-side eval files, the mission name and
-filename, and two fields of the coordinate calibration record are all Route A
-only.
 
 ## Use `dcsb`
 
