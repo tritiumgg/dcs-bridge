@@ -49,9 +49,11 @@ check** against an install, since no handshake exists to name a connection.
 ## After that
 
 - **2.9** — handshake, then auth, then the five reader-thread answers: `Ping`,
-  `Auth`, `GetSchema`, `SeqAck`, `SetEnabled`.
+  `Auth`, `GetSchema`, `SeqAck`, `SetEnabled`. The reader thread decodes them
+  through `prost`, the one crate the shipped build takes; ADR 0016.
 - **Phase 3** opens on `protoc-gen-dcsbridge-lua`, which reads the four message
-  options this schema defines and splits its output by `Target`.
+  options this schema defines and splits its output by `Target`. It reads the
+  plugin request through `prost-types`; ADR 0016.
 
 ## Carries forward
 

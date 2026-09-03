@@ -17,6 +17,10 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 
+# Empty on purpose. The shipped build runs inside DCS's process, so every
+# crate here is code inside the simulator, and the concurrency is written by
+# hand so that Loom and Miri can reach it. The one exception to come is prost,
+# for decoding on the reader thread. ADR 0016.
 [dependencies]
 
 # The tests decode the encoder's output through a stock protobuf library,
