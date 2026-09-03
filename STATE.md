@@ -18,7 +18,7 @@ is just deleted. Write entries as one or two lines, never paragraphs.
 
 ## In progress
 
-Nothing. 2.5 is closed; 2.6 is next.
+Nothing. 2.6 is closed; 2.7 is next.
 
 *One task at most. Say what is done, what is not, and where to resume. Say what
 is committed and what is only in the working tree. Say what is knowingly
@@ -26,26 +26,27 @@ broken. Empty this when the task closes.*
 
 ## Just finished
 
-- **2.4** — one commit ring fanned out to a ring per connection by a writer
-  thread, PRs #21 and #22. ADR 0011. The cost figure in #22 is the maintainer's.
 - **2.5** — put calls into one preallocated buffer, nested lengths padded in
   place, bound into Lua, PRs #23, #24 and #25. ADR 0012.
+- **2.6** — PROBE-3 host-native, `mise run bench-put`: 25 ns a crossing, zero
+  bytes; one put per field stands, PR #26. ADR 0013 has the live-install steps.
 
 *The last three at most, one line each. Git log holds the rest.*
 
 ## Next
 
-**Task 2.6** — run PROBE-3, the put-call crossing cost, per the plan's Section
-3.1. Done when the one-call-per-field shape is confirmed or a batched put form
-is scheduled. It also prices the fence and the wake ADR 0011 left unmeasured.
+**Task 2.7** — `Envelope` wrapping with an `Any` payload, length-prefixed
+framing, per-connection `seq`. Done when a forced drop shows as a gap and a
+capture names its record types with no schema loaded. `commit` stops returning
+bytes to Lua here and pushes into the commit ring instead.
 
-**The maintainer reads the figure**: an agent can run the probe against the
-host-native module, but a runner's timings cannot carry a cost claim.
+**An agent verifies most of it** from Rust tests and a stock Lua; the capture
+naming its types wants `dcsb tail` or a decoder, which 2.C1 brings.
 
 ## After that
 
-- **2.7** — `Envelope` wrapping with an `Any` payload, length-prefixed framing,
-  per-connection `seq`; where `commit` stops returning bytes to Lua.
+- **2.8** — `begin_to` and per-connection addressing, `poll` returning the
+  connection id, ids unique for the process and never reused.
 - **Phase 3** opens on `protoc-gen-dcsbridge-lua`, which reads the four message
   options this schema defines and splits its output by `Target`.
 
@@ -94,6 +95,6 @@ entries at most: an eleventh means something here is finished, or belongs in
   parameter and each Lua state's record buffer is 1 MiB at open; 2.15 sizes
   both from `configure` and allocates there. A connection's thread has no way
   to wait on its ring, and `commit` returns the body to Lua; 2.7 owns both.
-  ADR 0011 settles who drains, not how it waits.
+  ADR 0011 settles who drains, not how it waits; ADR 0013 priced its fence.
 - **Task 7.10 does not exist.** Phase 7 runs 7.1 to 7.9 then 7.11, with no note
   explaining the gap. Retired ID or omission, unresolved.

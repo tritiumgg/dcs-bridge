@@ -76,6 +76,10 @@ run = "cargo test -p dcsbridge-broker --no-default-features --lib loom"
 description = "Time logic-thread cost per commit against zero to eight consumers"
 run = "cargo run --release -p dcsbridge-broker --no-default-features --example fanout_cost"
 
+[tasks.bench-put]
+description = "Time one put call crossing from Lua into the broker, in release"
+run = "sh tools/putcost.sh"
+
 [tasks.windows]
 description = "Cross-build the product target, linking DCS's Lua"
 run = "cargo xwin build --release --workspace --target x86_64-pc-windows-msvc"
