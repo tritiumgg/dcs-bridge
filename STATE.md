@@ -28,8 +28,8 @@ broken. Empty this when the task closes.*
 
 - **2.5** — put calls into one preallocated buffer, nested lengths padded in
   place, bound into Lua, PRs #23, #24 and #25. ADR 0012.
-- **2.6** — PROBE-3 host-native, `mise run bench-put`: 25 ns a crossing, zero
-  bytes; one put per field stands, PR #26. ADR 0013 has the live-install steps.
+- **2.6** — PROBE-3 in DCS and host-native, `mise run bench-put`: 25 ns a
+  crossing, zero bytes; one put per field stands, PR #26. ADR 0013.
 
 *The last three at most, one line each. Git log holds the rest.*
 

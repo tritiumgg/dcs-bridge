@@ -42,8 +42,26 @@ allocation column in CI.
 
 One put call per field stands. No batched put form is scheduled.
 
-The reading, from an Apple M3 Max with other things running, three runs
-within a few nanoseconds of each other:
+Two readings. The first is from the sim driver's state: the release DLL in a
+DCS install, the probe run by `dofile` from `MissionScripting.lua` at the point
+Route B places the sim driver, read out of `dcs.log`:
+
+```
+999424 calls per row
+row                              us/run   us/cross      bytes
+empty loop                        0.003      0.003        0.0
+string.len (proxy)                0.015      0.015        0.0
+integer                           0.035      0.035        0.0
+double                            0.024      0.024        0.0
+string, 28 bytes                  0.026      0.026        0.0
+boolean                           0.026      0.026        0.0
+message + end_message             0.044      0.022        0.0
+begin + commit, empty             0.034      0.017        0.0
+ten-field record                  0.294      0.025        0.0
+```
+
+The second is host-native, from an Apple M3 Max with other things running,
+three runs within a few nanoseconds of each other:
 
 ```
 999424 calls per row
@@ -67,10 +85,10 @@ per second at 70 Hz, is 43 records per frame, which at that size is 13 µs of
 puts in a 500 µs share. At the specification's own proxy of 0.85 µs per
 crossing the same load is 440 µs, which still fits the share with no batching.
 
-The figure is a host reading and not the sim driver's state. The
-specification's proxy is twenty-five to forty times this one, and the
-difference is the machine, the build of Lua and the state the proxy was taken
-in. What licenses the decision is that the shape holds at either figure.
+The two readings agree on the record and on the allocation column, and differ
+by a few nanoseconds on single puts, so the figure is not the host's. The
+specification's proxy is twenty-five to forty times either one. Where it was
+taken is not recorded, and the shape holds at either figure regardless.
 
 The alternatives, and the line that rejected each:
 
@@ -99,9 +117,9 @@ the length handling.
 Interface A's shape is settled, so Phase 3's generator emits one call per
 field with nothing held back for a batched form.
 
-This reopens if a reading from the sim driver's state comes out above 0.5 µs
-per crossing, which puts the heavy load past half of its share. To take that
-reading, on an install with the release zip unpacked into the write directory:
+This reopens if a later DCS build's reading comes out above 0.5 µs per
+crossing, which puts the heavy load past half of its share. To take the
+reading again, on an install with the DLL in the write directory:
 
 1. Copy `tools/putcost.lua` to `<write directory>\Scripts\putcost.lua`.
 2. In `<install>\Scripts\MissionScripting.lua`, above the sanitization block,
