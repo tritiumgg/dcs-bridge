@@ -80,23 +80,24 @@ to `127.0.0.1:7742`. The full set of keys is not final.
 The loader has an `ENABLED` flag. Set it to `false` to keep the bridge
 installed but inactive.
 
-## Route A and Route B
+## The Stock route and the Modified route
 
 The bridge loads its mission-side script, the sim driver, in one of two ways.
-Set the `route` key in `Config\DCSBridge.lua` to `A` or `B`. Both routes
-install the same files. Both load the sim driver on every mission load.
+The `route` key in `Config\DCSBridge.lua` selects one. Its values are not
+final. Both routes install the same files. Both load the sim driver on every
+mission load.
 
 ### Which route to use
 
-**Use Route A unless you have a reason not to.** It is the default. Use Route
-B in these two cases:
+**Use the Stock route unless you have a reason not to.** It is the default.
+Use the Modified route in these two cases:
 
 - You will not, or cannot, enable `net.dostring_in` in DCS.
 - Your mission-side code must share an environment with a mission framework
-  such as MOOSE or MIST. Route A runs the sim driver in a separate
+  such as MOOSE or MIST. The Stock route runs the sim driver in a separate
   environment, and it cannot reach those globals.
 
-| | Route A | Route B |
+| | Stock | Modified |
 |---|---|---|
 | Edits a file in the DCS install directory | No | Yes |
 | Survives a DCS update | Yes | No. Reapply the edit after every update. |
@@ -106,15 +107,15 @@ B in these two cases:
 | Mission-adjacent files, server-side eval files, mission name and filename | Yes | No |
 | Mission date and magnetic declination in the coordinate calibration record | Yes | No |
 
-### Route A
+### The Stock route
 
 The hook script injects the sim driver into the mission environment through
-the DCS API `net.dostring_in`. Route A edits no file in the DCS install
+the DCS API `net.dostring_in`. The Stock route edits no file in the DCS install
 directory. It survives DCS updates.
 
-Route A depends on a DCS policy setting in `Config\autoexec.cfg` in the Saved
-Games directory. The setting is two keys. Each key holds a list of names.
-DCS-Bridge needs these names in each list:
+The Stock route depends on a DCS policy setting in `Config\autoexec.cfg` in
+the Saved Games directory. The setting is two keys. Each key holds a list of
+names. DCS-Bridge needs these names in each list:
 
 | Key | Names DCS-Bridge needs |
 |---|---|
@@ -146,14 +147,14 @@ net.allow_dostring_in = {"server", "mission", "gui"}
 Set both keys. A file with `net.allow_dostring_in` and no
 `net.allow_unsafe_api` does not enable the API.
 
-### Route B
+### The Modified route
 
-Route B edits a file in the DCS install directory. Add one `dofile` line
-to `Scripts\MissionScripting.lua`, after the line that loads
+The Modified route edits a file in the DCS install directory. Add one `dofile`
+line to `Scripts\MissionScripting.lua`, after the line that loads
 `ScriptingSystem.lua` and before the block that removes `os`, `io` and `lfs`.
 The sim driver then loads as part of the mission scripting environment
-itself. Route B does not use `net.dostring_in` and needs no `autoexec.cfg`
-change. The exact line to add is not final.
+itself. The Modified route does not use `net.dostring_in` and needs no
+`autoexec.cfg` change. The exact line to add is not final.
 
 The edited file looks like this. The `dofile` line is the addition.
 
