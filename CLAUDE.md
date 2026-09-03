@@ -224,6 +224,19 @@ rewrite.
 **Work reaches `main` through a pull request the maintainer reviews.** Open it,
 report it as waiting, and stop there.
 
+**Every pull request body follows `.github/PULL_REQUEST_TEMPLATE.md`.** `gh pr
+create --body` does not read the template, so write the body to its headings.
+Summary ends with what the change is reviewed against: the plan task, the
+decision record, or for a stacked branch the claim that branch alone makes.
+Testing says how a reader runs the tests, not that they were run. Its steps
+are numbered, start from a clean checkout, and are grouped by phase (without
+DCS, then with DCS) and by platform (PowerShell on Windows, bash elsewhere).
+Each step is an imperative sentence: an action, or a `Verify ...` naming what
+the tester sees when the steps before it worked. Put a Verify wherever the
+tester needs to know that before going on. The With DCS steps go build,
+install, files to edit, then what to do in DCS. Each heading reads `none`
+where nothing applies.
+
 Do these without asking: branch, commit, rebase onto `main`, push a topic
 branch, force-with-lease a topic branch that is yours, delete a branch that is
 already merged, and open a pull request with `gh`.
