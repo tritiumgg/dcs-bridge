@@ -1,237 +1,202 @@
 # DCS-Bridge
 
-A bridge between DCS World and external applications, allowing them to interact
-with and receive from the simulation state through events, subscriptions, and
-commands. The bridge is comprised of three parts: a message broker that acts as
-the data transport, and two scripts that interact with DCS World inside and
-outside of the simulation.
+DCS-Bridge connects DCS World to programs that run outside it. A program
+connects to the bridge over TCP. It receives typed records as the mission runs,
+and it sends commands back. The bridge runs inside the DCS process as a small
+message broker. Two Lua scripts feed it: one in the DCS hook environment, one
+in the mission environment.
 
-Release version 0.1.0. Phase 1 of `docs/plan/plan.md` built the release pipeline
-before any behaviour, so every later phase ships through a path already known to
-work. Phase 2 is building the broker; the CLI and the generator are still stubs.
+DCS has no supported way for an external program to watch a mission and act on
+it. Existing tools each solve a part of this for themselves. DCS-Bridge is one
+transport that any program can use, with a published schema.
 
-## Components
+## Status
 
-| # | Component | Language | Location | Lifetime |
-|---|---|---|---|---|
-| 1 | Broker | Rust | `Mods\services\DCSBridge\bin\lua-dcsbridge.dll` | DCS process |
-| 2 | Hook driver | Lua 5.1 | `Scripts\Hooks\DCSBridge.lua` loader, `Mods\services\DCSBridge\lua\HookDriver.lua` payload | DCS process |
-| 3 | Sim driver | Lua 5.1 | Injected into the `"server"` state | One mission |
-| 4 | Generator | Rust | Build machine | Build time |
+The bridge is in early development and does not yet run inside DCS.
 
-Everything outside the Lua files is Rust. The broker uses no garbage collector
-and no language runtime, because a collector inside the DCS process can stop the
-logic thread and that stops the sim for every player at once.
+## Get the latest release
 
-The workspace holds four Rust crates:
+Download it from the releases page:
+<https://github.com/tritiumgg/dcs-bridge/releases/latest>
 
-| Crate | Package | Artifact |
-|---|---|---|
-| `crates/broker` | `dcsbridge-broker` | rlib, linked into the module |
-| `crates/lua-module` | `lua-dcsbridge` | `lua_dcsbridge.dll`, renamed to `lua-dcsbridge.dll` |
-| `crates/cli` | `dcsb` | `dcsb.exe` |
-| `crates/generator` | `protoc-gen-dcsbridge-lua` | `protoc-gen-dcsbridge-lua.exe` |
+A release carries four files.
 
-The broker is split in two. `crates/broker` holds the rings, threads, framing
-and drop policy and names no Lua symbol, so it links into a test binary on any
-host. `crates/lua-module` holds `luaopen_dcsbridge` and every declaration that
-does name one, and it is a `cdylib` and nothing else, because a module leaves
-those symbols undefined and only a shared object may. ADR 0005.
+| File | What it is |
+|---|---|
+| `write-directory-<version>.zip` | The files that go into your DCS write directory. |
+| `dcsb.exe` | The command-line tool. |
+| `lua-dcsbridge.dll` | The broker, on its own. The zip already contains it. |
+| `SHA256SUMS` | Checksums of the three files above. |
 
-Cargo rejects a hyphen in a library target name, so the module's library is
-`lua_dcsbridge` and the CI and release workflows rename the file. `protoc`
-resolves a plugin by executable name, so the generator's binary name is fixed
-by that contract.
+A release marked "pre-release" is a development build.
 
-## Build
+### Versions
 
-Tool versions come from `mise.toml`. On a fresh checkout:
+The release version is 0.1.0. A tag `v<version>` publishes a release. A tag
+with a suffix, such as `v0.2.0-rc1`, publishes a pre-release.
+
+Below 1.0, a minor version bump may break compatibility. A patch bump may
+not. The release version says nothing about the wire protocol. The bridge
+compares its protocol, interface, grammar and state versions at runtime, and
+each of those moves only for its own reason.
+
+## Install
+
+Installation is not final. The current releases contain placeholder files.
+The steps below describe the intended procedure.
+
+1. Extract `write-directory-<version>.zip` over your DCS write directory.
+   The write directory is normally `%USERPROFILE%\Saved Games\DCS\` or
+   `%USERPROFILE%\Saved Games\DCS.openbeta\`.
+2. Put `dcsb.exe` anywhere on your `PATH`. It does not belong in the write
+   directory.
+3. Configure the injection route. See the next section.
+4. Restart DCS.
+5. Run `dcsb doctor` to check the installation. This command is planned and
+   not yet built.
+
+The zip places these files.
+
+```
+Saved Games\<write dir>\
+  Scripts\Hooks\DCSBridge.lua      The loader. DCS loads it at start.
+  Mods\services\DCSBridge\         Everything the bridge ships.
+```
+
+A release overwrites every file under `Mods\services\DCSBridge\`. Do not put
+your own files there. Your own extension files go under `DCSBridge\` in the
+write directory. A release never touches that directory.
+
+To uninstall, delete `Scripts\Hooks\DCSBridge.lua` and
+`Mods\services\DCSBridge\`. Delete `DCSBridge\`, `Config\DCSBridge.lua` and
+`Logs\DCSBridge\` if you do not want to keep them.
+
+### Configure
+
+Settings live in `Config\DCSBridge.lua` in the write directory. The bridge
+runs with the file absent and uses its defaults. The defaults bind the broker
+to `127.0.0.1:7742`. The full set of keys is not final.
+
+The loader has an `ENABLED` flag. Set it to `false` to keep the bridge
+installed but inactive.
+
+## Route A and Route B
+
+The bridge loads its mission-side script, the sim driver, in one of two ways.
+Set the `route` key in `Config\DCSBridge.lua` to `A` or `B`. Both routes
+install the same files. Both load the sim driver on every mission load.
+
+**Route A is the default.** The hook script injects the sim driver into the
+mission environment through the DCS API `net.dostring_in`. Route A edits no
+file in the DCS install directory. It survives DCS updates.
+
+Route A depends on a DCS policy setting. Add these two keys to
+`Config\autoexec.cfg` in the write directory:
+
+```lua
+net.allow_unsafe_api = {"userhooks"}
+net.allow_dostring_in = {"server", "mission", "gui"}
+```
+
+Other tools, such as DCS-SRS and DCS Olympus, use the same two keys. If the
+file already has them, add the values above to the existing lists. Do not
+replace the lists. A removed value breaks the tool that needed it.
+
+**Route B edits a file in the DCS install directory.** Add one `dofile` line
+to `Scripts\MissionScripting.lua`, before the block that removes `os`, `io`
+and `lfs`. The sim driver then loads as part of the mission scripting
+environment itself. Route B does not use `net.dostring_in` and needs no
+`autoexec.cfg` change. The exact line to add is not final.
+
+Every DCS update overwrites `MissionScripting.lua` and removes the line. The
+bridge then stops loading with no error. Reapply the edit after every update.
+
+Use Route A when you can enable the API. Use Route B in these two cases:
+
+- You will not or cannot enable `net.dostring_in`.
+- Your mission-side code must share the environment with a mission framework
+  such as MOOSE or MIST. Route A runs the sim driver in a separate
+  environment, and it cannot reach those globals.
+
+Route B does without some features. Reloading the sim driver without a mission
+reload, mission-adjacent files, server-side eval files, the mission name and
+filename, and two fields of the coordinate calibration record are all Route A
+only.
+
+## Use `dcsb`
+
+`dcsb` observes a running bridge and diagnoses a broken one. Run it on the
+machine that runs DCS, or on any machine that can reach the bridge's address.
+
+```
+dcsb tail                          Print each record the bridge sends.
+dcsb tail --addr 192.0.2.10:7742   Connect to a bridge on another address.
+dcsb --help                        List the available commands.
+```
+
+`tail` connects to the bridge, prints one line per record, and prints a line
+wherever the sequence numbers show that records were dropped. It runs until
+the bridge closes the connection.
+
+`tail` is the only command built so far. These commands are planned:
+`ping`, `schema`, `send`, `doctor`, `stats`, `record`, `replay` and `mock`.
+
+## Build from source
+
+The product target is 64-bit Windows, because DCS runs nowhere else. You can
+build that target on Windows, Linux or macOS. A Linux or macOS host
+cross-compiles it and does not need a Windows machine.
+
+Tool versions come from `mise.toml` and `rust-toolchain.toml`. Install
+[mise](https://mise.jdx.dev) first. Then, in a fresh checkout:
 
 ```sh
 mise install
 mise run check
 ```
 
-`check` runs what CI gates a pull request on: `cargo fmt --all --check`,
-`cargo clippy -D warnings`, `cargo build`, `cargo test` and the Lua load
-below, against the host target. `mise tasks` lists the rest.
+`mise run check` builds and tests the host-native build. It is the same set of
+checks CI runs on a pull request.
 
-`cargo run -p dcsb -- tail` connects to a running bridge on the module's
-default address, `127.0.0.1:7742`, and prints one line per frame and one line
-per gap in its numbering. `--addr` names another.
+### The Windows artifacts on Linux or macOS
 
-Rust is the one tool `mise.toml` does not name a version for. `rust-toolchain.toml`
-does, and mise reads it — `mise ls` shows rust sourced from that file, and
-`mise install` provisions the channel it names. The file also carries
-`components` and `targets`, which rustup installs on demand, so the Windows
-cross-build's target arrives without a separate step.
-
-Two settings in `mise.toml` make that work. mise's rust tool exports
-`RUSTUP_TOOLCHAIN`, which overrides `rust-toolchain.toml` outright and discards
-both lists, so `[env]` clears it; `idiomatic_version_file_enable_tools` then
-lets mise read the version from the file. Change the toolchain by editing
-`channel`, then `mise install`. Not with `mise use rust@<version>`: that writes
-a version into `[tools]` and mise stops reading the file.
-
-### The module under a stock Lua
-
-SPEC §17 marks about half its test rows *Any (native module)*: runnable against
-a host-native build of the broker opened by a stock Lua 5.1, with no DCS
-present. That is what makes the broker developable on any of the three build
-hosts.
+You need a full LLVM install and `cargo-xwin`. A rustup `llvm-tools` component
+is not enough.
 
 ```sh
-mise run lua
-```
-
-It builds the module with `--no-default-features` and opens it with
-`package.loadlib`, the way SPEC §5.1.1 does inside DCS. The host-native build
-takes its Lua symbols from the interpreter that opens it rather than from a
-library, so nothing here needs a DCS install. ADR 0006 says how that resolves
-per host, and why the step runs on Linux and macOS but not on Windows, where a
-module resolves no symbol at load.
-
-### Windows
-
-The product target is `x86_64` Windows for as long as DCS runs nowhere else,
-and it is cross-compiled, so no contributor needs a Windows machine to produce
-a release artifact. `x86_64-pc-windows-msvc` is the only Windows target, and
-`crates/lua-module/build.rs` refuses any other; ADR 0003 says why there is no
-second one.
-
-```sh
-cargo install --locked cargo-xwin      # once
-sh tools/mkimplib.sh                   # check this machine can build the import library
+cargo install --locked cargo-xwin
+sh tools/mkimplib.sh
 mise run windows
 ```
 
-On a Windows host the same task runs plain `cargo build` for the target, and
-the MSVC Build Tools stand in for both `cargo-xwin` and LLVM: `build.rs` finds
-`lib.exe` and builds the import library with it.
+`tools/mkimplib.sh` reports whether this machine can build the Lua import
+library. The build output is under `target/x86_64-pc-windows-msvc/release/`.
 
-`vendor/lua/lua.def` pins the 114 Lua symbols the broker may link against.
-`crates/lua-module/build.rs` turns it into the import library the DLL links, and
-`tools/mkimplib.sh` does the same from a shell to report whether the machine you
-are on can do it at all. A full LLVM install is the one prerequisite; a rustup
-`llvm-tools` component ships neither `llvm-dlltool` nor `llvm-lib`.
+### The Windows artifacts on Windows
 
-The module builds twice from one source, and the `dcs-lua` feature is which one
-you get. On, the `cdylib` binds DCS's Lua through the `.def` — that is the
-default, and it is what the cross-build and the release workflow take. Off, the
-host-native build the tests run against never touches the `.def`. `mise run
-check` and CI's three-host matrix pass `--no-default-features` for it, which is
-what a plain `cargo test` on a Windows host needs too. ADR 0002 says why the
-default points that way.
+You need the Visual Studio Build Tools with the C++ workload. Then:
 
-### Schema
+```sh
+mise run windows
+```
 
-`proto/` holds the record schema, and `mise run schema` lints it and compiles
-`target/schema.pb`:
+The build output is under `target\x86_64-pc-windows-msvc\release\`.
+
+### Assemble a release
+
+`tools/stage-release.sh` produces the same four files a release carries.
 
 ```sh
 mise run schema
+mise run windows
+sh tools/stage-release.sh
 ```
 
-The output is a `FileDescriptorSet`. It ships inside the write-directory zip at
-`Mods\services\DCSBridge\schema.pb`, where the hook driver reads it at DCS start
-and hands the bytes to the broker; the broker hashes them and serves them back,
-and a consumer compares that hash against the one its handshake carries.
+The output is under `dist/`.
 
-So the bytes are part of the wire contract, and two builds of the same tree have
-to produce the same ones. `mise.toml` pins buf for that reason and CI reads the
-version from there rather than naming its own. buf vendors its own
-`google/protobuf/descriptor.proto`, which is in the set, so a buf bump can move
-the hash on its own; `tools/mkschema.sh` says what else it holds fixed.
+`docs/developing.md` covers the layout of the source tree and the rules for
+changing it.
 
-`buf lint` runs in CI with one standard rule excepted, because a topic id is its
-payload's fully-qualified type name and the `dcs.bridge` package cannot take a
-version suffix without renaming every topic. ADR 0004 has the argument.
+## License
 
-## Versioning
-
-The release version is `0.1.0`, and it is the only version this README states.
-It lives under `[workspace.package]` in `Cargo.toml`. A tag `v<version>`
-publishes a release; a tag carrying a hyphenated suffix, such as `v0.2.0-rc1`,
-publishes to the prerelease channel.
-
-Below 1.0 a minor bump may break compatibility and a patch bump may not. The
-release version promises nothing about the wire: SPEC §13.3 holds six further
-version numbers, four of which are compared at runtime, and none of the four
-moves for a reason outside its own row. `.github/workflows/version-bump.yml`
-touches the release version and fails if a bump reaches any of the four.
-
-## Releases
-
-A tag carries four assets: `lua-dcsbridge.dll`, `dcsb.exe`,
-`write-directory-<version>.zip` and `SHA256SUMS` over the three. The zip
-mirrors the write directory described in SPEC §13, so installing it is one
-extraction over `Saved Games\<write dir>\`, and it carries the broker and
-`schema.pb`. `dcsb` runs outside DCS and has no home in that tree, so it ships
-beside the zip rather than inside it.
-
-The tag names the version, and the part before any `-rc` suffix must match
-`[workspace.package]` in `Cargo.toml`. Staging fails on a mismatch, so bump the
-version and merge that first: `.github/workflows/version-bump.yml` opens the
-pull request.
-
-`tools/stage-release.sh` builds all four from a cross-build directory. CI runs
-it on every pull request and `.github/workflows/release.yml` runs it on a tag,
-so publishing is the only step a tag reaches first:
-
-```sh
-mise run schema
-cargo xwin build --release --workspace --target x86_64-pc-windows-msvc
-sh tools/stage-release.sh target/x86_64-pc-windows-msvc/release
-```
-
-## Licence
-
-MIT. See `LICENSE`.
-
-## Documents
-
-`docs/specs/` holds three frozen specifications: `SPEC` is the bridge, `SIM` is
-the sim driver's built-in record and command set, and `HOOK` is the hook
-driver's. `docs/plan/plan.md` states build order and is not frozen.
-
-Never read a specification whole. The ledger beside each one holds a row per
-claim with an anchor that locates the prose:
-
-```sh
-tools/ledger.sh codes                     document codes and paths
-tools/ledger.sh subjects SPEC             every subject in a ledger
-tools/ledger.sh find SPEC <text>          rows matching subject, claim or section
-tools/ledger.sh show SPEC "<anchor>"      the prose around one anchor
-tools/ledger.sh lint                      every stamp, anchor and glossary join
-```
-
-Where the build needs to go somewhere the specifications did not anticipate,
-copy `docs/decisions/TEMPLATE.md` and number it next. `docs/audit.md` records
-what the documents disagree about. `STATE.md` is the handoff between sessions.
-
-## Two portability limits
-
-**`sh` on Windows.** The tools and the read guard are POSIX `sh`, resolved
-through Git for Windows. Without it, none of them run.
-
-**The read guard has one hole.** `PreToolUse` fires on tool calls only, so a
-specification pulled in with an `@` reference loads whole. Closing it needs a
-permission rule, which also blocks the bounded reads the hook permits:
-
-```json
-"permissions": { "deny": ["Read(./docs/specs/*/spec.md)", "Read(./docs/plan/plan.md)"] }
-```
-
-## Add these when the problem shows up
-
-**Pin the actions to commit SHAs.** A major-version tag is mutable, so `@v6`
-today is not `@v6` next month.
-
-**A `.def` regeneration check.** `vendor/lua/lua.def` omits sixteen of the 130
-symbols `lua.dll` exports: the nine `luaopen_*` openers SPEC §4 forbids calling,
-and seven SPEC §5.1.1 calls an artefact rather than an interface. A regeneration
-that dumps the whole export table would make all sixteen linkable. Add a check
-the first time a DCS update forces a re-measure.
-
-**A cross-reference checker.** Every reference resolves today, and the frozen
-specifications cannot break one. The plan can, by renumbering.
+MIT. See [LICENSE](LICENSE).

@@ -13,6 +13,7 @@ STATE.md               what was just done, what is next, what carries forward
 docs/
   specs/               frozen: the three specifications, with their ledgers
   plan/                build order. Changes. Not frozen.
+  developing.md        the source tree, the build, and the release, for contributors
   audit.md             what the documents disagree about, checked once
   conventions/         how to read them, and how to write a decision record
   decisions/           where the build goes somewhere the specifications did not
