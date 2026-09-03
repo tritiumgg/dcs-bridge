@@ -2,7 +2,7 @@
 
 **Last updated:** 2026-09-03
 
-The handoff between sessions. Read it first; update it before a session ends,
+The handoff between sessions. Read it first. Update it before a session ends,
 not only when a task finishes. Stamp the date above each time; it carries a
 date and nothing else, because what changed is what the sections below are
 for.
