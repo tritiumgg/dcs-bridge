@@ -21,13 +21,15 @@ use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::io;
 use std::net::{SocketAddr, ToSocketAddrs};
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{
     Arc, Mutex, MutexGuard, OnceLock, PoisonError, RwLock, RwLockReadGuard, TryLockError,
 };
+use std::time::{Duration, Instant};
 
 use crate::fanout::{Commit, ConnectionId, Writer};
 use crate::handshake;
+use crate::inbound::{Answers, Liveness};
 use crate::transport::{Listener, Record};
 
 /// A topic: the fully-qualified protobuf type name of a record's payload.
@@ -164,7 +166,24 @@ pub struct Bridge {
     /// Names this process in every handshake, so a consumer can tell a
     /// restarted broker from the one it was talking to.
     instance_id: u64,
+    /// When the process started, the origin every heartbeat is measured
+    /// from.
+    started: Instant,
+    /// Milliseconds after `started` at which the logic thread last stamped
+    /// the heartbeat, plus one, so that zero means never. Nothing stamps it
+    /// yet: `shim.tick` is what will.
+    heartbeat: AtomicU64,
+    /// The effective value of the `enabled` key, the kill switch.
+    enabled: AtomicBool,
 }
+
+/// How old the heartbeat may be for the sim to count as alive.
+///
+/// The specification's default: the largest measured gap while running is
+/// under a third of a second and the largest untelegraphed transition under
+/// two, so this carries a wide margin over both. The first `configure` is
+/// where the configured value arrives.
+pub const DCS_ALIVE_THRESHOLD: Duration = Duration::from_millis(30_000);
 
 /// The outbound path: the writer thread, the logic thread's end of the
 /// commit ring, and the listener whose connections the writer fans out to.
@@ -257,7 +276,28 @@ pub fn bridge() -> &'static Bridge {
         starting: Mutex::new(()),
         misaddressed: AtomicU64::new(0),
         instance_id: handshake::instance_id(),
+        started: Instant::now(),
+        heartbeat: AtomicU64::new(0),
+        enabled: AtomicBool::new(true),
     })
+}
+
+/// The process's bridge, as the reader thread asks it things.
+///
+/// The bridge lives in a static and the listener wants something it can
+/// share between threads, so this stands in for it and forwards every call
+/// to [`bridge`].
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Global;
+
+impl Answers for Global {
+    fn handshake(&self) -> Record {
+        bridge().handshake().encode()
+    }
+
+    fn liveness(&self) -> Liveness {
+        bridge().liveness()
+    }
 }
 
 impl Bridge {
@@ -281,11 +321,9 @@ impl Bridge {
         }
 
         let (writer, commit, connections) = Writer::spawn(commit_capacity);
-        // Asked per accept, through the global, so a handshake field that
-        // arrives after the listener is up is in the next connection's.
-        let listener = Listener::spawn(addr, connections, ring_capacity, || {
-            bridge().handshake().encode()
-        })?;
+        // Answered through the global, so a handshake field that arrives
+        // after the listener is up is in the next connection's.
+        let listener = Listener::spawn(addr, connections, ring_capacity, Arc::new(Global))?;
         let addr = listener.local_addr();
         // The lock above makes this the only setter.
         let _ = self.outbound.set(Outbound {
@@ -314,6 +352,40 @@ impl Bridge {
             instance_id: self.instance_id,
             schema_sha256: None,
         }
+    }
+
+    /// Stamp the heartbeat: the logic thread is running now.
+    ///
+    /// One atomic store, and no throttle here: the caller that exists to
+    /// throttle it, `shim.tick`, does not exist yet, so nothing calls this
+    /// outside a test and every `Pong` reports the sim as never heard from.
+    pub fn heartbeat(&self) {
+        let ms = self.started.elapsed().as_millis();
+        // Saturating at the top of a u64 is 584 million years of uptime.
+        let ms = u64::try_from(ms).unwrap_or(u64::MAX - 1);
+        self.heartbeat.store(ms + 1, Ordering::Relaxed);
+    }
+
+    /// What a `Pong` carries now: the heartbeat's age, whether that is
+    /// under the threshold, and the kill switch's effective value. Read on
+    /// the reader thread, and it touches nothing the logic thread holds.
+    pub fn liveness(&self) -> Liveness {
+        let now = u64::try_from(self.started.elapsed().as_millis()).unwrap_or(u64::MAX - 1);
+        let last_heard_ms = match self.heartbeat.load(Ordering::Relaxed) {
+            0 => None,
+            stamped => Some(now.saturating_sub(stamped - 1)),
+        };
+        let threshold = u64::try_from(DCS_ALIVE_THRESHOLD.as_millis()).unwrap_or(u64::MAX);
+        Liveness {
+            last_heard_ms,
+            alive: last_heard_ms.is_some_and(|age| age < threshold),
+            enabled: self.enabled.load(Ordering::Relaxed),
+        }
+    }
+
+    /// The effective value of the `enabled` key.
+    pub fn enabled(&self) -> bool {
+        self.enabled.load(Ordering::Relaxed)
     }
 
     /// Queue an envelope tail for every connection.

@@ -23,16 +23,17 @@
 //! then everything else. Before authentication it may send `Ping` and
 //! `Auth` and nothing else; any other topic closes the connection, and so
 //! does a connection that has not authenticated within
-//! [`HANDSHAKE_TIMEOUT`]. The thread that reads a socket and applies that
-//! order is the transport's to start, and nothing starts it yet: what is
-//! here is the frame, the answers, and what the reader asks of the broker.
+//! [`HANDSHAKE_TIMEOUT`]. Nothing can authenticate yet, so every connection
+//! is closed at the timeout: `Auth` is the next thing built.
 
 use std::io::{self, Read};
-use std::time::Duration;
+use std::net::{Shutdown, TcpStream};
+use std::time::{Duration, Instant};
 
 use prost::Message;
 
 use crate::encode::{Encoder, TYPE_URL_PREFIX};
+use crate::fanout::{ConnectionId, Connections};
 use crate::transport::Record;
 
 /// The most bytes a frame may claim. Read before anything is allocated for
@@ -195,6 +196,82 @@ pub fn pong(liveness: Liveness) -> Record {
     }
     e.boolean(3, liveness.enabled).expect("the answer fits");
     Record::from(e.commit().expect("the answer fits"))
+}
+
+/// One connection's reader: read frames until the connection closes, and
+/// answer what the broker answers itself.
+///
+/// The read blocks, so this is a thread of its own per connection, beside
+/// the one that drains the connection's ring. Whichever of the two returns
+/// first shuts the socket down, which returns the other. Nothing here
+/// touches Lua or waits for the logic thread, which is what lets a `Ping`
+/// be answered while the sim is loading a mission.
+pub fn serve(
+    mut stream: TcpStream,
+    id: ConnectionId,
+    connections: &Connections<Record>,
+    answers: &dyn Answers,
+) -> Result<(), Close> {
+    let mut body = Vec::new();
+    let deadline = Instant::now() + answers.handshake_timeout();
+    let authenticated = false;
+
+    loop {
+        if !authenticated {
+            // The socket's read timeout is set to what is left of the
+            // deadline before each read, so a peer that keeps sending
+            // `Ping` cannot keep the connection open past it. A zero
+            // timeout is refused by the socket, so it is treated as passed.
+            let remaining = deadline
+                .checked_duration_since(Instant::now())
+                .filter(|left| !left.is_zero())
+                .ok_or(Close::HandshakeTimeout)?;
+            stream.set_read_timeout(Some(remaining))?;
+        }
+        let envelope = match read_frame(&mut stream, &mut body) {
+            Ok(Some(envelope)) => envelope,
+            Ok(None) => return Ok(()),
+            Err(Close::Io(error))
+                if !authenticated
+                    && matches!(
+                        error.kind(),
+                        io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                    ) =>
+            {
+                return Err(Close::HandshakeTimeout);
+            }
+            Err(close) => return Err(close),
+        };
+
+        match topic(&envelope)? {
+            "dcs.bridge.Ping" => connections.answer(id, pong(answers.liveness())),
+            other => return Err(Close::Unauthenticated(other.to_owned())),
+        }
+    }
+}
+
+/// Run a reader to its end and shut the socket down after it, whatever the
+/// end was: a clean close, a refusal, or a fault caught at this thread.
+///
+/// The shutdown is what returns the draining thread, which is blocked on
+/// the same socket, and the drain thread's detach is what tells the writer
+/// thread. A panic is caught here rather than left to end the thread on
+/// its own so that the shutdown still happens; the panic has already been
+/// reported by the hook, and a decoder fault is one connection's, never
+/// the process's.
+pub fn run(
+    stream: TcpStream,
+    id: ConnectionId,
+    connections: Connections<Record>,
+    answers: &dyn Answers,
+) {
+    let reading = stream.try_clone();
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match reading {
+        Ok(reading) => serve(reading, id, &connections, answers),
+        Err(error) => Err(Close::Io(error)),
+    }));
+    drop(outcome);
+    let _ = stream.shutdown(Shutdown::Both);
 }
 
 #[cfg(test)]

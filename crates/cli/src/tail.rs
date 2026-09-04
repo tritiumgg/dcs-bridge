@@ -310,9 +310,8 @@ mod tests {
     #[test]
     fn a_stalled_consumer_sees_its_evictions_as_a_gap() {
         let (writer, mut commit, connections) = Writer::spawn(4096);
-        let greeting = dcsbridge_broker::bridge().handshake();
-        let listener =
-            Listener::spawn("127.0.0.1:0", connections, 4, move || greeting.encode()).unwrap();
+        let answers = Arc::new(dcsbridge_broker::state::Global);
+        let listener = Listener::spawn("127.0.0.1:0", connections, 4, answers).unwrap();
         let mut client = client(listener.local_addr());
         warm_up(&mut commit, &client);
 

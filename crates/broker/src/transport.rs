@@ -16,10 +16,12 @@
 //! A connection's first frame is the handshake, at `seq` 1. The listener
 //! thread asks for it at accept and hands it to the writer thread inside
 //! the message that attaches the connection, so the writer numbers it as it
-//! attaches the ring and nothing fanned out can come first. The reader
-//! thread, and what
-//! a connection can say once it has read the handshake, come with the
-//! inbound path.
+//! attaches the ring and nothing fanned out can come first.
+//!
+//! A connection gets a second thread that reads its socket, because a read
+//! blocks the way a write does and neither may wait on the other. What it
+//! reads, and what it answers, is the inbound module's; whichever of the
+//! two threads returns first shuts the socket down, which returns the other.
 
 use std::io::{self, IoSlice, Write};
 use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
@@ -29,6 +31,7 @@ use std::thread;
 
 use crate::encode::{varint_len, write_varint};
 use crate::fanout::{ConnectionId, Connections, LOOKS_BEFORE_PARK, Numbered, ParkFlag, Waker};
+use crate::inbound::{self, Answers};
 use crate::ring::Consumer;
 
 /// A committed record as the rings carry it: the envelope tail, shared by
@@ -66,8 +69,9 @@ impl Listener {
     /// Bind `addr` and start accepting.
     ///
     /// Each connection accepted is attached to `connections` with a ring of
-    /// `ring_capacity` records, sent the handshake `greeting` returns as its
-    /// first record, and given a thread to drain the ring. The greeting is
+    /// `ring_capacity` records, sent the handshake `answers` gives as its
+    /// first record, and given two threads: one to drain the ring and one
+    /// to read the socket, which answers through `answers`. The handshake is
     /// asked for per connection, on the listener thread, because what it
     /// carries can change between two accepts: the schema hash arrives after
     /// the listener is up. The bind is the one thing here that fails, and it
@@ -80,7 +84,7 @@ impl Listener {
         addr: impl ToSocketAddrs,
         connections: Connections<Record>,
         ring_capacity: usize,
-        greeting: impl Fn() -> Record + Send + 'static,
+        answers: Arc<dyn Answers>,
     ) -> io::Result<Self> {
         let listener = TcpListener::bind(addr)?;
         let addr = listener.local_addr()?;
@@ -93,7 +97,7 @@ impl Listener {
             thread::Builder::new()
                 .name("dcsbridge-listener".into())
                 .spawn(move || {
-                    accept_loop(listener, connections, ring_capacity, &greeting, stop, open);
+                    accept_loop(listener, connections, ring_capacity, answers, stop, open);
                 })
                 .expect("the listener thread spawns")
         };
@@ -143,7 +147,7 @@ fn accept_loop(
     listener: TcpListener,
     connections: Connections<Record>,
     ring_capacity: usize,
-    greeting: &dyn Fn() -> Record,
+    answers: Arc<dyn Answers>,
     stop: Arc<AtomicBool>,
     open: Arc<Mutex<Vec<Open>>>,
 ) {
@@ -163,7 +167,14 @@ fn accept_loop(
         // still carries frames.
         let _ = stream.set_nodelay(true);
 
-        // The connection's thread parks on its ring, and the writer thread
+        // Two threads on one socket, one reading and one writing, each with
+        // its own handle to it; the original stays with the listener so
+        // that dropping it can close the socket under both.
+        let (Ok(mut writing), Ok(reading)) = (stream.try_clone(), stream.try_clone()) else {
+            continue;
+        };
+
+        // The draining thread parks on its ring, and the writer thread
         // wakes it, so the thread has to exist before the ring is attached:
         // it starts by waiting for the ring, which arrives once the writer
         // thread knows whom to wake.
@@ -173,17 +184,16 @@ fn accept_loop(
             let flag = Arc::clone(&flag);
             let stop = Arc::clone(&stop);
             let connections = connections.clone();
-            let stream = match stream.try_clone() {
-                Ok(stream) => stream,
-                Err(_) => continue,
-            };
             thread::Builder::new()
                 .name("dcsbridge-conn".into())
                 .spawn(move || {
                     let Ok((id, consumer)) = take.recv() else {
                         return;
                     };
-                    let _ = serve(stream, consumer, &flag, &stop);
+                    let _ = serve(&mut writing, consumer, &flag, &stop);
+                    // A socket that refused a write is done in both
+                    // directions; the shutdown returns the reader.
+                    let _ = writing.shutdown(Shutdown::Both);
                     connections.detach(id);
                 })
                 .expect("a connection thread spawns")
@@ -193,7 +203,21 @@ fn accept_loop(
         // The handshake rides the attach, so the writer thread numbers it 1
         // as it attaches the ring and nothing fanned out can come first.
         let attached: (ConnectionId, Consumer<Numbered<Record>>) =
-            connections.attach_with(ring_capacity, waker, Some(greeting()));
+            connections.attach_with(ring_capacity, waker, Some(answers.handshake()));
+        let id = attached.0;
+
+        // The reader: a second thread on the same socket, because a read
+        // blocks the way a write does and neither may wait on the other. It
+        // shuts the socket down when it returns, which returns the drainer.
+        let reader = {
+            let connections = connections.clone();
+            let answers = Arc::clone(&answers);
+            thread::Builder::new()
+                .name("dcsbridge-read".into())
+                .spawn(move || inbound::run(reading, id, connections, &*answers))
+                .expect("a reader thread spawns")
+        };
+
         open.lock()
             .unwrap_or_else(PoisonError::into_inner)
             .push(Open {
@@ -204,6 +228,7 @@ fn accept_loop(
         // returns only after receiving.
         let _ = hand.send(attached);
         serving.push(handle);
+        serving.push(reader);
     }
 
     for handle in serving {
@@ -215,7 +240,7 @@ fn accept_loop(
 /// the ring when it is empty, the way the writer thread sleeps on the commit
 /// ring. Returns when the socket refuses a write or the listener stops.
 fn serve(
-    mut stream: TcpStream,
+    stream: &mut TcpStream,
     mut consumer: Consumer<Numbered<Record>>,
     flag: &ParkFlag,
     stop: &AtomicBool,
@@ -228,7 +253,7 @@ fn serve(
         }
         match consumer.pop() {
             Some(record) => {
-                write_frame(&mut stream, &record)?;
+                write_frame(stream, &record)?;
                 empty_passes = 0;
             }
             None if empty_passes < LOOKS_BEFORE_PARK => {
@@ -339,19 +364,32 @@ mod tests {
         stream
     }
 
-    /// The handshake every test listener greets with.
-    fn greeting() -> Record {
-        crate::handshake::Handshake {
-            protocol: crate::PROTOCOL_VERSION,
-            broker: crate::BROKER_VERSION,
-            instance_id: 42,
-            schema_sha256: None,
+    /// What stands behind a test listener: a fixed handshake and a sim that
+    /// was heard from a moment ago.
+    struct Stub;
+
+    impl Answers for Stub {
+        fn handshake(&self) -> Record {
+            crate::handshake::Handshake {
+                protocol: crate::PROTOCOL_VERSION,
+                broker: crate::BROKER_VERSION,
+                instance_id: 42,
+                schema_sha256: None,
+            }
+            .encode()
         }
-        .encode()
+
+        fn liveness(&self) -> inbound::Liveness {
+            inbound::Liveness {
+                last_heard_ms: Some(12),
+                alive: true,
+                enabled: true,
+            }
+        }
     }
 
     fn listener(connections: crate::fanout::Connections<Record>) -> Listener {
-        Listener::spawn("127.0.0.1:0", connections, 64, greeting).unwrap()
+        Listener::spawn("127.0.0.1:0", connections, 64, Arc::new(Stub)).unwrap()
     }
 
     /// Read the handshake, which is the first frame and numbered 1.
@@ -569,6 +607,173 @@ mod tests {
                 Err(_) => break,
             }
         }
+        drop(writer);
+    }
+
+    /// A frame as a consumer's stock encoder writes it: the length, then an
+    /// envelope carrying `topic` and `value`.
+    fn inbound(seq: u64, topic: &str, value: &[u8]) -> Vec<u8> {
+        let body = inbound::Envelope {
+            seq,
+            payload: Some(inbound::Payload {
+                type_url: format!("type.googleapis.com/{topic}"),
+                value: value.to_vec(),
+            }),
+        }
+        .encode_to_vec();
+        let mut bytes = (body.len() as u32).to_le_bytes().to_vec();
+        bytes.extend(body);
+        bytes
+    }
+
+    /// Whether `client` reads end of stream, or a reset, before a timeout.
+    fn is_closed(client: &mut TcpStream) -> bool {
+        client
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .expect("a read timeout is set");
+        let mut sink = [0u8; 4096];
+        loop {
+            match client.read(&mut sink) {
+                Ok(0) => return true,
+                Ok(_) => continue,
+                Err(e)
+                    if matches!(
+                        e.kind(),
+                        io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                    ) =>
+                {
+                    return false;
+                }
+                Err(_) => return true,
+            }
+        }
+    }
+
+    /// `dcs.bridge.Pong` as a consumer decodes it.
+    #[derive(Clone, PartialEq, Message)]
+    struct Pong {
+        #[prost(bool, tag = "1")]
+        dcs_alive: bool,
+        #[prost(uint64, optional, tag = "2")]
+        dcs_last_heard_ms: Option<u64>,
+        #[prost(bool, tag = "3")]
+        bridge_enabled: bool,
+    }
+
+    /// A `Ping` is answered with a `Pong` while the logic thread commits
+    /// nothing and the writer thread is parked, the answer is numbered
+    /// after the handshake, and nothing reaches the commit ring: the
+    /// answer never touched the logic thread's side.
+    #[test]
+    fn a_ping_is_answered_with_the_writer_parked_and_no_commit() {
+        let (writer, commit, connections) = Writer::spawn(64);
+        let listener = listener(connections);
+        let mut client = client(listener.local_addr());
+        read_handshake(&mut client);
+
+        client
+            .write_all(&inbound(1, "dcs.bridge.Ping", &[]))
+            .expect("the ping is sent");
+        let frame = read_frame(&mut client);
+        assert_eq!(frame.seq, 2, "the pong did not follow the handshake");
+        let any = frame.payload.as_ref().expect("a payload");
+        assert_eq!(any.type_url, "type.googleapis.com/dcs.bridge.Pong");
+        assert_eq!(
+            Pong::decode(&any.value[..]).expect("the pong decodes"),
+            Pong {
+                dcs_alive: true,
+                dcs_last_heard_ms: Some(12),
+                bridge_enabled: true,
+            }
+        );
+        assert!(commit.is_empty(), "the answer went through the commit ring");
+        assert_eq!(commit.dropped(), 0);
+
+        drop(listener);
+        drop(writer);
+    }
+
+    /// A frame over the cap, a body that is not an envelope, and a topic
+    /// that is not `Ping` before authentication each close the connection
+    /// that sent them, and the other connection keeps receiving.
+    #[test]
+    fn a_bad_frame_closes_its_connection_alone() {
+        let (writer, mut commit, connections) = Writer::spawn(64);
+        let listener = listener(connections);
+        let mut staying = client(listener.local_addr());
+        let on_staying = first_frame(&mut commit, &mut staying);
+
+        let oversize = {
+            let mut bytes = (inbound::MAX_FRAME_BYTES + 1).to_le_bytes().to_vec();
+            bytes.extend([0u8; 64]);
+            bytes
+        };
+        let garbage = vec![3u8, 0, 0, 0, 0xff, 0xff, 0xff];
+        let early = inbound(1, "dcs.builtin.Resync", &[]);
+
+        for bad in [oversize, garbage, early] {
+            let mut offender = client(listener.local_addr());
+            read_handshake(&mut offender);
+            offender.write_all(&bad).expect("the frame is sent");
+            assert!(is_closed(&mut offender), "the offender was not closed");
+        }
+
+        commit.push(record(9_001));
+        let frame = read_frame(&mut staying);
+        assert_eq!(
+            frame.seq,
+            on_staying.seq + 1,
+            "the staying connection saw a gap"
+        );
+        assert_eq!(value(&frame), 9_001);
+
+        drop(listener);
+        drop(writer);
+    }
+
+    /// A connection that sends nothing but `Ping` is closed once the
+    /// handshake timeout passes, and one that sends nothing at all is too.
+    #[test]
+    fn an_unauthenticated_connection_is_closed_at_the_timeout() {
+        struct Quick;
+        impl Answers for Quick {
+            fn handshake(&self) -> Record {
+                Stub.handshake()
+            }
+            fn liveness(&self) -> inbound::Liveness {
+                Stub.liveness()
+            }
+            fn handshake_timeout(&self) -> Duration {
+                Duration::from_millis(300)
+            }
+        }
+        let (writer, _commit, connections) = Writer::spawn(64);
+        let listener = Listener::spawn("127.0.0.1:0", connections, 64, Arc::new(Quick)).unwrap();
+
+        let mut silent = client(listener.local_addr());
+        let mut pinging = client(listener.local_addr());
+        read_handshake(&mut silent);
+        read_handshake(&mut pinging);
+
+        let started = Instant::now();
+        let mut pings = 0;
+        while started.elapsed() < Duration::from_millis(200) {
+            pinging
+                .write_all(&inbound(pings, "dcs.bridge.Ping", &[]))
+                .expect("the ping is sent");
+            read_frame(&mut pinging);
+            pings += 1;
+            thread::sleep(Duration::from_millis(20));
+        }
+        assert!(pings > 1, "no ping was answered inside the timeout");
+
+        assert!(is_closed(&mut silent), "the silent connection stayed open");
+        assert!(
+            is_closed(&mut pinging),
+            "pinging kept the connection open past the timeout"
+        );
+
+        drop(listener);
         drop(writer);
     }
 }
