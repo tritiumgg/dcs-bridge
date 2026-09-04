@@ -47,6 +47,26 @@ message Handshake {
   optional bytes schema_sha256 = 4;
 }
 
+// Liveness, asked by a consumer and answered by the broker itself: the one
+// message a connection may send before it has authenticated besides Auth.
+// Nothing about it reaches Lua, and it carries no record class.
+message Ping {}
+
+// What answers a Ping. It reports the sim's liveness and not the broker's:
+// the broker answers from its own thread, so a wedged logic thread with a
+// live reader thread reads as dcs_alive false, which is the case Ping exists
+// to detect.
+//
+// dcs_last_heard_ms is the age of the logic thread's last heartbeat and is
+// absent when there has not been one. dcs_alive is whether that age is under
+// the threshold. bridge_enabled is the effective value of the enabled key,
+// so a consumer can tell a disabled bridge from a dead sim.
+message Pong {
+  bool dcs_alive = 1;
+  optional uint64 dcs_last_heard_ms = 2;
+  bool bridge_enabled = 3;
+}
+
 // The drop policy the broker applies to a record under pressure.
 //
 // Not extensible: the broker implements each member, so a new class is a

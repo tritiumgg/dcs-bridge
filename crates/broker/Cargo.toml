@@ -17,19 +17,20 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 
-# Empty on purpose. The shipped build runs inside DCS's process, so every
-# crate here is code inside the simulator, and the concurrency is written by
-# hand so that Loom and Miri can reach it. The one exception to come is prost,
-# for decoding on the reader thread. ADR 0016.
+# prost and nothing else. The shipped build runs inside DCS's process, so
+# every crate here is code inside the simulator, and the concurrency is
+# written by hand so that Loom and Miri can reach it. prost is the one
+# exception: the reader thread decodes an attacker's bytes through it,
+# because a decoder written beside the encoder would share its misreadings,
+# and this one is fuzzed and bounds its own recursion. The frame-length cap
+# ahead of it stays the broker's own. ADR 0016.
 [dependencies]
-
-# The tests decode the encoder's output through a stock protobuf library,
-# because a decoder written beside the encoder would share its misreadings.
-# A dev-dependency reaches no shipped build, so the broker still links no
-# protobuf runtime. prost-types carries the library's own `Any`, so the type
-# URL is read the way every consumer reads it.
-[dev-dependencies]
 prost = "0.14"
+
+# The tests decode the encoder's output through the same library. prost-types
+# carries the library's own `Any`, so the type URL is read the way every
+# consumer reads it; the shipped build hand-numbers the two fields instead.
+[dev-dependencies]
 prost-types = "0.14"
 
 # Loom reaches the broker only under `--cfg loom`, which no shipped build sets,
