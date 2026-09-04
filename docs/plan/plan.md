@@ -74,23 +74,22 @@ states which hosts build what.
 | 2.C1 | CLI `dcsb`: the binary, a connection, and `tail`. | 2.7's forced drop is observed as a `seq` gap by `dcsb tail`. |
 | 2.8 | `begin_to` and per-connection addressing; `poll` returns the connection id; connection ids unique for the process and never reused. A `begin_to` on a topic the schema did not mark a reply or an acknowledgement is refused and counted in `misaddressed_total`. | Two `dcsb tail` sessions show a `begin_to` record reaching one and a `begin` record reaching both. A hand-written `begin_to` on a fan-out topic is refused. |
 | 2.9 | Handshake, then auth, then five messages the broker answers itself on the reader thread: `Ping`, `Auth`, `GetSchema`, `SeqAck`, `SetEnabled`. `SetTopicFilter` and `GetTopics` join them at 2.20. | `Pong` answers during a mission-load blackout. None of the five reaches a ring. |
+| 2.15 | `shim.configure`: allocate on the first call, apply live keys on later ones as one atomic swap, validate and reject whole, count unknown keys. It answers with the broker's interface version. Cross-key invariants are checked against effective values, and a changed restart-tier key counts in `config_keys_pending_restart`. Every constant 2.7 and 2.9 left in the code moves behind it, and `shim.tokens` retires into the `tokens` key. | Rings size from config. A later call changes a rate limit and refuses a ring size. A call before it errors rather than defaulting. A version mismatch takes SPEC §11's broker-failure path. |
 | 2.C2 | CLI `ping`. | It reports `dcs_alive`, `dcs_last_heard_ms` and `bridge_enabled`, and still answers while the logic thread is stalled. |
 | 2.10 | `shim.schema`: opaque bytes accepted once after the first `configure`, hashed, served by `GetSchema`; refused twice; an error before the hand-off, and the handshake omits the hash until it. `GetSchema` requires authentication. | `GetSchema` returns bytes identical to `schema.pb`. An unauthenticated `GetSchema` is refused. |
 | 2.C3 | CLI `schema`. | `dcsb schema` returns bytes identical to the deployed `schema.pb`, which is how 2.10 is checked. |
 | 2.11 | `shim.tick`: mission time published every call, the heartbeat atomic stamped at most once per `heartbeat_interval_ms`, the throttle inside the broker. `shim.epoch(id)` and `shim.epoch(nil)` stamp and clear the epoch. | `Pong` carries `dcs_alive` and `dcs_last_heard_ms`. Killing the logic thread flips it; a mission load does not. A record emitted outside an epoch omits `epoch` and `mission_time`. |
-| 2.12 | Reader thread; the payload type URL read out of every inbound `Any` under `max_type_url_bytes`; two inbound rings routed by the registered route map, drop-newest. A topic in no route map is refused with `Rejected` reason `UNKNOWN_TOPIC` and counted in `unrouted_topic_total`, never defaulted to the sim driver. | `poll(target)` returns a sent record from the right ring and only that ring. An unregistered topic is refused and delivered nowhere. |
+| 2.16 | `shim.classes`, `shim.routes`, `shim.caps` registration, and the reply table beside them (ADR 0017): additive over disjoint sets, idempotent on identical rows, refused on conflict, process-global. `routes` carries inbound topics only. A topic missing a class or a capability is refused rather than defaulted, counted in `partial_registration_total`. | A second registrar merges; a conflicting row is refused whole. An outbound-only topic with a class and a capability and no route registers cleanly. The class-aware drop is 2.18's; `docs/audit.md`. |
+| 2.12 | Two inbound rings, drop-newest, and `poll(target)` returning the connection id, the topic and the bytes; the payload type URL read out of every inbound `Any` under `max_type_url_bytes` ahead of the decode; routing by the registered route map. A topic in no route map is dropped and counted in `unrouted_topic_total`, never defaulted to the sim driver; the `Rejected` that answers it is 2.13's. | `poll(target)` returns a sent record from the right ring and only that ring. An unregistered topic is delivered nowhere. |
 | 2.C4 | CLI `send`. | A record sent by `dcsb send` arrives on the right ring, which is how 2.12 is checked. |
-| 2.13 | `Rejected` on the reader thread, carrying the inbound envelope's `seq`, the topic id and one of the four `RejectedReason` members; `rejected_max_per_sec` cap per connection. | A refused command is answered once, and a flood of them is not. A frame whose header does not parse drops the connection instead. |
+| 2.13 | `Rejected` on the reader thread, carrying the inbound envelope's `seq`, the topic id and one of the four `RejectedReason` members; `rejected_max_per_sec`, `busy_max_per_sec` and `inbound_records_per_sec` per connection. | A refused command is answered once, and a flood of them is not. A frame whose header does not parse drops the connection instead. |
 | 2.14 | Outbound capability filter at fan-out, before `seq`; `records_filtered_total`. Point-to-point records are addressed rather than fanned out, so the filter does not touch a reply, an acknowledgement or a `Rejected`. | A filtered consumer sees no `seq` gap. `records_dropped_total` does not move. |
-| 2.15 | `shim.configure`: allocate on the first call, apply live keys on later ones as one atomic swap, validate and reject whole, count unknown keys. It answers with the broker's interface version. Cross-key invariants are checked against effective values, and a changed restart-tier key counts in `config_keys_pending_restart`. | Rings size from config. A later call changes a rate limit and refuses a ring size. A call before it errors rather than defaulting. A version mismatch takes SPEC §11's broker-failure path. |
-| 2.16 | `shim.classes`, `shim.routes`, `shim.caps` registration, and the reply table beside them (ADR 0017): additive over disjoint sets, idempotent on identical rows, refused on conflict, process-global. `routes` carries inbound topics only. A topic missing a class or a capability is refused rather than defaulted, counted in `partial_registration_total`. | `LOSSY` drops before `DURABLE` under pressure and `LIFECYCLE` survives. A second registrar merges; a conflicting row is refused whole. An outbound-only topic with a class and a capability and no route registers cleanly. |
+| 2.18 | The outbound drop rule, both halves: evict the oldest non-`LIFECYCLE` record, and refuse the newest non-`LIFECYCLE` record once the `LIFECYCLE` reserve is reached. A ring holding only `LIFECYCLE` drops the connection and counts `lifecycle_disconnects_total`. The maintainer's ring-per-class decision is taken here; ADR 0009. | `LOSSY` drops before `DURABLE` under pressure and `LIFECYCLE` survives. An `EpochClosed` survives a `LOSSY` flood. A consumer far enough behind is disconnected rather than losing a boundary record. |
 | 2.17 | `LIFECYCLE` retention: latest per topic, slots allocated at `shim.classes` under `max_lifecycle_topics`, replayed after auth in emit order before live traffic, through the same capability filter. `lifecycle_replayed_total`. | An `dcsb tail` started mid-epoch receives `EpochOpened` before any live record. A `shim.classes` call above the cap is refused whole. |
-| 2.18 | The outbound drop rule, both halves: evict the oldest non-`LIFECYCLE` record, and refuse the newest non-`LIFECYCLE` record once free space reaches `ring_out_lifecycle_reserve`. A ring holding only `LIFECYCLE` drops the connection and counts `lifecycle_disconnects_total`. | An `EpochClosed` survives a `LOSSY` flood. A consumer far enough behind is disconnected rather than losing a boundary record. |
-| 2.19 | `SeqAck` accepted and counted, with no spool behind it and no per-connection tracking: nothing reads an acknowledged `seq` until the spool ships (SPEC §11). | The wire carries it and the broker accepts it without error. |
+| 2.19 | Landed with 2.9: `SeqAck` is consumed and counted, with no spool behind it and no per-connection tracking (PR #55). Nothing reads an acknowledged `seq` until the spool ships (SPEC §11). | The wire carries it and the broker accepts it without error. |
 | 2.20 | `SetTopicFilter` and `GetTopics` on the reader thread: `ALL` as the default, replace rather than accumulate, `LIFECYCLE` always admitted, the four refused shapes with `ok` false and a `refusal` reason, `topic_filter_max_topics`, and the filter published to the writer thread by pointer swap. Filtering runs at fan-out before `seq` and counts in `records_filtered_total`. | A connection naming one topic under `ONLY` receives that topic and every `LIFECYCLE` topic and no other. `records_dropped_total` does not move and the consumer sees no `seq` gap. `GetTopics` lists every topic the token's capability set covers and no topic outside it. |
 | 2.C5 | CLI `record` and `replay`. | A captured session replays to a consumer with no DCS running. |
 | 2.C6 | CLI `mock` — synthetic traffic at a configurable rate. | A consumer can be written before any capture exists, and 9.8 has its load generator. |
-
 **Task 2.2 lands as a sequence of three**, named here because this is the last
 moment the boundaries are free to move:
 
@@ -194,6 +193,121 @@ uses it, and all of it is reviewable before a live install is asked to:
 | `task/2.9-6-commands` | `GetSchema` answered with an error until the hand-off; `SeqAck` consumed and counted; `SetEnabled` behind the `reload` capability, read by `Pong`. Loopback tests, one showing none of the five reaches the commit ring. | SPEC §9.5's `SeqAck` and `SetEnabled` rows, SPEC §11 "Kill switch", SPEC §5.1's `GetSchema` error |
 | `task/2.9-7-tokens` | A provisional `shim.tokens`, retired into `configure` at 2.15: a list of entries with an id, a secret and a capability list by name or number, read whole before any of it takes effect, a bad entry refused by number; `tests/lua/tokens.lua`. | SPEC §13.1's `tokens` row and SPEC §14.4's capability-set rule |
 | `task/2.9-8-tail-and-docs` | `dcsb tail` authenticating from `DCSB_TOKEN` or `--token-file`, printing the `AuthResult`'s verdict and exiting 1 on a refusal; README; the live-install steps, in the pull request. `STATE.md`. | SPEC §14.4 "read the token from a file or an environment variable", and the done-when |
+
+**The rest of Phase 2 is cut before it is built, in three milestones.** Task
+2.9 was cut into eight branches only after each slice had been measured, and
+the plan's rows had bundled three features under one id. So every remaining
+row carries its sequence table now, with a size estimate per branch that
+counts tests as code, and the phase pauses at three milestones. A milestone
+is something a person sees, not a count of rows. At each one the rows still
+ahead are re-measured against what the last stretch taught, re-cut where an
+estimate has moved past the split point, and re-ordered where a row turned
+out to need one behind it. Nothing below a milestone is final until the
+milestone before it is reached.
+
+| Milestone | Reached when | Rows |
+|---|---|---|
+| **M2.1 — A configured, live bridge** | `dcsb ping` on an install reports the sim alive and the configured values in force, and `dcsb schema` returns `schema.pb`. | 2.15, 2.C2, 2.10, 2.C3, 2.11 |
+| **M2.2 — A command reaches Lua** | `dcsb send` lands a record on the ring its registered route names, an unrouted one is answered with `Rejected`, and the maintainer's ring-per-class decision is taken. | 2.16, 2.12, 2.C4, 2.13, 2.14 |
+| **M2.3 — The drop policy holds** | A late `dcsb tail` receives `EpochOpened` first, an `EpochClosed` survives a `LOSSY` flood, and a capture replays with no DCS. | 2.18, 2.17, 2.20, 2.C5, 2.C6 |
+
+**2.15 moves to the front, and 2.16 ahead of 2.12.** Every constant 2.7 and
+2.9 left in the code — the listen address, the ring sizes, the record buffer,
+the frame and URL caps, the handshake timeout, the connection cap, the alive
+threshold, the token table — exists because `configure` was five rows away,
+and each one came with a carry-forward entry and a provisional call. Built
+next, `configure` lets every row after it take its key from configuration and
+ship no stopgap. 2.12 routes by the registered route map, which 2.16 fills, so
+2.16 comes first; 2.16's done-when kept the two clauses that are its own and
+gave the class-aware drop to 2.18, as `docs/audit.md` argues.
+
+**Task 2.15 lands as a sequence of three**, estimated at about 350 lines each:
+
+| Branch | What it holds | Reviewable against |
+|---|---|---|
+| `task/2.15-1-config-model` | A `Config` with every broker-owned SPEC §13.1 key and its default; validation that rejects a table whole, checks the cross-key invariants against effective values, tells a live key from a restart-tier one, and counts unknown keys. Unit tests over tables. No Lua, no wiring. | SPEC §13.1's broker-owned rows, SPEC §13.2 "Applying a configuration change" |
+| `task/2.15-2-apply-live` | The live keys published to the reader, writer and connection threads by one atomic swap, and read there: timeouts, caps, thresholds, rate limits, the token table. `shim.tokens` retires and `tests/lua/tokens.lua` becomes `configure`'s. `config_keys_pending_restart`. Loopback tests that change a limit under load. | SPEC §13.2's live tier, and the done-when's "a later call changes a rate limit and refuses a ring size" |
+| `task/2.15-3-first-call` | The first `configure` allocates the rings and binds the listener, which the module open stops doing; the interface version answered and compared; the Lua `configure`; `tests/lua/configure.lua`; README `Configure`; `STATE.md` with the constants' carry-forward deleted. | SPEC §5.1 "`configure` comes first", SPEC §13.3's `interface` row, SPEC §11's broker-failure path |
+
+**Task 2.C2 lands as one branch**, about 250 lines: `ping` sends `Ping`,
+prints the three `Pong` fields, and exits non-zero when the sim is not alive,
+so a script can read it. The live-install steps are the blackout half of 2.9's
+done-when, read through `Pong` this time.
+
+**Task 2.10 lands as a sequence of two.** The hash needs a SHA-256 inside the
+shipped build, which ADR 0016 does not cover; the first branch carries the
+decision record that settles whether it is hand-written or the second crate:
+
+| Branch | What it holds | Reviewable against |
+|---|---|---|
+| `task/2.10-1-schema-held` | The broker takes the bytes once through `Answers::schema`'s counterpart, refuses a second hand-off, hashes them, and serves them from `GetSchema`; the handshake carries the hash from then on. The SHA-256 and its decision record. Unit and loopback tests; about 350 lines. | SPEC §5.1 "`schema.pb` crosses once", SPEC §5.2's handshake fields |
+| `task/2.10-2-shim-schema` | The Lua `shim.schema`, refused before the first `configure` and refused twice; `tests/lua/schema.lua`; the live steps. About 200 lines. | The done-when, and SPEC §5.1's error before the hand-off |
+
+**Task 2.C3 lands as one branch**, about 200 lines: `schema` authenticates,
+sends `GetSchema`, and writes the bytes or prints the error, which is how 2.10
+is checked against the deployed `schema.pb`.
+
+**Task 2.11 lands as a sequence of two:**
+
+| Branch | What it holds | Reviewable against |
+|---|---|---|
+| `task/2.11-1-tick` | `shim.tick` publishing mission time on every call and stamping the heartbeat at most once per `heartbeat_interval_ms`, the throttle in the broker; `dcs_alive` under the running and the loading thresholds; `tests/lua/tick.lua`. About 250 lines. | SPEC §5.2 "`Pong` carries DCS liveness", SPEC §9.1's loading threshold |
+| `task/2.11-2-epoch` | `shim.epoch(id)` and `shim.epoch(nil)`; the encoder writes `epoch` and `mission_time` into the tail, absent outside an epoch; `tests/lua/epoch.lua`; the live steps. About 300 lines. | SPEC §5.2's `Envelope`, SPEC §9.4, ADR 0014 |
+
+**Task 2.16 lands as a sequence of two:**
+
+| Branch | What it holds | Reviewable against |
+|---|---|---|
+| `task/2.16-1-merge` | The registry's merge: additive over disjoint sets, idempotent on identical rows, refused whole on a conflict, a topic missing a class or a capability refused and counted in `partial_registration_total`. Unit tests over tables. About 300 lines. | SPEC §5.1 "`classes`, `routes` and `caps` are additive over disjoint topic sets" |
+| `task/2.16-2-shim-register` | The Lua `classes`, `routes`, `caps`, and the reply table beside them, as the call or the argument ADR 0017 left to this task, with the interface version moved if it is a call; `tests/lua/register.lua`; the live steps. About 350 lines. | SPEC §5.1's three calls, ADR 0017, and the done-when |
+
+**Task 2.12 lands as a sequence of two:**
+
+| Branch | What it holds | Reviewable against |
+|---|---|---|
+| `task/2.12-1-inbound-rings` | Two inbound rings, drop-newest, sized from configuration; the reader pushes to the one the route map names; the URL read ahead of the decode under its cap. Loopback tests. About 350 lines. | SPEC §5.2's route-map paragraph, SPEC §14.2 "Parse as little as possible" |
+| `task/2.12-2-poll` | The Lua `poll(target)` returning the connection id, the topic and the bytes; an unrouted topic dropped and counted; `tests/lua/poll.lua`; the live steps. About 300 lines. | SPEC §5.1's `poll`, and the done-when |
+
+**Task 2.C4 lands as one branch**, about 250 lines: `send` authenticates,
+reads a record from a file or the command line, and sends it, which is how
+2.12 is checked.
+
+**Task 2.13 lands as a sequence of two:**
+
+| Branch | What it holds | Reviewable against |
+|---|---|---|
+| `task/2.13-1-rejected` | The `Rejected` record answered from the reader with the four reasons, echoing the inbound `seq` and the topic; a header that does not parse drops the connection. Loopback tests. About 300 lines. | SPEC §5.2 "`Rejected` is the broker's refusal record" |
+| `task/2.13-2-rate-caps` | `inbound_records_per_sec` per connection and in total, `rejected_max_per_sec` and `busy_max_per_sec`, `rejections_suppressed_total`. Loopback tests that flood. About 300 lines. | SPEC §14.5, SPEC §13.1's three rate rows |
+
+**Task 2.14 lands as one branch**, about 300 lines: the writer thread holds
+each connection's capability set from its `Authenticated` control and passes a
+record over at fan-out when the set does not cover it, before `seq`;
+`records_filtered_total`.
+
+**Task 2.18 lands as a sequence of two**, once the maintainer's ring-per-class
+decision is taken; the first branch is where ADR 0009 is accepted or replaced:
+
+| Branch | What it holds | Reviewable against |
+|---|---|---|
+| `task/2.18-1-ring-per-class` | Three rings per connection, the writer pushing by class, the drainer merging on `seq`; `LOSSY` evicts `LOSSY` and `DURABLE` evicts `DURABLE`. Fan-out and loopback tests. About 400 lines. | ADR 0009, and the done-when's first clause |
+| `task/2.18-2-lifecycle-disconnect` | A full `LIFECYCLE` ring drops the connection and counts `lifecycle_disconnects_total`; the live steps. About 200 lines. | SPEC §5.2's disconnect rule, and the done-when's last two clauses |
+
+**Task 2.17 lands as a sequence of two:**
+
+| Branch | What it holds | Reviewable against |
+|---|---|---|
+| `task/2.17-1-retention` | Slots allocated at `shim.classes` under `max_lifecycle_topics`, the latest record per `LIFECYCLE` topic retained with its stamps, a record over `max_lifecycle_record_bytes` counted in `lifecycle_oversize_total`. Unit tests. About 300 lines. | SPEC §5.2 "LIFECYCLE retention" |
+| `task/2.17-2-replay` | The retained set replayed to a newly authenticated connection in emit order before live traffic, through the capability filter; `lifecycle_replayed_total`; the live steps. About 300 lines. | SPEC §17's *Late join* row, and the done-when |
+
+**Task 2.20 lands as a sequence of two:**
+
+| Branch | What it holds | Reviewable against |
+|---|---|---|
+| `task/2.20-1-filter-messages` | `SetTopicFilter`, `TopicFilterResult`, `GetTopics` and `Topics` in the schema; the filter answered on the reader with the four refused shapes and `topic_filter_max_topics`; `GetTopics` from the registered set the token covers. Loopback tests. About 350 lines. | SPEC §5.2's topic-filter and `GetTopics` paragraphs |
+| `task/2.20-2-filter-at-fanout` | The filter published to the writer thread by pointer swap and applied at fan-out before `seq`, `LIFECYCLE` always admitted, counted in `records_filtered_total`; the live steps. About 300 lines. | The done-when |
+
+**Task 2.C5 lands as a sequence of two**, `record` then `replay`, about 300
+lines each. **Task 2.C6 lands as one branch**, about 300 lines.
 
 ### Phase 3 — Generator
 

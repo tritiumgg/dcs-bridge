@@ -18,7 +18,7 @@ is just deleted. Write entries as one or two lines, never paragraphs.
 
 ## In progress
 
-Nothing. 2.9 is closed; 2.C2 is next.
+Nothing. 2.9 is closed; 2.15 is next, moved up by the Phase 2 re-cut.
 
 *One task at most. Say what is done, what is not, and where to resume. Say what
 is committed and what is only in the working tree. Say what is knowingly
@@ -35,21 +35,21 @@ broken. Empty this when the task closes.*
 
 ## Next
 
-**Task 2.C2** — CLI `ping`: sends `Ping`, prints `Pong`'s `dcs_alive`,
-`dcs_last_heard_ms` and `bridge_enabled`. Done when it reports all three and
-still answers while the logic thread is stalled. `Ping` needs no token, so
-`ping` sends no `Auth`.
+**Task 2.15** — `shim.configure`, as the plan's three-branch table cuts it:
+the config model and its validation, the live keys swapped in atomically and
+read by every thread, then the first call allocating and binding. Every
+constant 2.7 and 2.9 left moves behind it; `shim.tokens` retires. Done when
+rings size from config, a later call changes a limit and refuses a ring
+size, and a call before it errors.
 
-**An agent verifies the fields** from a loopback test against the bridge's
-own liveness; **a person sees the stall** at an install, during a mission
-load. Until 2.11 stamps the heartbeat, a live `Pong` reads never heard from.
+**An agent verifies all of it** from unit and loopback tests; **a person
+confirms** the live steps at an install, since the listen address moves.
 
 ## After that
 
-- **2.10** — `shim.schema`: opaque bytes accepted once, hashed, served by
-  `GetSchema` through `Answers::schema`; the handshake carries the hash.
-- **2.C3** — CLI `schema`, which is how 2.10 is checked.
-- **2.11** — `shim.tick` stamping `Bridge::heartbeat` under the throttle.
+- **M2.1** closes with 2.C2 `ping`, 2.10 `shim.schema`, 2.C3 `schema` and
+  2.11 `tick`; the plan's milestone table says what is re-measured then.
+- **M2.2**: 2.16 registration, then 2.12 rings and `poll`, 2.C4, 2.13, 2.14.
 - **Phase 3** opens on `protoc-gen-dcsbridge-lua`, which reads the four message
   options this schema defines and splits its output by `Target`. It reads the
   plugin request through `prost-types`; ADR 0016.
