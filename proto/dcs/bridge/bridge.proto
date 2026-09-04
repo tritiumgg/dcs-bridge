@@ -28,6 +28,25 @@ message Envelope {
   google.protobuf.Any payload = 4;
 }
 
+// The first frame on every connection, at seq 1, before anything has
+// authenticated. It says that a bridge is here and which build of it, and
+// nothing about the mission: that is everything an unauthenticated peer
+// learns.
+//
+// protocol is the one version a consumer compares. The broker states it and
+// refuses nothing; what to do about a mismatch is the consumer's choice.
+// broker names the build for a bug report and is compared by nobody.
+// instance_id names the broker process: a consumer that reconnects and reads
+// a different one is talking to a restarted broker, whose seq origin is new.
+// schema_sha256 is the SHA-256 of the FileDescriptorSet GetSchema serves, and
+// is absent until the hook driver has handed that set over.
+message Handshake {
+  uint32 protocol = 1;
+  string broker = 2;
+  uint64 instance_id = 3;
+  optional bytes schema_sha256 = 4;
+}
+
 // The drop policy the broker applies to a record under pressure.
 //
 // Not extensible: the broker implements each member, so a new class is a

@@ -20,6 +20,13 @@
 //! there and clones nothing. So two connections see different record streams,
 //! which is why the numbering below is per connection rather than global.
 //!
+//! The broker's own records to a connection, the handshake and the answers
+//! the reader thread gives it, are addressed too, and they come from threads
+//! that are not the logic thread. They reach the writer thread through
+//! [`Connections::answer`], the same channel that attaches a connection, so
+//! the connection's ring keeps the writer thread as its one producer and the
+//! answer takes its `seq` in order with everything else. ADR 0018.
+//!
 //! The writer thread numbers what it pushes. Each connection has its own
 //! `seq`, rising by one per record from one, assigned before the push and so
 //! before the ring decides whether the record stays. A record the ring evicts
@@ -105,6 +112,9 @@ enum Control<T> {
     Attach(ConnectionId, Producer<Numbered<T>>, Option<Waker>),
     /// A connection is gone; drop its ring's producer.
     Detach(ConnectionId),
+    /// The broker answers this connection: push the record into its ring,
+    /// numbered in its `seq`.
+    Answer(ConnectionId, T),
     /// Return from the loop.
     Stop,
 }
@@ -337,6 +347,24 @@ impl<T> Connections<T> {
         self.send(Control::Detach(id));
     }
 
+    /// Answer a connection: queue `record` for it alone, numbered in its
+    /// `seq` in order with whatever the writer thread pushes to it before and
+    /// after.
+    ///
+    /// This is how the handshake and every broker answer reach a connection.
+    /// It goes through the writer thread rather than into the ring directly
+    /// because the ring has one producer and that is the writer thread, and
+    /// because the number an answer takes has to be the next one in the
+    /// stream, which only the writer thread knows. It goes through this
+    /// channel rather than the commit ring because the commit ring's producer
+    /// is the logic thread's, and a second thread on it is the contention
+    /// the bridge refuses and counts. A record whose connection is gone by
+    /// the time the writer reaches it is dropped and counted as unaddressed.
+    /// ADR 0018.
+    pub fn answer(&self, id: ConnectionId, record: T) {
+        self.send(Control::Answer(id, record));
+    }
+
     fn send(&self, control: Control<T>) {
         // A send fails only when the receiver is gone, which means the writer
         // thread has returned and there is no one to tell.
@@ -439,6 +467,16 @@ impl<T: Clone + Send + 'static> Writer<T> {
                         waker,
                     }),
                     Ok(Control::Detach(id)) => connections.retain(|held| held.id != id),
+                    Ok(Control::Answer(id, record)) => {
+                        fan_out(
+                            &mut connections,
+                            Addressed {
+                                to: Some(id),
+                                record,
+                            },
+                            unaddressed,
+                        );
+                    }
                     Ok(Control::Stop) | Err(TryRecvError::Disconnected) => return,
                     Err(TryRecvError::Empty) => break,
                 }
@@ -807,6 +845,53 @@ mod tests {
             writer.unaddressed(),
             0,
             "a delivered record was counted lost"
+        );
+
+        drop(writer);
+    }
+
+    /// An answer from off the logic thread is numbered in its connection's
+    /// stream in order with the records committed around it, reaches no
+    /// other connection, and finds the writer thread parked: a `Pong` has to
+    /// go out while the logic thread commits nothing.
+    #[test]
+    fn an_answer_is_numbered_in_order_and_wakes_a_parked_writer() {
+        let (writer, mut commit, connections) = Writer::spawn(ROOMY);
+        let (first_id, mut first) = connections.attach(ROOMY);
+        let (_, mut second) = connections.attach(ROOMY);
+
+        commit.push(0u32);
+        assert_eq!(
+            drain_numbered(&mut second, 1),
+            vec![Numbered { seq: 1, record: 0 }]
+        );
+        // The commit ring is empty and stays so; the writer parks and the
+        // answer alone wakes it.
+        connections.answer(first_id, 1);
+        assert_eq!(
+            drain_numbered(&mut first, 2),
+            vec![
+                Numbered { seq: 1, record: 0 },
+                Numbered { seq: 2, record: 1 },
+            ],
+            "the answer did not follow the record before it"
+        );
+
+        commit.push(2);
+        assert_eq!(
+            drain_numbered(&mut first, 1),
+            vec![Numbered { seq: 3, record: 2 }],
+            "the record after the answer did not take the next number"
+        );
+        assert_eq!(
+            drain_numbered(&mut second, 1),
+            vec![Numbered { seq: 2, record: 2 }],
+            "the other connection saw the answer, or a gap for it"
+        );
+        assert_eq!(
+            writer.unaddressed(),
+            0,
+            "a delivered answer was counted lost"
         );
 
         drop(writer);

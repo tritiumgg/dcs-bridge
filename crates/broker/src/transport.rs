@@ -13,8 +13,12 @@
 //! and the tail the record was committed as, which every connection shares by
 //! reference and none copies. ADR 0014.
 //!
-//! What a connection can say, and the handshake that precedes any of it, are
-//! later tasks'. A socket that connects here receives from its first frame.
+//! A connection's first frame is the handshake, at `seq` 1. The listener
+//! thread asks for it at accept and hands it to the writer thread as the
+//! connection's first answer, on the channel that attached the connection,
+//! so nothing fanned out can number ahead of it. The reader thread, and what
+//! a connection can say once it has read the handshake, come with the
+//! inbound path.
 
 use std::io::{self, IoSlice, Write};
 use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
@@ -61,8 +65,12 @@ impl Listener {
     /// Bind `addr` and start accepting.
     ///
     /// Each connection accepted is attached to `connections` with a ring of
-    /// `ring_capacity` records and given a thread to drain it. The bind is
-    /// the one thing here that fails, and it fails before any thread starts.
+    /// `ring_capacity` records, sent the handshake `greeting` returns as its
+    /// first record, and given a thread to drain the ring. The greeting is
+    /// asked for per connection, on the listener thread, because what it
+    /// carries can change between two accepts: the schema hash arrives after
+    /// the listener is up. The bind is the one thing here that fails, and it
+    /// fails before any thread starts.
     ///
     /// # Panics
     ///
@@ -71,6 +79,7 @@ impl Listener {
         addr: impl ToSocketAddrs,
         connections: Connections<Record>,
         ring_capacity: usize,
+        greeting: impl Fn() -> Record + Send + 'static,
     ) -> io::Result<Self> {
         let listener = TcpListener::bind(addr)?;
         let addr = listener.local_addr()?;
@@ -82,7 +91,9 @@ impl Listener {
             let open = Arc::clone(&open);
             thread::Builder::new()
                 .name("dcsbridge-listener".into())
-                .spawn(move || accept_loop(listener, connections, ring_capacity, stop, open))
+                .spawn(move || {
+                    accept_loop(listener, connections, ring_capacity, &greeting, stop, open);
+                })
                 .expect("the listener thread spawns")
         };
 
@@ -131,6 +142,7 @@ fn accept_loop(
     listener: TcpListener,
     connections: Connections<Record>,
     ring_capacity: usize,
+    greeting: &dyn Fn() -> Record,
     stop: Arc<AtomicBool>,
     open: Arc<Mutex<Vec<Open>>>,
 ) {
@@ -179,6 +191,10 @@ fn accept_loop(
         let waker = Waker::new(flag, handle.thread().clone());
         let attached: (ConnectionId, Consumer<Numbered<Record>>) =
             connections.attach_with(ring_capacity, waker);
+        // Attach, then greet, on one channel the writer thread takes in
+        // order: the handshake is numbered 1 before any record fanned out
+        // to the new ring can be.
+        connections.answer(attached.0, greeting());
         open.lock()
             .unwrap_or_else(PoisonError::into_inner)
             .push(Open {
@@ -324,12 +340,42 @@ mod tests {
         stream
     }
 
-    /// Commit numbered records, a few at a time, until `client` has read
-    /// its first frame. A record committed before the writer thread knows the
-    /// connection is not delivered to it, and nothing outside the writer
-    /// thread can say when that is, so the test keeps committing until
-    /// something arrives. Returns the first frame and the number it carried.
+    /// The handshake every test listener greets with.
+    fn greeting() -> Record {
+        crate::handshake::Handshake {
+            protocol: crate::PROTOCOL_VERSION,
+            broker: crate::BROKER_VERSION,
+            instance_id: 42,
+            schema_sha256: None,
+        }
+        .encode()
+    }
+
+    fn listener(connections: crate::fanout::Connections<Record>) -> Listener {
+        Listener::spawn("127.0.0.1:0", connections, 64, greeting).unwrap()
+    }
+
+    /// Read the handshake, which is the first frame and numbered 1.
+    fn read_handshake(client: &mut TcpStream) -> Envelope {
+        let frame = read_frame(client);
+        assert_eq!(frame.seq, 1, "the handshake was not frame one");
+        let mut url = TYPE_URL_PREFIX.to_vec();
+        url.extend_from_slice(crate::handshake::TOPIC);
+        assert_eq!(
+            frame.payload.as_ref().unwrap().type_url.as_bytes(),
+            url,
+            "the first frame was not the handshake"
+        );
+        frame
+    }
+
+    /// Read the handshake, then commit numbered records, a few at a time,
+    /// until `client` has read its first record. The handshake is queued
+    /// after the connection attaches, so once it has arrived every later
+    /// commit reaches this connection; the loop is for a commit that raced
+    /// the attach. Returns the first record frame and the number it carried.
     fn first_frame(commit: &mut crate::fanout::Commit<Record>, client: &mut TcpStream) -> Envelope {
+        read_handshake(client);
         let deadline = Instant::now() + Duration::from_secs(30);
         let mut n = 0;
         client
@@ -366,16 +412,19 @@ mod tests {
     }
 
     /// A capture names its record types with no schema loaded: the frame
-    /// decodes as an envelope, `seq` counts from one, and the type URL
-    /// carries the topic.
+    /// decodes as an envelope, `seq` counts from one with the handshake
+    /// first, and the type URL carries the topic.
     #[test]
     fn frames_carry_seq_and_name_the_topic() {
         let (writer, mut commit, connections) = Writer::spawn(64);
-        let listener = Listener::spawn("127.0.0.1:0", connections, 64).unwrap();
+        let listener = listener(connections);
         let mut client = client(listener.local_addr());
 
         let first = first_frame(&mut commit, &mut client);
-        assert_eq!(first.seq, 1);
+        assert_eq!(
+            first.seq, 2,
+            "the first record did not follow the handshake"
+        );
         let mut url = TYPE_URL_PREFIX.to_vec();
         url.extend_from_slice(TOPIC);
         assert_eq!(first.payload.as_ref().unwrap().type_url.as_bytes(), url);
@@ -403,20 +452,21 @@ mod tests {
         drop(writer);
     }
 
-    /// Two connections are two streams: each numbers from one, and one
-    /// closing leaves the other receiving.
+    /// Two connections are two streams: each numbers from one, its handshake
+    /// first and its first record second, and one closing leaves the other
+    /// receiving.
     #[test]
     fn each_connection_numbers_from_one_and_closes_alone() {
         let (writer, mut commit, connections) = Writer::spawn(64);
-        let listener = Listener::spawn("127.0.0.1:0", connections, 64).unwrap();
+        let listener = listener(connections);
 
         let mut first = client(listener.local_addr());
-        assert_eq!(first_frame(&mut commit, &mut first).seq, 1);
+        assert_eq!(first_frame(&mut commit, &mut first).seq, 2);
 
         let mut second = client(listener.local_addr());
         let on_second = first_frame(&mut commit, &mut second);
         assert_eq!(
-            on_second.seq, 1,
+            on_second.seq, 2,
             "the second connection did not start at one"
         );
 
@@ -445,7 +495,7 @@ mod tests {
     #[test]
     fn an_addressed_record_reaches_one_connection_and_leaves_no_gap_on_the_other() {
         let (writer, mut commit, connections) = Writer::spawn(64);
-        let listener = Listener::spawn("127.0.0.1:0", connections, 64).unwrap();
+        let listener = listener(connections);
 
         let mut first = client(listener.local_addr());
         let on_first = first_frame(&mut commit, &mut first);
@@ -495,7 +545,7 @@ mod tests {
     #[test]
     fn dropping_the_listener_closes_every_connection() {
         let (writer, mut commit, connections) = Writer::spawn(64);
-        let listener = Listener::spawn("127.0.0.1:0", connections, 64).unwrap();
+        let listener = listener(connections);
         let mut idle = client(listener.local_addr());
         let mut busy = client(listener.local_addr());
         first_frame(&mut commit, &mut busy);

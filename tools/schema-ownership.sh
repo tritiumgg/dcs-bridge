@@ -36,8 +36,10 @@ PACKAGE=dcs.bridge
 # One name per line. A leading # is a comment and blank lines are skipped.
 owned() {
     cat <<'EOF'
-# The frame, and the request and reply pairs the broker answers itself
+# The frame, the handshake, and the request and reply pairs the broker
+# answers itself
 Envelope
+Handshake
 Ping
 Pong
 Auth

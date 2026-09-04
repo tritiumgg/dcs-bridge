@@ -14,6 +14,8 @@ mod sync;
 // share with the model is the park flag, which the fan-out's Loom test
 // drives from both sides.
 #[cfg(not(loom))]
+pub mod handshake;
+#[cfg(not(loom))]
 pub mod state;
 #[cfg(not(loom))]
 pub mod transport;
@@ -26,6 +28,16 @@ pub use state::bridge;
 /// Nothing compares against it. Compatibility is decided by the protocol and
 /// interface versions, which move for their own reasons.
 pub const BROKER_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// The frame format, the handshake's shape and the set of messages the
+/// broker answers itself, as one number the consumer compares at handshake.
+///
+/// It moves by one when any of those three changes in a way a consumer must
+/// know about, and for nothing else: a release does not move it, and neither
+/// does a change to the Lua surface. The broker states it and does not
+/// refuse a consumer over it; what a consumer does with a mismatch is the
+/// consumer's choice.
+pub const PROTOCOL_VERSION: u32 = 1;
 
 #[cfg(test)]
 mod tests {

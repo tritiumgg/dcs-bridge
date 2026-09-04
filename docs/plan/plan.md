@@ -176,6 +176,18 @@ with the schema message it addresses:
 reads. The typed replies join the addressable set at 2.16, through a fourth
 registered table the generator writes from `reply_to`; ADR 0017.
 
+**Task 2.9 lands as a sequence of four.** The path an answer takes to the
+socket is reviewable before anything reads a socket, the reader thread is
+reviewable with one message on it, and authentication is reviewable before
+a live install can be given a token:
+
+| Branch | What it holds | Reviewable against |
+|---|---|---|
+| `task/2.9-1-answer-path` | An answer from off the logic thread reaches the writer thread through the attach channel and takes its `seq` there; the handshake as every connection's first frame, `dcs.bridge.Handshake` in the schema, `PROTOCOL_VERSION`, the instance id. Fan-out and loopback tests. ADR 0018. | SPEC §5.2 "Handshake and order of operations", ADR 0018 |
+| `task/2.9-2-reader-thread` | `prost` inside the broker; a reader thread per connection: the frame cap before any allocation, the envelope header decoded, the type URL cap, a fault caught at the thread; `handshake_timeout_ms`; `Ping` answered with `Pong`; a message before authentication other than `Ping` and `Auth` closes the connection. Loopback tests, one with the logic thread committing nothing. | SPEC §5.2 "`Pong` carries DCS liveness", SPEC §14.2, ADR 0016 |
+| `task/2.9-3-auth-and-commands` | The token table and `Bridge::set_tokens`; `Auth` and `AuthResult` with its three errors and the close after a failure; fan-out withheld until authentication; `GetSchema` answered with an error until the hand-off; `SeqAck` consumed and counted; `SetEnabled` behind the `reload` capability, read by `Pong`. Loopback tests, one showing none of the five reaches the commit ring. | SPEC §5.2 "Authentication is two messages", SPEC §9.5's `SeqAck` and `SetEnabled` rows, SPEC §11 "Kill switch" |
+| `task/2.9-4-tokens-and-tail` | A provisional `shim.tokens`, retired into `configure` at 2.15; `tests/lua/tokens.lua`; `dcsb tail` reading the handshake and authenticating from `DCSB_TOKEN` or `--token-file`; README; the live-install steps, in the pull request. `STATE.md`. | SPEC §14.4's token rules, and the done-when |
+
 ### Phase 3 — Generator
 
 | ID | Task | Done when |

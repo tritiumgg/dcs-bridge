@@ -27,6 +27,7 @@ use std::sync::{
 };
 
 use crate::fanout::{Commit, ConnectionId, Writer};
+use crate::handshake;
 use crate::transport::{Listener, Record};
 
 /// A topic: the fully-qualified protobuf type name of a record's payload.
@@ -160,6 +161,9 @@ pub struct Bridge {
     /// Records refused at `begin_to` because their topic is neither a reply
     /// nor the acknowledgement.
     misaddressed: AtomicU64,
+    /// Names this process in every handshake, so a consumer can tell a
+    /// restarted broker from the one it was talking to.
+    instance_id: u64,
 }
 
 /// The outbound path: the writer thread, the logic thread's end of the
@@ -252,6 +256,7 @@ pub fn bridge() -> &'static Bridge {
         outbound: OnceLock::new(),
         starting: Mutex::new(()),
         misaddressed: AtomicU64::new(0),
+        instance_id: handshake::instance_id(),
     })
 }
 
@@ -276,7 +281,11 @@ impl Bridge {
         }
 
         let (writer, commit, connections) = Writer::spawn(commit_capacity);
-        let listener = Listener::spawn(addr, connections, ring_capacity)?;
+        // Asked per accept, through the global, so a handshake field that
+        // arrives after the listener is up is in the next connection's.
+        let listener = Listener::spawn(addr, connections, ring_capacity, || {
+            bridge().handshake().encode()
+        })?;
         let addr = listener.local_addr();
         // The lock above makes this the only setter.
         let _ = self.outbound.set(Outbound {
@@ -292,6 +301,19 @@ impl Bridge {
     /// The outbound path, once started.
     pub fn outbound(&self) -> Option<&Outbound> {
         self.outbound.get()
+    }
+
+    /// What this broker greets a connection with, as of now.
+    ///
+    /// The schema hash is absent until the hook driver hands the schema
+    /// over, and there is no way to hand it over yet.
+    pub fn handshake(&self) -> handshake::Handshake {
+        handshake::Handshake {
+            protocol: crate::PROTOCOL_VERSION,
+            broker: crate::BROKER_VERSION,
+            instance_id: self.instance_id,
+            schema_sha256: None,
+        }
     }
 
     /// Queue an envelope tail for every connection.
@@ -477,23 +499,27 @@ mod tests {
             assert_eq!(theirs, ours, "{member} is {theirs} in the schema");
         }
 
-        // The acknowledgement is known by name, so the name has to be the
-        // schema's: the package the file declares and the message it holds.
-        let (package, message) = ACK_TOPIC
-            .rsplit_once('.')
-            .expect("the topic is a qualified name");
-        assert!(
-            schema
-                .lines()
-                .any(|line| line.trim() == format!("package {package};")),
-            "{path} does not declare package {package}"
-        );
-        assert!(
-            schema
-                .lines()
-                .any(|line| line.trim().starts_with(&format!("message {message} "))),
-            "{path} does not declare message {message}"
-        );
+        // The acknowledgement and the handshake are known by name, so each
+        // name has to be the schema's: the package the file declares and
+        // the message it holds.
+        let handshake = std::str::from_utf8(handshake::TOPIC).expect("the topic is a name");
+        for topic in [ACK_TOPIC, handshake] {
+            let (package, message) = topic
+                .rsplit_once('.')
+                .expect("the topic is a qualified name");
+            assert!(
+                schema
+                    .lines()
+                    .any(|line| line.trim() == format!("package {package};")),
+                "{path} does not declare package {package}"
+            );
+            assert!(
+                schema
+                    .lines()
+                    .any(|line| line.trim().starts_with(&format!("message {message} "))),
+                "{path} does not declare message {message}"
+            );
+        }
     }
 
     /// Before any registration the acknowledgement is the one addressable
@@ -541,26 +567,47 @@ mod tests {
 
         let mut client = TcpStream::connect(addr).expect("the listener accepts");
         client
-            .set_read_timeout(Some(Duration::from_millis(20)))
+            .set_read_timeout(Some(Duration::from_secs(30)))
             .unwrap();
 
-        // A record committed before the writer thread knows the connection
-        // is not delivered to it, so commit until one arrives.
-        let tail = [0x22, 0x00];
+        // The handshake comes first, numbered 1, carrying this bridge's
+        // instance id and no schema hash.
         let mut length = [0u8; 4];
-        for _ in 0..1000 {
-            bridge().commit(&tail).expect("the path is started");
-            if matches!(client.peek(&mut length), Ok(4)) {
-                break;
+        client
+            .read_exact(&mut length)
+            .expect("the handshake arrives");
+        let mut frame = vec![0u8; u32::from_le_bytes(length) as usize];
+        client
+            .read_exact(&mut frame)
+            .expect("the handshake's body arrives");
+        let greeting = bridge().handshake().encode();
+        assert_eq!(&frame[..2], [0x08, 0x01], "the handshake is not seq 1");
+        assert_eq!(
+            &frame[2..],
+            &greeting[..],
+            "the handshake is not this bridge's"
+        );
+        assert_eq!(
+            bridge().handshake(),
+            handshake::Handshake {
+                protocol: crate::PROTOCOL_VERSION,
+                broker: crate::BROKER_VERSION,
+                instance_id: bridge().handshake().instance_id,
+                schema_sha256: None,
             }
-        }
+        );
+
+        // The handshake is queued after the attach, so a record committed
+        // now reaches the connection, numbered after it.
+        let tail = [0x22, 0x00];
+        bridge().commit(&tail).expect("the path is started");
         client.read_exact(&mut length).expect("a frame arrives");
         assert_eq!(u32::from_le_bytes(length), 2 + tail.len() as u32);
         let mut frame = vec![0u8; u32::from_le_bytes(length) as usize];
         client
             .read_exact(&mut frame)
             .expect("the frame's body arrives");
-        assert_eq!(frame, [0x08, 0x01, 0x22, 0x00], "seq 1 then the tail");
+        assert_eq!(frame, [0x08, 0x02, 0x22, 0x00], "seq 2 then the tail");
         assert_eq!(bridge().outbound().unwrap().contended(), 0);
 
         // A record addressed to a connection that does not exist is queued,
