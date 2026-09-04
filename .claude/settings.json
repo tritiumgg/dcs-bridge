@@ -24,6 +24,18 @@
             "statusMessage": "Checking the file is not frozen"
           }
         ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh",
+            "args": ["${CLAUDE_PROJECT_DIR}/.claude/hooks/guard-bash.sh"],
+            "timeout": 10,
+            "statusMessage": "Checking the command against the project rules"
+          }
+        ]
       }
     ]
   }

@@ -72,6 +72,54 @@ expect 0 guard-frozen-writes.sh "$(edit_payload docs/plan/plan.md)"
 expect 0 guard-frozen-writes.sh "$(edit_payload docs/decisions/0001-specifications-are-frozen.md)"
 expect 0 guard-frozen-writes.sh "$(edit_payload crates/broker/src/ring.rs)"
 
+# guard-bash: refusals
+expect 2 guard-bash.sh "$(bash_payload 'sed -i s/a/b/ x')"
+expect 2 guard-bash.sh "$(bash_payload 'cat x | sed -E -i.bak s/a/b/')"
+expect 2 guard-bash.sh "$(bash_payload 'grep -rP foo .')"
+expect 2 guard-bash.sh "$(bash_payload 'readlink -f x')"
+expect 2 guard-bash.sh "$(bash_payload 'cargo test')"
+expect 2 guard-bash.sh "$(bash_payload 'cd crates && cargo build')"
+expect 2 guard-bash.sh "$(bash_payload 'lua5.1 tests/lua/open.lua')"
+expect 2 guard-bash.sh "$(bash_payload 'buf lint')"
+expect 2 guard-bash.sh "$(bash_payload 'rustup target add x')"
+expect 2 guard-bash.sh "$(bash_payload 'mise use rust@1.90')"
+expect 2 guard-bash.sh "$(bash_payload 'git merge task/x')"
+expect 2 guard-bash.sh "$(bash_payload 'git push --force origin task/x')"
+expect 2 guard-bash.sh "$(bash_payload 'git push -f')"
+expect 2 guard-bash.sh "$(bash_payload 'echo x > docs/specs/bridge/spec.md')"
+expect 2 guard-bash.sh "$(bash_payload 'printf x | tee -a .gitattributes')"
+expect 2 guard-bash.sh "$(bash_payload 'rm docs/specs/bridge/bridge-ledger.tsv')"
+expect 2 guard-bash.sh "$(bash_payload 'gh pr create --title t --body \"## Summary\\nx\\n## Details\\n## Testing\"')"
+
+# guard-bash: passes
+expect 0 guard-bash.sh "$(bash_payload 'mise exec -- cargo test')"
+expect 0 guard-bash.sh "$(bash_payload 'mise run check')"
+expect 0 guard-bash.sh "$(bash_payload 'sed -n 1,5p x')"
+expect 0 guard-bash.sh "$(bash_payload 'grep -rn foo .')"
+expect 0 guard-bash.sh "$(bash_payload 'git merge --ff-only task/x')"
+expect 0 guard-bash.sh "$(bash_payload 'git merge-base main HEAD')"
+expect 0 guard-bash.sh "$(bash_payload 'git push --force-with-lease origin task/x')"
+expect 0 guard-bash.sh "$(bash_payload 'git push -u origin task/x')"
+expect 0 guard-bash.sh "$(bash_payload 'cat docs/specs/bridge/spec.md | head')"
+expect 0 guard-bash.sh "$(bash_payload 'git tag -l')"
+expect 0 guard-bash.sh "$(bash_payload 'git tag --list v*')"
+expect 0 guard-bash.sh "$(bash_payload 'gh release list')"
+expect 0 guard-bash.sh "$(bash_payload 'gh pr create --title t --body \"## Summary\\nx\\n## Details\\nnone\\n## README\\nnone\\n## Testing\\nnone\"')"
+expect 0 guard-bash.sh "$(bash_payload 'gh pr create --body \"$(cat <<EOF\n## Summary\nx\n## Details\nnone\n## README\nnone\n## Testing\nnone\nEOF\n)\"')"
+expect 0 guard-bash.sh "$(bash_payload '# cargo test in a comment\nls')"
+expect 0 guard-bash.sh "$(bash_payload 'cat > x <<EOF\nnever run mise use rust or rustup here\nEOF')"
+expect 0 guard-bash.sh "$(bash_payload 'gh pr create --body-file \"$S/pr.md\"')"
+expect 2 guard-bash.sh "$(bash_payload "gh pr create --body-file $ROOT/README.md")"
+expect 0 guard-bash.sh '{"tool_name":"Read","tool_input":{"file_path":"x"}}'
+
+# guard-bash: asks
+expect_ask guard-bash.sh "$(bash_payload 'git push origin main')"
+expect_ask guard-bash.sh "$(bash_payload 'git push origin HEAD:main')"
+expect_ask guard-bash.sh "$(bash_payload 'git tag v0.3.0')"
+expect_ask guard-bash.sh "$(bash_payload 'git tag -a v0.3.0 -m x')"
+expect_ask guard-bash.sh "$(bash_payload 'gh release create v0.3.0')"
+expect_ask guard-bash.sh "$(bash_payload 'gh pr merge 12 --squash')"
+
 if [ "$fail" -ne 0 ]; then
     printf '\nhook tests failed\n' >&2
     exit 1
