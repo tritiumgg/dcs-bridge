@@ -253,8 +253,34 @@ mod tests {
         Arc::from(e.commit().unwrap())
     }
 
+    /// Connect and authenticate against the bridge's own token table, which
+    /// is what lets the fanned-out burst reach this socket. The handshake
+    /// and the auth result are the first two frames it reads.
     fn client(addr: SocketAddr) -> TcpStream {
-        TcpStream::connect(addr).expect("the listener accepts")
+        use dcsbridge_broker::inbound;
+        use dcsbridge_broker::state::{Capability, Token};
+
+        dcsbridge_broker::bridge().set_tokens(vec![Token {
+            id: "tail".into(),
+            secret: b"tail-secret".to_vec(),
+            caps: [Capability::Read].into_iter().collect(),
+        }]);
+        let mut stream = TcpStream::connect(addr).expect("the listener accepts");
+        let body = inbound::Envelope {
+            seq: 1,
+            payload: Some(inbound::Payload {
+                type_url: format!("{TYPE_URL_PREFIX}dcs.bridge.Auth"),
+                value: inbound::Auth {
+                    token: "tail-secret".into(),
+                }
+                .encode_to_vec(),
+            }),
+        }
+        .encode_to_vec();
+        let mut auth = (body.len() as u32).to_le_bytes().to_vec();
+        auth.extend(body);
+        stream.write_all(&auth).expect("the auth is sent");
+        stream
     }
 
     /// Commit small records until `client` has a frame waiting. A record

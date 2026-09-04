@@ -846,7 +846,7 @@ mod tests {
     /// and a second start returns the first's address rather than failing.
     #[test]
     fn the_outbound_path_starts_once_and_commits_reach_a_connection() {
-        use std::io::Read;
+        use std::io::{Read, Write};
         use std::net::TcpStream;
         use std::time::Duration;
 
@@ -892,7 +892,45 @@ mod tests {
             }
         );
 
-        // The handshake is queued after the attach, so a record committed
+        // Nothing fans out until the connection authenticates against the
+        // bridge's own token table, and the result is frame two.
+        bridge().set_tokens(vec![Token {
+            id: "test".into(),
+            secret: b"hunter2".to_vec(),
+            caps: [Capability::Read].into_iter().collect(),
+        }]);
+        let auth = {
+            use prost::Message;
+            let body = crate::inbound::Envelope {
+                seq: 1,
+                payload: Some(crate::inbound::Payload {
+                    type_url: "type.googleapis.com/dcs.bridge.Auth".into(),
+                    value: crate::inbound::Auth {
+                        token: "hunter2".into(),
+                    }
+                    .encode_to_vec(),
+                }),
+            }
+            .encode_to_vec();
+            let mut bytes = (body.len() as u32).to_le_bytes().to_vec();
+            bytes.extend(body);
+            bytes
+        };
+        client.write_all(&auth).expect("the auth is sent");
+        client.read_exact(&mut length).expect("the result arrives");
+        let mut frame = vec![0u8; u32::from_le_bytes(length) as usize];
+        client
+            .read_exact(&mut frame)
+            .expect("the result's body arrives");
+        assert_eq!(&frame[..2], [0x08, 0x02], "the auth result is not seq 2");
+        assert_eq!(
+            &frame[2..],
+            &crate::inbound::auth_result(Ok(()))[..],
+            "the auth did not succeed"
+        );
+        assert_eq!(bridge().authenticated(), 1);
+
+        // Authenticated is queued after the result, so a record committed
         // now reaches the connection, numbered after it.
         let tail = [0x22, 0x00];
         bridge().commit(&tail).expect("the path is started");
@@ -902,7 +940,7 @@ mod tests {
         client
             .read_exact(&mut frame)
             .expect("the frame's body arrives");
-        assert_eq!(frame, [0x08, 0x02, 0x22, 0x00], "seq 2 then the tail");
+        assert_eq!(frame, [0x08, 0x03, 0x22, 0x00], "seq 3 then the tail");
         assert_eq!(bridge().outbound().unwrap().contended(), 0);
 
         // A record addressed to a connection that does not exist is queued,

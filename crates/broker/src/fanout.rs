@@ -122,8 +122,10 @@ enum Control<T> {
     /// A connection is gone; drop its ring's producer.
     Detach(ConnectionId),
     /// The broker answers this connection: push the record into its ring,
-    /// numbered in its `seq`.
+    /// numbered in its `seq`, whether or not it has authenticated.
     Answer(ConnectionId, T),
+    /// The connection has authenticated; fan out to it from here on.
+    Authenticated(ConnectionId),
     /// Return from the loop.
     Stop,
 }
@@ -383,6 +385,15 @@ impl<T> Connections<T> {
         self.send(Control::Answer(id, record));
     }
 
+    /// Report a connection authenticated. Records fanned out after the writer
+    /// thread takes this reach it; earlier ones passed it over.
+    ///
+    /// Sent after the answer that says so, on the same channel, so the
+    /// consumer reads its `AuthResult` before the first record.
+    pub fn authenticated(&self, id: ConnectionId) {
+        self.send(Control::Authenticated(id));
+    }
+
     fn send(&self, control: Control<T>) {
         // A send fails only when the receiver is gone, which means the writer
         // thread has returned and there is no one to tell.
@@ -484,6 +495,7 @@ impl<T: Clone + Send + 'static> Writer<T> {
                             producer,
                             next_seq: 1,
                             waker,
+                            authenticated: false,
                         };
                         if let Some(first) = first {
                             connection.push(first);
@@ -500,6 +512,11 @@ impl<T: Clone + Send + 'static> Writer<T> {
                             },
                             unaddressed,
                         );
+                    }
+                    Ok(Control::Authenticated(id)) => {
+                        if let Some(held) = connections.iter_mut().find(|held| held.id == id) {
+                            held.authenticated = true;
+                        }
                     }
                     Ok(Control::Stop) | Err(TryRecvError::Disconnected) => return,
                     Err(TryRecvError::Empty) => break,
@@ -586,6 +603,8 @@ struct Connection<T> {
     next_seq: u64,
     /// The thread draining the ring, if it sleeps on it.
     waker: Option<Waker>,
+    /// Whether a fanned-out record reaches it. An addressed one always does.
+    authenticated: bool,
 }
 
 impl<T> Connection<T> {
@@ -607,15 +626,17 @@ impl<T> Connection<T> {
 /// Push one record where it is addressed: into every connection's ring, or
 /// into one, numbered per connection either way.
 ///
-/// Fanned out, each connection but the last gets a clone, and the last gets
-/// the record itself, so a single connection costs no clone at all. With no
-/// connection attached the record is dropped and counted nowhere: there was
-/// no one to lose it.
+/// Fanned out, each authenticated connection but the last gets a clone, and
+/// the last gets the record itself, so a single connection costs no clone at
+/// all. An unauthenticated connection is passed over and its `seq` does not
+/// move, so once it has authenticated it sees no gap: nothing it was not
+/// entitled to was ever numbered for it. With no connection to receive the
+/// record it is dropped and counted nowhere: there was no one to lose it.
 ///
-/// Addressed, the one connection gets the record and no other connection's
-/// `seq` moves. A connection that has detached, or a number that was never
-/// handed out, is a record with nowhere to go: dropped here and counted in
-/// `unaddressed`, because somebody sent it.
+/// Addressed, the one connection gets the record, authenticated or not, and
+/// no other connection's `seq` moves. A connection that has detached, or a
+/// number that was never handed out, is a record with nowhere to go: dropped
+/// here and counted in `unaddressed`, because somebody sent it.
 ///
 /// A record a ring turns away is dropped here, on the writer thread, and the
 /// ring has already counted it against that connection.
@@ -636,14 +657,15 @@ fn fan_out<T: Clone>(
         return;
     }
 
-    let Some((last, rest)) = connections.split_last_mut() else {
+    let mut receiving = connections.iter_mut().filter(|held| held.authenticated);
+    let Some(mut previous) = receiving.next() else {
         return;
     };
-
-    for connection in rest {
-        connection.push(record.clone());
+    for connection in receiving {
+        previous.push(record.clone());
+        previous = connection;
     }
-    last.push(record);
+    previous.push(record);
 }
 
 #[cfg(all(test, not(loom)))]
@@ -655,6 +677,18 @@ mod tests {
     /// A capacity no test here fills, so a drop means the fan-out lost a record
     /// rather than a ring evicted one.
     const ROOMY: usize = 4096;
+
+    /// Attach a connection and report it authenticated, which is the state
+    /// every test here but the gating one wants: a connection that receives
+    /// what is fanned out.
+    fn attached<T>(
+        connections: &Connections<T>,
+        capacity: usize,
+    ) -> (ConnectionId, Consumer<Numbered<T>>) {
+        let (id, consumer) = connections.attach(capacity);
+        connections.authenticated(id);
+        (id, consumer)
+    }
 
     /// Pop until `count` records have arrived, or fail after a while rather
     /// than hang the suite. The records alone, for the tests that are not
@@ -706,7 +740,7 @@ mod tests {
 
         let consumers: Vec<_> = (0..4)
             .map(|_| {
-                let (_, mut consumer) = connections.attach(ROOMY);
+                let (_, mut consumer) = attached(&connections, ROOMY);
                 thread::spawn(move || {
                     let arrived = drain_until(&mut consumer, pushes as usize);
                     (arrived, consumer.dropped())
@@ -735,8 +769,8 @@ mod tests {
     #[test]
     fn a_stalled_consumer_loses_only_its_own_records_and_sees_the_gap() {
         let (writer, mut commit, connections) = Writer::spawn(ROOMY);
-        let (_, mut stalled) = connections.attach(4);
-        let (_, mut reading) = connections.attach(ROOMY);
+        let (_, mut stalled) = attached(&connections, 4);
+        let (_, mut reading) = attached(&connections, ROOMY);
 
         for value in 0..10u32 {
             commit.push(value);
@@ -786,14 +820,14 @@ mod tests {
     #[test]
     fn attach_and_detach_take_effect_mid_stream() {
         let (writer, mut commit, connections) = Writer::spawn(ROOMY);
-        let (first_id, mut first) = connections.attach(ROOMY);
+        let (first_id, mut first) = attached(&connections, ROOMY);
 
         for value in 0..5u32 {
             commit.push(value);
         }
         assert_eq!(drain_until(&mut first, 5), (0..5).collect::<Vec<_>>());
 
-        let (second_id, mut second) = connections.attach(ROOMY);
+        let (second_id, mut second) = attached(&connections, ROOMY);
         assert!(
             second_id > first_id,
             "ids did not rise: {first_id:?} then {second_id:?}"
@@ -827,7 +861,7 @@ mod tests {
         // A number is never handed out twice: a connection attached after a
         // detach takes a new one, so an answer addressed to the old
         // connection cannot reach the new.
-        let (third_id, _third) = connections.attach(ROOMY);
+        let (third_id, _third) = attached(&connections, ROOMY);
         assert!(
             third_id > second_id,
             "a detached id was reused: {second_id:?} then {third_id:?}"
@@ -851,8 +885,8 @@ mod tests {
     #[test]
     fn an_addressed_record_reaches_one_connection_and_moves_no_other_seq() {
         let (writer, mut commit, connections) = Writer::spawn(ROOMY);
-        let (first_id, mut first) = connections.attach(ROOMY);
-        let (_, mut second) = connections.attach(ROOMY);
+        let (first_id, mut first) = attached(&connections, ROOMY);
+        let (_, mut second) = attached(&connections, ROOMY);
 
         commit.push(0u32);
         commit.push_to(first_id, 1);
@@ -944,6 +978,43 @@ mod tests {
         drop(writer);
     }
 
+    /// A fanned-out record passes over a connection until it is reported
+    /// authenticated, moving its `seq` by nothing, while an answer reaches
+    /// it regardless. Once authenticated it receives from the next record
+    /// with no gap: nothing it was not entitled to was numbered for it.
+    #[test]
+    fn fan_out_withholds_from_an_unauthenticated_connection_without_a_gap() {
+        let (writer, mut commit, connections) = Writer::spawn(ROOMY);
+        let (pending_id, mut pending) = connections.attach(ROOMY);
+        let (_, mut trusted) = attached(&connections, ROOMY);
+
+        commit.push(0u32);
+        connections.answer(pending_id, 1);
+        assert_eq!(
+            drain_numbered(&mut pending, 1),
+            vec![Numbered { seq: 1, record: 1 }],
+            "the unauthenticated connection received a fanned record, or a gap"
+        );
+        assert_eq!(
+            drain_numbered(&mut trusted, 1),
+            vec![Numbered { seq: 1, record: 0 }]
+        );
+
+        connections.authenticated(pending_id);
+        commit.push(2);
+        assert_eq!(
+            drain_numbered(&mut pending, 1),
+            vec![Numbered { seq: 2, record: 2 }],
+            "the first record after authentication did not follow the answer"
+        );
+        assert_eq!(
+            drain_numbered(&mut trusted, 1),
+            vec![Numbered { seq: 2, record: 2 }]
+        );
+
+        drop(writer);
+    }
+
     /// An answer from off the logic thread is numbered in its connection's
     /// stream in order with the records committed around it, reaches no
     /// other connection, and finds the writer thread parked: a `Pong` has to
@@ -951,8 +1022,8 @@ mod tests {
     #[test]
     fn an_answer_is_numbered_in_order_and_wakes_a_parked_writer() {
         let (writer, mut commit, connections) = Writer::spawn(ROOMY);
-        let (first_id, mut first) = connections.attach(ROOMY);
-        let (_, mut second) = connections.attach(ROOMY);
+        let (first_id, mut first) = attached(&connections, ROOMY);
+        let (_, mut second) = attached(&connections, ROOMY);
 
         commit.push(0u32);
         assert_eq!(
@@ -997,8 +1068,8 @@ mod tests {
     #[test]
     fn an_addressed_record_to_a_missing_connection_is_counted_and_reaches_nobody() {
         let (writer, mut commit, connections) = Writer::spawn(ROOMY);
-        let (gone_id, gone) = connections.attach(ROOMY);
-        let (_, mut staying) = connections.attach(ROOMY);
+        let (gone_id, gone) = attached(&connections, ROOMY);
+        let (_, mut staying) = attached(&connections, ROOMY);
         connections.detach(gone_id);
         drop(gone);
 
@@ -1057,7 +1128,7 @@ mod tests {
     #[test]
     fn dropping_the_writer_stops_the_thread_and_keeps_what_was_delivered() {
         let (writer, mut commit, connections) = Writer::spawn(ROOMY);
-        let (_, mut consumer) = connections.attach(ROOMY);
+        let (_, mut consumer) = attached(&connections, ROOMY);
 
         for value in 0..3u32 {
             commit.push(value);
@@ -1082,7 +1153,7 @@ mod tests {
             "a record was delivered with no writer thread"
         );
 
-        let (_, mut orphan) = connections.attach(ROOMY);
+        let (_, mut orphan) = attached(&connections, ROOMY);
         assert_eq!(
             orphan.pop(),
             None,
@@ -1113,7 +1184,8 @@ mod loom_tests {
 
         model.check(|| {
             let (writer, mut commit, connections) = Writer::spawn(2);
-            let (_, mut consumer) = connections.attach(2);
+            let (id, mut consumer) = connections.attach(2);
+            connections.authenticated(id);
 
             for value in 0..2u32 {
                 commit.push(value);
@@ -1167,7 +1239,8 @@ mod loom_tests {
             });
 
             let waker = Waker::new(flag, drainer.thread().clone());
-            let (_, consumer) = connections.attach_with(2, waker, None);
+            let (id, consumer) = connections.attach_with(2, waker, None);
+            connections.authenticated(id);
             hand.send(consumer).expect("the drainer is waiting");
 
             for value in 0..2u32 {

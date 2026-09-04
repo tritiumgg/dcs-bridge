@@ -24,14 +24,17 @@
 //! `Auth` and nothing else; any other topic closes the connection, and so
 //! does a connection that has not authenticated within
 //! [`HANDSHAKE_TIMEOUT`]. Authentication is one `Auth` carrying the token's
-//! secret and one `AuthResult` back. The messages, the session an `Auth`
-//! opens and what the reader asks of the broker to open it are here; the
-//! reader does not send an `Auth` to the broker yet, so every connection is
-//! still closed at the timeout.
+//! secret and one `AuthResult` back; after a failed one the connection is
+//! closed, once the result has reached the wire. After a successful one the
+//! writer thread is told, and records begin to fan out to the connection.
+//! What an authenticated connection may send beyond `Ping` is the next
+//! thing built, so for now any other topic closes it.
 
 use std::collections::HashSet;
 use std::io::{self, Read};
 use std::net::{Shutdown, TcpStream};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::thread;
 use std::time::{Duration, Instant};
 
 use prost::Message;
@@ -135,6 +138,14 @@ pub enum Close {
     Unauthenticated(String),
     /// [`HANDSHAKE_TIMEOUT`] passed with no authentication.
     HandshakeTimeout,
+    /// The payload of a message the broker answers itself did not decode.
+    Payload(prost::DecodeError),
+    /// The `Auth` failed; the result was sent first.
+    AuthFailed(AuthError),
+    /// The peer closed cleanly before authenticating.
+    Closed,
+    /// An authenticated connection sent a topic nothing here handles yet.
+    Unrouted(String),
 }
 
 impl From<io::Error> for Close {
@@ -250,6 +261,14 @@ pub fn auth_result(result: Result<(), AuthError>) -> Record {
     Record::from(e.commit().expect("the answer fits"))
 }
 
+/// How long the reader waits for a failed `AuthResult` to be written before
+/// it closes the socket anyway. Loopback takes microseconds; a peer that
+/// has stopped reading does not get to hold the reader. A peer that
+/// flooded `Ping` past its ring before the `Auth` has had an answer
+/// evicted, so the count is never reached and the whole wait is paid; that
+/// holds its own reader thread and nothing else.
+const FLUSH_WAIT: Duration = Duration::from_secs(2);
+
 /// One connection's reader: read frames until the connection closes, and
 /// answer what the broker answers itself.
 ///
@@ -258,18 +277,27 @@ pub fn auth_result(result: Result<(), AuthError>) -> Record {
 /// first shuts the socket down, which returns the other. Nothing here
 /// touches Lua or waits for the logic thread, which is what lets a `Ping`
 /// be answered while the sim is loading a mission.
+///
+/// `written` is the drainer's count of frames it has put on the socket.
+/// Before authentication nothing is fanned out to the connection, so every
+/// frame on it is an answer this thread sent or the handshake, and this
+/// thread can count them: that is how a failed `AuthResult` is known to
+/// have reached the wire before the close that follows it.
 pub fn serve(
     stream: TcpStream,
     id: ConnectionId,
     connections: &Connections<Record>,
     answers: &dyn Answers,
+    written: &AtomicU64,
+    session: &mut Option<Session>,
 ) -> Result<(), Close> {
     let mut body = Vec::new();
-    let authenticated = false;
+    // The handshake, then each answer sent before authentication.
+    let mut answered: u64 = 1;
     // The deadline is wall-clock: every read under it, a frame's length
     // and its body alike, is armed with what is left, so neither a peer
     // that keeps sending `Ping` nor one that trickles a frame a byte at a
-    // time can stay past it.
+    // time can stay past it. It is lifted once the connection authenticates.
     let mut stream = Deadline {
         stream,
         until: Some(Instant::now() + answers.handshake_timeout()),
@@ -278,9 +306,10 @@ pub fn serve(
     loop {
         let envelope = match read_frame(&mut stream, &mut body) {
             Ok(Some(envelope)) => envelope,
-            Ok(None) => return Ok(()),
+            Ok(None) if session.is_some() => return Ok(()),
+            Ok(None) => return Err(Close::Closed),
             Err(Close::Io(error))
-                if !authenticated
+                if session.is_none()
                     && matches!(
                         error.kind(),
                         io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
@@ -291,9 +320,35 @@ pub fn serve(
             Err(close) => return Err(close),
         };
 
-        match topic(&envelope)? {
-            "dcs.bridge.Ping" => connections.answer(id, pong(answers.liveness())),
-            other => return Err(Close::Unauthenticated(other.to_owned())),
+        match (topic(&envelope)?, &*session) {
+            ("dcs.bridge.Ping", _) => {
+                connections.answer(id, pong(answers.liveness()));
+                answered += 1;
+            }
+            ("dcs.bridge.Auth", None) => {
+                let auth = Auth::decode(payload(&envelope)).map_err(Close::Payload)?;
+                match answers.authenticate(auth.token.as_bytes()) {
+                    Ok(opened) => {
+                        connections.answer(id, auth_result(Ok(())));
+                        // After the answer, on the same channel: the
+                        // consumer reads its result before any record.
+                        connections.authenticated(id);
+                        // The deadline is lifted: an authenticated peer may
+                        // be silent for as long as it likes.
+                        stream.until = None;
+                        stream.stream.set_read_timeout(None)?;
+                        *session = Some(opened);
+                    }
+                    Err(error) => {
+                        connections.answer(id, auth_result(Err(error)));
+                        answered += 1;
+                        wait_for_flush(written, answered);
+                        return Err(Close::AuthFailed(error));
+                    }
+                }
+            }
+            (other, None) => return Err(Close::Unauthenticated(other.to_owned())),
+            (other, Some(_)) => return Err(Close::Unrouted(other.to_owned())),
         }
     }
 }
@@ -325,6 +380,23 @@ impl Read for Deadline {
     }
 }
 
+/// The payload's bytes, which [`topic`] has already established are there.
+fn payload(envelope: &Envelope) -> &[u8] {
+    envelope
+        .payload
+        .as_ref()
+        .map_or(&[], |payload| &payload.value[..])
+}
+
+/// Wait until the drainer has written `frames` frames, or [`FLUSH_WAIT`]
+/// has passed.
+fn wait_for_flush(written: &AtomicU64, frames: u64) {
+    let deadline = Instant::now() + FLUSH_WAIT;
+    while written.load(Ordering::Acquire) < frames && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(1));
+    }
+}
+
 /// Run a reader to its end and shut the socket down after it, whatever the
 /// end was: a clean close, a refusal, or a fault caught at this thread.
 ///
@@ -333,20 +405,31 @@ impl Read for Deadline {
 /// thread. A panic is caught here rather than left to end the thread on
 /// its own so that the shutdown still happens; the panic has already been
 /// reported by the hook, and a decoder fault is one connection's, never
-/// the process's.
+/// the process's. A session that was open is reported closed, so the
+/// count behind `max_connections` comes back down.
 pub fn run(
     stream: TcpStream,
     id: ConnectionId,
     connections: Connections<Record>,
     answers: &dyn Answers,
+    written: &AtomicU64,
 ) {
+    // The session lives here rather than in `serve`, so that every way
+    // out of it, a clean close, a refusal, a socket error or a caught
+    // panic, reports the session closed: a session lost on any of those
+    // paths would hold its slot under `max_connections` for the life of
+    // the process, and eight such losses would refuse every consumer.
+    let mut session = None;
     let reading = stream.try_clone();
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match reading {
-        Ok(reading) => serve(reading, id, &connections, answers),
+        Ok(reading) => serve(reading, id, &connections, answers, written, &mut session),
         Err(error) => Err(Close::Io(error)),
     }));
     drop(outcome);
     let _ = stream.shutdown(Shutdown::Both);
+    if let Some(session) = session {
+        answers.disconnected(&session);
+    }
 }
 
 #[cfg(test)]

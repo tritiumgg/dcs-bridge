@@ -206,7 +206,8 @@ fn measure(consumers: usize, commit_capacity: usize, regime: Regime) -> Row {
 
     let drainers: Vec<_> = (0..consumers)
         .map(|_| {
-            let (_, mut consumer) = connections.attach(CONNECTION_CAPACITY);
+            let (id, mut consumer) = connections.attach(CONNECTION_CAPACITY);
+            connections.authenticated(id);
             let stop = Arc::clone(&stop);
             thread::spawn(move || {
                 loop {

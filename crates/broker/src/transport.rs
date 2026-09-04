@@ -25,7 +25,7 @@
 
 use std::io::{self, IoSlice, Write};
 use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::thread;
 
@@ -182,19 +182,24 @@ fn accept_loop(
         // Raised by the reader when it has closed the socket, so the
         // drainer returns from an empty ring rather than parking on it.
         let closing = Arc::new(AtomicBool::new(false));
+        // Frames the drainer has put on the socket, for the reader: before
+        // authentication every one of them is an answer, and the reader
+        // counts them to know a failed result is out before it closes.
+        let written = Arc::new(AtomicU64::new(0));
         let (hand, take) = std::sync::mpsc::channel();
         let handle = {
             let flag = Arc::clone(&flag);
             let stop = Arc::clone(&stop);
             let connections = connections.clone();
             let closing = Arc::clone(&closing);
+            let written = Arc::clone(&written);
             thread::Builder::new()
                 .name("dcsbridge-conn".into())
                 .spawn(move || {
                     let Ok((id, consumer)) = take.recv() else {
                         return;
                     };
-                    let _ = serve(&mut writing, consumer, &flag, &stop, &closing);
+                    let _ = serve(&mut writing, consumer, &flag, &stop, &closing, &written);
                     // A socket that refused a write is done in both
                     // directions; the shutdown returns the reader.
                     let _ = writing.shutdown(Shutdown::Both);
@@ -223,7 +228,7 @@ fn accept_loop(
             thread::Builder::new()
                 .name("dcsbridge-read".into())
                 .spawn(move || {
-                    inbound::run(reading, id, connections, &*answers);
+                    inbound::run(reading, id, connections, &*answers, &written);
                     closing.store(true, Ordering::SeqCst);
                     drainer.wake();
                 })
@@ -258,6 +263,7 @@ fn serve(
     flag: &ParkFlag,
     stop: &AtomicBool,
     closing: &AtomicBool,
+    written: &AtomicU64,
 ) -> io::Result<()> {
     let mut empty_passes = 0;
 
@@ -271,6 +277,7 @@ fn serve(
         match consumer.pop() {
             Some(record) => {
                 write_frame(stream, &record)?;
+                written.fetch_add(1, Ordering::Release);
                 empty_passes = 0;
             }
             None if closing.load(Ordering::SeqCst) => return Ok(()),
@@ -437,6 +444,33 @@ mod tests {
         Listener::spawn("127.0.0.1:0", connections, 64, Arc::new(Stub)).unwrap()
     }
 
+    /// `dcs.bridge.AuthResult` as a consumer decodes it.
+    #[derive(Clone, PartialEq, Message)]
+    struct AuthResult {
+        #[prost(bool, tag = "1")]
+        ok: bool,
+        #[prost(int32, tag = "2")]
+        error: i32,
+    }
+
+    /// Send an `Auth` carrying `secret` and read the result, which is the
+    /// next frame: nothing fans out to an unauthenticated connection, so
+    /// nothing can come between.
+    fn authenticate(client: &mut TcpStream, secret: &[u8]) -> (Envelope, AuthResult) {
+        let auth = inbound::Auth {
+            token: String::from_utf8(secret.to_vec()).unwrap(),
+        }
+        .encode_to_vec();
+        client
+            .write_all(&inbound(1, "dcs.bridge.Auth", &auth))
+            .expect("the auth is sent");
+        let frame = read_frame(client);
+        let any = frame.payload.as_ref().expect("a payload");
+        assert_eq!(any.type_url, "type.googleapis.com/dcs.bridge.AuthResult");
+        let result = AuthResult::decode(&any.value[..]).expect("the result decodes");
+        (frame, result)
+    }
+
     /// Read the handshake, which is the first frame and numbered 1.
     fn read_handshake(client: &mut TcpStream) -> Envelope {
         let frame = read_frame(client);
@@ -451,13 +485,20 @@ mod tests {
         frame
     }
 
-    /// Read the handshake, then commit numbered records, a few at a time,
-    /// until `client` has read its first record. The handshake is queued
-    /// after the connection attaches, so once it has arrived every later
-    /// commit reaches this connection; the loop is for a commit that raced
-    /// the attach. Returns the first record frame and the number it carried.
+    /// Read the handshake and authenticate, then commit numbered records, a
+    /// few at a time, until `client` has read its first record. The
+    /// `Authenticated` control is queued behind the result, so once the
+    /// result has arrived every later commit reaches this connection; the
+    /// loop is for a commit that raced it. Returns the first record frame
+    /// and the number it carried.
     fn first_frame(commit: &mut crate::fanout::Commit<Record>, client: &mut TcpStream) -> Envelope {
         read_handshake(client);
+        let (result, decoded) = authenticate(client, SECRET);
+        assert_eq!(
+            result.seq, 2,
+            "the auth result did not follow the handshake"
+        );
+        assert!(decoded.ok, "the stub refused its own secret");
         let deadline = Instant::now() + Duration::from_secs(30);
         let mut n = 0;
         client
@@ -504,8 +545,8 @@ mod tests {
 
         let first = first_frame(&mut commit, &mut client);
         assert_eq!(
-            first.seq, 2,
-            "the first record did not follow the handshake"
+            first.seq, 3,
+            "the first record did not follow the handshake and the auth result"
         );
         let mut url = TYPE_URL_PREFIX.to_vec();
         url.extend_from_slice(TOPIC);
@@ -543,12 +584,12 @@ mod tests {
         let listener = listener(connections);
 
         let mut first = client(listener.local_addr());
-        assert_eq!(first_frame(&mut commit, &mut first).seq, 2);
+        assert_eq!(first_frame(&mut commit, &mut first).seq, 3);
 
         let mut second = client(listener.local_addr());
         let on_second = first_frame(&mut commit, &mut second);
         assert_eq!(
-            on_second.seq, 2,
+            on_second.seq, 3,
             "the second connection did not start at one"
         );
 
@@ -865,6 +906,151 @@ mod tests {
             "the deadline let a trickled frame run {:?}",
             started.elapsed()
         );
+
+        drop(listener);
+        drop(writer);
+    }
+
+    /// A session is reported closed however its connection ends, a refused
+    /// message, a clean close by the peer, or a cut mid-frame, and a failed
+    /// authentication opened nothing to close: a session lost on any path
+    /// would hold its slot under `max_connections` for the process's life.
+    #[test]
+    fn a_session_is_reported_closed_however_the_connection_ends() {
+        /// The stub, counting sessions opened and closed.
+        struct Counting {
+            opened: Arc<AtomicU64>,
+            closed: Arc<AtomicU64>,
+        }
+        impl Answers for Counting {
+            fn handshake(&self) -> Record {
+                Stub.handshake()
+            }
+            fn liveness(&self) -> inbound::Liveness {
+                Stub.liveness()
+            }
+            fn authenticate(&self, secret: &[u8]) -> Result<Session, AuthError> {
+                let session = Stub.authenticate(secret)?;
+                self.opened.fetch_add(1, Ordering::SeqCst);
+                Ok(session)
+            }
+            fn disconnected(&self, _: &Session) {
+                self.closed.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        let opened = Arc::new(AtomicU64::new(0));
+        let closed = Arc::new(AtomicU64::new(0));
+        let (writer, _commit, connections) = Writer::spawn(64);
+        let listener = Listener::spawn(
+            "127.0.0.1:0",
+            connections,
+            64,
+            Arc::new(Counting {
+                opened: Arc::clone(&opened),
+                closed: Arc::clone(&closed),
+            }),
+        )
+        .unwrap();
+        let wait_closed = |n: u64| {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while closed.load(Ordering::SeqCst) < n {
+                assert!(
+                    Instant::now() < deadline,
+                    "a session was never reported closed"
+                );
+                thread::sleep(Duration::from_millis(5));
+            }
+        };
+
+        // A refused message after authentication: the broker closes.
+        let mut refused = client(listener.local_addr());
+        read_handshake(&mut refused);
+        assert!(authenticate(&mut refused, SECRET).1.ok);
+        refused
+            .write_all(&inbound(2, "dcs.builtin.Resync", &[]))
+            .expect("the frame is sent");
+        assert!(is_closed(&mut refused));
+        wait_closed(1);
+
+        // A peer that closes cleanly, and one that closes inside a frame.
+        let mut leaving = client(listener.local_addr());
+        read_handshake(&mut leaving);
+        assert!(authenticate(&mut leaving, SECRET).1.ok);
+        drop(leaving);
+        wait_closed(2);
+
+        let mut cut = client(listener.local_addr());
+        read_handshake(&mut cut);
+        assert!(authenticate(&mut cut, SECRET).1.ok);
+        cut.write_all(&[9u8, 0, 0, 0, 1])
+            .expect("half a frame is sent");
+        drop(cut);
+        wait_closed(3);
+
+        // A failed authentication opened nothing and closes nothing.
+        let mut wrong = client(listener.local_addr());
+        read_handshake(&mut wrong);
+        assert!(!authenticate(&mut wrong, b"wrong").1.ok);
+        assert!(is_closed(&mut wrong));
+        assert_eq!(opened.load(Ordering::SeqCst), 3);
+        assert_eq!(closed.load(Ordering::SeqCst), 3);
+
+        drop(listener);
+        drop(writer);
+    }
+
+    /// A wrong secret is answered with the error and then closed, with the
+    /// result on the wire before the close; a right one is answered `ok`
+    /// and the connection then receives what is fanned out, numbered
+    /// straight after the result. Until then it receives `Pong` and no
+    /// record, and a second `Auth` after success closes it.
+    #[test]
+    fn auth_is_answered_then_refused_or_admitted() {
+        let (writer, mut commit, connections) = Writer::spawn(64);
+        let listener = listener(connections);
+
+        let mut wrong = client(listener.local_addr());
+        read_handshake(&mut wrong);
+        let (frame, result) = authenticate(&mut wrong, b"wrong");
+        assert_eq!(frame.seq, 2);
+        assert_eq!(
+            result,
+            AuthResult {
+                ok: false,
+                error: AuthError::BadToken as i32
+            }
+        );
+        assert!(
+            is_closed(&mut wrong),
+            "a failed auth left the connection open"
+        );
+
+        let mut pending = client(listener.local_addr());
+        read_handshake(&mut pending);
+        commit.push(record(1));
+        pending
+            .write_all(&inbound(1, "dcs.bridge.Ping", &[]))
+            .expect("the ping is sent");
+        let frame = read_frame(&mut pending);
+        assert_eq!(
+            frame.payload.unwrap().type_url,
+            "type.googleapis.com/dcs.bridge.Pong",
+            "an unauthenticated connection received a record"
+        );
+        assert_eq!(frame.seq, 2, "the withheld record moved seq");
+
+        let (frame, result) = authenticate(&mut pending, SECRET);
+        assert_eq!(frame.seq, 3);
+        assert!(result.ok);
+        commit.push(record(2));
+        let frame = read_frame(&mut pending);
+        assert_eq!(frame.seq, 4, "the first record did not follow the result");
+        assert_eq!(value(&frame), 2);
+
+        pending
+            .write_all(&inbound(2, "dcs.bridge.Auth", &[]))
+            .expect("the second auth is sent");
+        assert!(is_closed(&mut pending), "a second auth was accepted");
 
         drop(listener);
         drop(writer);
