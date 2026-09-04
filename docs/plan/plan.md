@@ -176,12 +176,13 @@ with the schema message it addresses:
 reads. The typed replies join the addressable set at 2.16, through a fourth
 registered table the generator writes from `reply_to`; ADR 0017.
 
-**Task 2.9 lands as a sequence of seven.** The path an answer takes to the
+**Task 2.9 lands as a sequence of eight.** The path an answer takes to the
 socket is reviewable before anything reads a socket, the frame parser is
 reviewable before any thread runs it, the reader thread is reviewable with
 one message on it, the token table is reviewable before anything on the wire
 consults it, authentication is reviewable apart from the commands behind
-it, and all of it is reviewable before a live install can be given a token:
+it, the Lua call that fills the table is reviewable apart from the tool that
+uses it, and all of it is reviewable before a live install is asked to:
 
 | Branch | What it holds | Reviewable against |
 |---|---|---|
@@ -191,7 +192,8 @@ it, and all of it is reviewable before a live install can be given a token:
 | `task/2.9-4-token-table` | `Auth`, `AuthResult` and `AuthError` in the schema; the token table on the bridge and `Bridge::set_tokens`; `Bridge::authenticate`, comparing every secret in constant time, refusing an empty capability set, and holding the session count under `max_connections`; the session the reader will hold, and what it asks of the broker to open one. Unit tests; nothing on the wire changes. | SPEC §14.4's token rules, SPEC §14.3's connection cap, SPEC §5.2's `AuthResult` errors |
 | `task/2.9-5-auth` | The reader answers `Auth`: a failed result on the wire before the close, a successful one followed by the writer thread being told; fan-out withheld until then, with no gap after it. Fan-out and loopback tests. | SPEC §5.2 "Authentication is two messages" and "Handshake and order of operations" |
 | `task/2.9-6-commands` | `GetSchema` answered with an error until the hand-off; `SeqAck` consumed and counted; `SetEnabled` behind the `reload` capability, read by `Pong`. Loopback tests, one showing none of the five reaches the commit ring. | SPEC §9.5's `SeqAck` and `SetEnabled` rows, SPEC §11 "Kill switch", SPEC §5.1's `GetSchema` error |
-| `task/2.9-7-tokens-and-tail` | A provisional `shim.tokens`, retired into `configure` at 2.15; `tests/lua/tokens.lua`; `dcsb tail` reading the handshake and authenticating from `DCSB_TOKEN` or `--token-file`; README; the live-install steps, in the pull request. `STATE.md`. | SPEC §14.4 "read the token from a file or an environment variable", and the done-when |
+| `task/2.9-7-tokens` | A provisional `shim.tokens`, retired into `configure` at 2.15: a list of entries with an id, a secret and a capability list by name or number, read whole before any of it takes effect, a bad entry refused by number; `tests/lua/tokens.lua`. | SPEC §13.1's `tokens` row and SPEC §14.4's capability-set rule |
+| `task/2.9-8-tail-and-docs` | `dcsb tail` authenticating from `DCSB_TOKEN` or `--token-file`, printing the `AuthResult`'s verdict and exiting 1 on a refusal; README; the live-install steps, in the pull request. `STATE.md`. | SPEC §14.4 "read the token from a file or an environment variable", and the done-when |
 
 ### Phase 3 — Generator
 

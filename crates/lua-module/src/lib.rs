@@ -47,6 +47,12 @@ mod lua {
     /// The type tag of a number, for `luaL_checktype`.
     pub const TNUMBER: c_int = 3;
 
+    /// The type tag of a string, for `lua_type`.
+    pub const TSTRING: c_int = 4;
+
+    /// The type tag of a table, for `luaL_checktype` and `lua_type`.
+    pub const TTABLE: c_int = 5;
+
     unsafe extern "C" {
         /// Push a fresh table sized for `narr` array and `nrec` hash entries.
         pub unsafe fn lua_createtable(state: *mut c_void, narr: c_int, nrec: c_int);
@@ -107,6 +113,26 @@ mod lua {
         /// Raise unless the value at `narg` has type `t`.
         pub unsafe fn luaL_checktype(state: *mut c_void, narg: c_int, t: c_int);
 
+        /// The type tag of the value at `index`.
+        pub unsafe fn lua_type(state: *mut c_void, index: c_int) -> c_int;
+
+        /// Push `t[key]` for the table at `index`.
+        pub unsafe fn lua_getfield(state: *mut c_void, index: c_int, key: *const c_char);
+
+        /// Push `t[n]` for the table at `index`, without metamethods.
+        pub unsafe fn lua_rawgeti(state: *mut c_void, index: c_int, n: c_int);
+
+        /// The length of the table or string at `index`.
+        pub unsafe fn lua_objlen(state: *mut c_void, index: c_int) -> usize;
+
+        /// The string at `index` with its length in `len`, or null for a
+        /// value that is not a string or a number.
+        pub unsafe fn lua_tolstring(
+            state: *mut c_void,
+            index: c_int,
+            len: *mut usize,
+        ) -> *const c_char;
+
         /// The truth of the value at `index`.
         pub unsafe fn lua_toboolean(state: *mut c_void, index: c_int) -> c_int;
 
@@ -165,7 +191,7 @@ pub unsafe extern "C" fn luaopen_dcsbridge(state: *mut core::ffi::c_void) -> cor
     // value back off. Lua copies the bytes it is given, so nothing this crate
     // allocated is left for DCS's C runtime to free.
     unsafe {
-        lua::lua_createtable(state, 0, 2 + put::CALLS.len() as core::ffi::c_int);
+        lua::lua_createtable(state, 0, 3 + put::CALLS.len() as core::ffi::c_int);
         lua::lua_pushlstring(
             state,
             version.as_ptr().cast::<core::ffi::c_char>(),
@@ -179,9 +205,203 @@ pub unsafe extern "C" fn luaopen_dcsbridge(state: *mut core::ffi::c_void) -> cor
         lua::lua_setfield(state, -2, c"opens".as_ptr());
 
         put::install(state);
+        tokens::install(state);
     }
 
     1
+}
+
+/// `shim.tokens(list)`: the consumer credentials, replaced whole.
+///
+/// Provisional. The specification puts `tokens` in `Config\DCSBridge.lua`,
+/// which reaches the broker through `configure`, and `configure` does not
+/// exist yet. Until it does, a hook script hands the list to this call so
+/// that a live install has something a consumer can authenticate against.
+/// `configure` takes the key over when it arrives, and this call goes.
+#[cfg(any(unix, feature = "dcs-lua"))]
+mod tokens {
+    use core::ffi::{CStr, c_int, c_void};
+    use std::collections::HashSet;
+
+    use dcsbridge_broker::state::{Capability, Token};
+
+    use crate::lua;
+
+    /// Put `tokens` on the table at the top of the stack.
+    ///
+    /// # Safety
+    ///
+    /// `state` is live, the table is at -1, and one stack slot is free.
+    pub unsafe fn install(state: *mut c_void) {
+        // SAFETY: the push and the setfield pair, leaving the table on top.
+        unsafe {
+            lua::lua_pushcclosure(state, tokens, 0);
+            lua::lua_setfield(state, -2, c"tokens".as_ptr());
+        }
+    }
+
+    /// What a bad entry is refused with: which entry, and what about it.
+    struct Refused {
+        entry: usize,
+        why: &'static CStr,
+    }
+
+    /// `shim.tokens({ { id = 'map', secret = '...', caps = { 'read' } }, ... })`.
+    ///
+    /// Each entry is a table with an `id` string, a `secret` string, and a
+    /// `caps` list of capability names or numbers. The whole list is read
+    /// before any of it takes effect, so a bad entry leaves the table the
+    /// bridge holds as it was, and the error names the entry.
+    unsafe extern "C" fn tokens(state: *mut c_void) -> c_int {
+        // SAFETY: a Lua call. The argument is a table for the whole call,
+        // and every value pushed while reading it is popped before the
+        // read returns, so the raise below jumps past nothing on the stack
+        // that is this crate's, and past nothing on the heap: the list is
+        // dropped before the raise.
+        unsafe {
+            lua::luaL_checktype(state, 1, lua::TTABLE);
+            match read_list(state) {
+                Ok(list) => dcsbridge_broker::bridge().set_tokens(list),
+                Err(Refused { entry, why }) => {
+                    lua::luaL_error(
+                        state,
+                        c"tokens: entry %d %s".as_ptr(),
+                        entry as c_int,
+                        why.as_ptr(),
+                    );
+                    unreachable!("luaL_error does not return")
+                }
+            }
+        }
+        0
+    }
+
+    /// Read every entry of the list at argument 1.
+    ///
+    /// # Safety
+    ///
+    /// `state` is live and argument 1 is a table.
+    unsafe fn read_list(state: *mut c_void) -> Result<Vec<Token>, Refused> {
+        // SAFETY: each rawgeti pushes one value and the settop below pops it,
+        // whichever way the entry's read ends.
+        unsafe {
+            let count = lua::lua_objlen(state, 1);
+            let mut list = Vec::with_capacity(count);
+            for n in 1..=count {
+                lua::lua_rawgeti(state, 1, n as c_int);
+                let entry = read_entry(state, n);
+                lua::lua_settop(state, -2);
+                list.push(entry?);
+            }
+            Ok(list)
+        }
+    }
+
+    /// Read the entry at the top of the stack, leaving the stack as found.
+    ///
+    /// # Safety
+    ///
+    /// `state` is live and three stack slots are free.
+    unsafe fn read_entry(state: *mut c_void, entry: usize) -> Result<Token, Refused> {
+        let refused = |why: &'static CStr| Refused { entry, why };
+        // SAFETY: the entry is at -1 on entry and every push here is popped
+        // before the next field is read, so the indices below hold.
+        unsafe {
+            if lua::lua_type(state, -1) != lua::TTABLE {
+                return Err(refused(c"is not a table"));
+            }
+            let id = field_string(state, c"id").ok_or_else(|| refused(c"has no id string"))?;
+            let secret =
+                field_string(state, c"secret").ok_or_else(|| refused(c"has no secret string"))?;
+            if secret.is_empty() {
+                return Err(refused(c"has an empty secret"));
+            }
+
+            lua::lua_getfield(state, -1, c"caps".as_ptr());
+            let caps = read_caps(state);
+            lua::lua_settop(state, -2);
+            let caps =
+                caps.ok_or_else(|| refused(c"has no caps list of read, command or reload"))?;
+
+            Ok(Token {
+                id: String::from_utf8_lossy(&id).into_owned(),
+                secret,
+                caps,
+            })
+        }
+    }
+
+    /// The string field `key` of the table at -1, or `None` for anything
+    /// else. Leaves the stack as found.
+    ///
+    /// # Safety
+    ///
+    /// `state` is live, a table is at -1, and one stack slot is free.
+    unsafe fn field_string(state: *mut c_void, key: &CStr) -> Option<Vec<u8>> {
+        // SAFETY: the getfield pushes one value and the settop pops it; the
+        // bytes are copied out before the pop, because Lua owns them.
+        unsafe {
+            lua::lua_getfield(state, -1, key.as_ptr());
+            let value = if lua::lua_type(state, -1) == lua::TSTRING {
+                let mut len = 0;
+                let s = lua::lua_tolstring(state, -1, &mut len);
+                Some(core::slice::from_raw_parts(s.cast::<u8>(), len).to_vec())
+            } else {
+                None
+            };
+            lua::lua_settop(state, -2);
+            value
+        }
+    }
+
+    /// The capability list at -1: each element a name or the schema's
+    /// number for it. `None` for anything else, or an unknown member.
+    /// Leaves the stack as found.
+    ///
+    /// # Safety
+    ///
+    /// `state` is live, the list is at -1, and one stack slot is free.
+    unsafe fn read_caps(state: *mut c_void) -> Option<HashSet<Capability>> {
+        // SAFETY: each rawgeti pushes one value and is popped before the
+        // next, and the bytes read are Lua's for that span.
+        unsafe {
+            if lua::lua_type(state, -1) != lua::TTABLE {
+                return None;
+            }
+            let mut caps = HashSet::new();
+            for n in 1..=lua::lua_objlen(state, -1) {
+                lua::lua_rawgeti(state, -1, n as c_int);
+                let cap = match lua::lua_type(state, -1) {
+                    lua::TSTRING => {
+                        let mut len = 0;
+                        let s = lua::lua_tolstring(state, -1, &mut len);
+                        match core::slice::from_raw_parts(s.cast::<u8>(), len) {
+                            b"read" => Some(Capability::Read),
+                            b"command" => Some(Capability::Command),
+                            b"reload" => Some(Capability::Reload),
+                            _ => None,
+                        }
+                    }
+                    lua::TNUMBER => {
+                        let n = lua::lua_tonumber(state, -1);
+                        if n == 1.0 {
+                            Some(Capability::Read)
+                        } else if n == 2.0 {
+                            Some(Capability::Command)
+                        } else if n == 3.0 {
+                            Some(Capability::Reload)
+                        } else {
+                            None
+                        }
+                    }
+                    _ => None,
+                };
+                lua::lua_settop(state, -2);
+                caps.insert(cap?);
+            }
+            Some(caps)
+        }
+    }
 }
 
 /// What the outbound path is started with at the first open.
