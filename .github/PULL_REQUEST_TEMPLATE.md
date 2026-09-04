@@ -47,7 +47,7 @@ With DCS: build the artifacts, install them into the write directory,
 edit any files (say which and the exact edit), then what to do in DCS,
 with a Verify after each thing the tester should see.
 
-Not covered: every part of the done-when these steps do not reach, and
+Not covered: every part of the task's completion condition these steps do not reach, and
 where that gap is recorded (STATE.md, an issue, the plan).
 -->
 

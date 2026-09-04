@@ -395,9 +395,9 @@ fn put_padded_varint(gap: &mut [u8], mut v: u64) {
     debug_assert_eq!(v, 0, "the length outgrew its gap");
 }
 
-/// The done-when is that a stock library decodes the output, so these tests
-/// decode through `prost` rather than through a decoder written beside the
-/// encoder, which would share its misreadings.
+/// What these tests prove is that a stock library decodes the output, so
+/// they decode through `prost` rather than through a decoder written beside
+/// the encoder, which would share its misreadings.
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -660,8 +660,8 @@ mod tests {
         assert_eq!(decode(e.commit().unwrap()).seq, [3, 1, 2]);
     }
 
-    /// The done-when's second half: the length in front of a nested message
-    /// is padded to the gap's width, and a stock decoder reads it anyway.
+    /// The length in front of a nested message is padded to the gap's width,
+    /// and a stock decoder reads it anyway.
     #[test]
     fn a_nested_length_is_padded_and_decodes() {
         // The product buffer, whose largest length takes three varint bytes.

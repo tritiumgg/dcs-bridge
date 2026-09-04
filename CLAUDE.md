@@ -98,6 +98,9 @@ when the build ships, and a comment reading "task 1.3" then points at nothing.
 Comments, error messages and the README say what the code does and why it is
 that way; where a choice needs an argument, they cite the decision record that
 holds it. Task IDs belong in `STATE.md`, the plan and `docs/audit.md`.
+Neither does the word "done-when": it is the plan's word for a task's
+completion condition and retires with the plan. A test comment says what the
+test proves.
 
 A dated document may name a task, because it says what was true on its date and
 that stays true. A decision record and a commit message are both dated, and a

@@ -465,8 +465,8 @@ mod tests {
         }
     }
 
-    /// The done-when's first two thirds: a ring takes exactly the records it
-    /// was sized for, and gives them back oldest first.
+    /// A ring takes exactly the records it was sized for, and gives them
+    /// back oldest first.
     #[test]
     fn fills_to_capacity_and_drains_in_order() {
         let (mut producer, mut consumer) = Ring::split(4);
@@ -495,8 +495,8 @@ mod tests {
         );
     }
 
-    /// The done-when's last third, and the drop policy itself: the oldest
-    /// records go, the newest stay, and the count says how many went.
+    /// The drop policy itself: the oldest records go, the newest stay, and
+    /// the count says how many went.
     #[test]
     fn overflow_evicts_the_oldest_and_counts_it() {
         let (mut producer, mut consumer) = Ring::split(4);

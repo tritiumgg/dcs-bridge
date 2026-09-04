@@ -1,6 +1,6 @@
 # Cargo build output. tools/mkimplib.sh writes the generated import library
 # here too, and tools/mkschema.sh the compiled schema, so this is needed from
-# the first run rather than from task 1.1.
+# the first run rather than from the first cargo build.
 /target/
 
 # Local agent settings. .claude/settings.json is shared; this is not.
