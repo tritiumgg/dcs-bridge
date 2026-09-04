@@ -26,10 +26,10 @@ broken. Empty this when the task closes.*
 
 ## Just finished
 
-- **2.7** — `Any` wrapper, per-connection `seq`, the listener, a frame per
-  record; `commit` queues and returns a boolean. PRs #27 to #31. ADR 0014.
 - **2.C1** — `dcsb tail` over clap and prost; a stalled socket's evictions
   read as a `seq` gap in a loopback test. PRs #32 and #33; #33 carries the live steps.
+- **hooks** — seven hooks enforce the frozen specs, shell rules, commit format
+  and STATE.md stamp; "done-when" kept out of code. PRs #43 to #46. Agent-verified.
 
 *The last three at most, one line each. Git log holds the rest.*
 
