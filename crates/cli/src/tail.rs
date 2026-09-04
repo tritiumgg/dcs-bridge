@@ -51,6 +51,58 @@ pub struct Summary {
     pub gaps: u64,
     /// Records the skips add up to.
     pub dropped: u64,
+    /// The bridge answered the token with an error, and closed after it.
+    pub refused: bool,
+}
+
+/// `dcs.bridge.Auth`: the token's secret and nothing else.
+#[derive(Clone, PartialEq, Message)]
+struct Auth {
+    #[prost(string, tag = "1")]
+    token: String,
+}
+
+/// `dcs.bridge.AuthResult`, as the bridge answers an `Auth`.
+#[derive(Clone, PartialEq, Message)]
+struct AuthResult {
+    #[prost(bool, tag = "1")]
+    ok: bool,
+    #[prost(int32, tag = "2")]
+    error: i32,
+}
+
+/// The one frame `tail` sends: an `Auth` carrying `secret`, as the first
+/// frame on the connection, numbered 1.
+///
+/// The handshake arrives from the bridge unasked and the result answers
+/// this; both print as frames like any other, and the records follow.
+pub fn auth_frame(secret: &str) -> Vec<u8> {
+    let envelope = Envelope {
+        seq: 1,
+        epoch: None,
+        mission_time: None,
+        payload: Some(prost_types::Any {
+            type_url: format!("{TYPE_URL_PREFIX}dcs.bridge.Auth"),
+            value: Auth {
+                token: secret.to_owned(),
+            }
+            .encode_to_vec(),
+        }),
+    };
+    let body = envelope.encode_to_vec();
+    let mut bytes = (body.len() as u32).to_le_bytes().to_vec();
+    bytes.extend(body);
+    bytes
+}
+
+/// The name the schema gives an `AuthError` number.
+fn auth_error_name(error: i32) -> &'static str {
+    match error {
+        1 => "BAD_TOKEN",
+        2 => "EMPTY_CAPABILITY_SET",
+        3 => "SERVER_FULL",
+        _ => "UNSPECIFIED",
+    }
 }
 
 /// Read one frame, or `None` at a clean end of stream.
@@ -138,6 +190,9 @@ pub fn run(mut reader: impl Read, mut out: impl Write) -> io::Result<Summary> {
             writeln!(out, "seq {} after {last_seq}: out of order", envelope.seq)?;
         }
 
+        if let Some(result) = auth_result(&envelope) {
+            summary.refused |= !result.ok;
+        }
         write_frame_line(&mut out, &envelope)?;
         out.flush()?;
         last_seq = envelope.seq;
@@ -147,8 +202,19 @@ pub fn run(mut reader: impl Read, mut out: impl Write) -> io::Result<Summary> {
     Ok(summary)
 }
 
+/// The `AuthResult` a frame carries, if it is one.
+fn auth_result(envelope: &Envelope) -> Option<AuthResult> {
+    let any = envelope.payload.as_ref()?;
+    if any.type_url.strip_prefix(TYPE_URL_PREFIX) != Some("dcs.bridge.AuthResult") {
+        return None;
+    }
+    AuthResult::decode(&any.value[..]).ok()
+}
+
 /// One line per frame: `seq`, the topic and the payload's size, then the
-/// epoch and mission time only when the frame carries them.
+/// epoch and mission time only when the frame carries them. An `AuthResult`
+/// says whether the token was accepted, because that is the one record a
+/// person watching needs the inside of.
 fn write_frame_line(out: &mut impl Write, envelope: &Envelope) -> io::Result<()> {
     write!(out, "seq={}", envelope.seq)?;
     match &envelope.payload {
@@ -160,6 +226,13 @@ fn write_frame_line(out: &mut impl Write, envelope: &Envelope) -> io::Result<()>
             write!(out, " topic={topic} bytes={}", any.value.len())?;
         }
         None => write!(out, " topic=- bytes=0")?,
+    }
+    if let Some(result) = auth_result(envelope) {
+        if result.ok {
+            write!(out, " ok=true")?;
+        } else {
+            write!(out, " ok=false error={}", auth_error_name(result.error))?;
+        }
     }
     if let Some(epoch) = envelope.epoch {
         write!(out, " epoch={epoch}")?;
@@ -217,7 +290,8 @@ mod tests {
             Summary {
                 frames: 3,
                 gaps: 1,
-                dropped: 2
+                dropped: 2,
+                refused: false,
             }
         );
         assert_eq!(
@@ -227,6 +301,55 @@ mod tests {
              gap: 2 records dropped between seq 2 and 5\n\
              seq=5 topic=dcs.builtin.UnitDestroyed bytes=2\n"
         );
+    }
+
+    /// An `AuthResult` prints whether the token was accepted and, refused,
+    /// which error, and a refusal is what the summary says it saw. The
+    /// `Auth` frame `tail` sends decodes to the secret it was given.
+    #[test]
+    fn an_auth_result_prints_its_verdict_and_a_refusal_is_reported() {
+        let result = |seq: u64, ok: bool, error: i32| {
+            let envelope = Envelope {
+                seq,
+                epoch: None,
+                mission_time: None,
+                payload: Some(prost_types::Any {
+                    type_url: format!("{TYPE_URL_PREFIX}dcs.bridge.AuthResult"),
+                    value: AuthResult { ok, error }.encode_to_vec(),
+                }),
+            };
+            let body = envelope.encode_to_vec();
+            let mut bytes = (body.len() as u32).to_le_bytes().to_vec();
+            bytes.extend(body);
+            bytes
+        };
+
+        let mut out = Vec::new();
+        let summary = run(&result(1, true, 0)[..], &mut out).unwrap();
+        assert!(!summary.refused);
+        assert!(
+            String::from_utf8(out)
+                .unwrap()
+                .contains("topic=dcs.bridge.AuthResult bytes=2 ok=true"),
+            "an accepted token did not print ok=true"
+        );
+
+        let mut out = Vec::new();
+        let summary = run(&result(1, false, 1)[..], &mut out).unwrap();
+        assert!(summary.refused, "a refusal was not reported");
+        assert!(
+            String::from_utf8(out)
+                .unwrap()
+                .contains(" ok=false error=BAD_TOKEN"),
+            "a refused token did not print its error"
+        );
+
+        let frame = auth_frame("hunter2");
+        let envelope = read_frame(&mut &frame[..]).unwrap().unwrap();
+        assert_eq!(envelope.seq, 1);
+        let any = envelope.payload.unwrap();
+        assert_eq!(any.type_url, format!("{TYPE_URL_PREFIX}dcs.bridge.Auth"));
+        assert_eq!(Auth::decode(&any.value[..]).unwrap().token, "hunter2");
     }
 
     /// A stream that ends between frames is a closed connection; one that
@@ -257,7 +380,6 @@ mod tests {
     /// is what lets the fanned-out burst reach this socket. The handshake
     /// and the auth result are the first two frames it reads.
     fn client(addr: SocketAddr) -> TcpStream {
-        use dcsbridge_broker::inbound;
         use dcsbridge_broker::state::{Capability, Token};
 
         dcsbridge_broker::bridge().set_tokens(vec![Token {
@@ -266,20 +388,9 @@ mod tests {
             caps: [Capability::Read].into_iter().collect(),
         }]);
         let mut stream = TcpStream::connect(addr).expect("the listener accepts");
-        let body = inbound::Envelope {
-            seq: 1,
-            payload: Some(inbound::Payload {
-                type_url: format!("{TYPE_URL_PREFIX}dcs.bridge.Auth"),
-                value: inbound::Auth {
-                    token: "tail-secret".into(),
-                }
-                .encode_to_vec(),
-            }),
-        }
-        .encode_to_vec();
-        let mut auth = (body.len() as u32).to_le_bytes().to_vec();
-        auth.extend(body);
-        stream.write_all(&auth).expect("the auth is sent");
+        stream
+            .write_all(&auth_frame("tail-secret"))
+            .expect("the auth is sent");
         stream
     }
 

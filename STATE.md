@@ -1,6 +1,6 @@
 # Working state
 
-**Last updated:** 2026-09-03
+**Last updated:** 2026-09-04
 
 The handoff between sessions. Read it first; update it before a session ends,
 not only when a task finishes. Stamp the date above each time; it carries a
@@ -18,7 +18,7 @@ is just deleted. Write entries as one or two lines, never paragraphs.
 
 ## In progress
 
-Nothing. 2.8 is closed; 2.9 is next.
+Nothing. 2.9 is closed; 2.C2 is next.
 
 *One task at most. Say what is done, what is not, and where to resume. Say what
 is committed and what is only in the working tree. Say what is knowingly
@@ -26,30 +26,30 @@ broken. Empty this when the task closes.*
 
 ## Just finished
 
+- **2.9** — handshake, auth, and the five broker-answered messages on a reader
+  thread per connection, answered through the writer thread; ADR 0018. PRs #50 to #57; #57 carries the live steps.
 - **2.8** — `begin_to` addresses a record to one connection; the acknowledgement
   is the one addressable topic until 2.16; ADR 0017. PRs #48 and #49; #49 carries the live steps.
-- **2.C1** — `dcsb tail` over clap and prost; a stalled socket's evictions
-  read as a `seq` gap in a loopback test. PRs #32 and #33; #33 carries the live steps.
 
 *The last three at most, one line each. Git log holds the rest.*
 
 ## Next
 
-**Task 2.9** — handshake, then auth, then five messages the broker answers
-itself on the reader thread: `Ping`, `Auth`, `GetSchema`, `SeqAck`,
-`SetEnabled`. The reader thread decodes them through `prost`, the one crate
-the shipped build takes; ADR 0016. Done when `Pong` answers during a
-mission-load blackout and none of the five reaches a ring.
+**Task 2.C2** — CLI `ping`: sends `Ping`, prints `Pong`'s `dcs_alive`,
+`dcs_last_heard_ms` and `bridge_enabled`. Done when it reports all three and
+still answers while the logic thread is stalled. `Ping` needs no token, so
+`ping` sends no `Auth`.
 
-**An agent verifies the ring half** from a loopback test; **a person sees the
-blackout** at an install, since only a mission load stalls the logic thread.
+**An agent verifies the fields** from a loopback test against the bridge's
+own liveness; **a person sees the stall** at an install, during a mission
+load. Until 2.11 stamps the heartbeat, a live `Pong` reads never heard from.
 
 ## After that
 
-- **2.C2** — CLI `ping`: `dcs_alive`, `dcs_last_heard_ms`, `bridge_enabled`,
-  answered while the logic thread is stalled.
 - **2.10** — `shim.schema`: opaque bytes accepted once, hashed, served by
-  `GetSchema`; the handshake omits the hash until the hand-off.
+  `GetSchema` through `Answers::schema`; the handshake carries the hash.
+- **2.C3** — CLI `schema`, which is how 2.10 is checked.
+- **2.11** — `shim.tick` stamping `Bridge::heartbeat` under the throttle.
 - **Phase 3** opens on `protoc-gen-dcsbridge-lua`, which reads the four message
   options this schema defines and splits its output by `Target`. It reads the
   plugin request through `prost-types`; ADR 0016.
@@ -100,13 +100,17 @@ entries at most: an eleventh means something here is finished, or belongs in
   starts the outbound path on `127.0.0.1:7742` with 4096-record rings, and each
   Lua state's record buffer is 1 MiB at open; `configure` owns all of it, and
   an open that cannot bind raises until then. `commit` allocates once per
-  record on the logic thread, the copy the rings share; PROBE-7 at 9.7 prices
-  it and would schedule a slab. ADR 0014. A connection drains one frame per
-  socket call, and 2.C1's live check priced that: a 20000-record single-frame
-  burst kept one record in about forty on Windows loopback with a consumer
-  that never stalled, because a push is nanoseconds and a call is tens of
-  microseconds. PR #36's one call per frame took it from seventy to forty.
-  Batching a drain pass into one call is the rest; 2.18 or 9.7 owns it, and
-  the ring size 2.15 picks should count it.
+  record on the logic thread; PROBE-7 at 9.7 prices it. ADR 0014. A connection
+  drains one frame per socket call, and 2.C1's live check found a 20000-record
+  burst keeping one record in forty on Windows loopback. Batching a drain
+  pass into one call is the rest; 2.18 or 9.7 owns it, and the ring size 2.15
+  picks should count it.
+- **What 2.9 left to 2.12, 2.13 and 2.15.** `shim.tokens` is provisional and
+  retires into `configure`, with the timeout, frame, URL and connection caps
+  from their constants. Owed with 2.15's token rotation, SPEC §17 "Broker
+  hardening": `max_unauthenticated_connections`, `auth_failures_per_min`,
+  revocation dropping sessions. `SetEnabled` without `reload` is counted, not
+  answered, until 2.13; an unknown topic after auth closes the connection
+  until 2.12 routes, which also reads the URL cap ahead of the decode.
 - **Task 7.10 does not exist.** Phase 7 runs 7.1 to 7.9 then 7.11, with no note
   explaining the gap. Retired ID or omission, unresolved.

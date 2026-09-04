@@ -77,6 +77,11 @@ Settings live in `Config\DCSBridge.lua` in the Saved Games directory. The bridge
 runs with the file absent and uses its defaults. The defaults bind the broker
 to `127.0.0.1:7742`. The full set of keys is not final.
 
+A consumer authenticates with a token: an id, a secret, and the capabilities
+the token grants, from `read`, `command` and `reload`. The `tokens` key holds
+one entry per consumer. Reading it from the file is not yet built; until then
+a hook script hands the list to the bridge with `shim.tokens`.
+
 The loader has an `ENABLED` flag. Set it to `false` to keep the bridge
 installed but inactive.
 
@@ -198,12 +203,17 @@ machine that runs DCS, or on any machine that can reach the bridge's address.
 ```
 dcsb tail                          Print each record the bridge sends.
 dcsb tail --addr 192.0.2.10:7742   Connect to a bridge on another address.
+dcsb tail --token-file token.txt   Read the token from a file instead.
 dcsb --help                        List the available commands.
 ```
 
-`tail` connects to the bridge, prints one line per record, and prints a line
-wherever the sequence numbers show that records were dropped. It runs until
-the bridge closes the connection.
+`tail` connects to the bridge, authenticates, prints one line per record, and
+prints a line wherever the sequence numbers show that records were dropped.
+It runs until the bridge closes the connection. The token's secret comes from
+the `DCSB_TOKEN` environment variable, or from the first line of the file
+`--token-file` names. It is never taken from the command line, where every
+process on the machine can read it. A refused token prints the bridge's
+answer and exits 1.
 
 `tail` is the only command built so far. These commands are planned:
 `ping`, `schema`, `send`, `doctor`, `stats`, `record`, `replay` and `mock`.
