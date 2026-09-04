@@ -52,10 +52,11 @@ jobs:
         with:
           fetch-depth: 0
 
-      # A change that touches only documents needs none of the toolchain jobs.
-      # A pull request is compared against its base; a push against the commit
-      # before it, or built in full when that commit is unknown, as after a
-      # force push. Anything else runs everything.
+      # A change that touches only documents, the agent hooks, or the scripts
+      # this job runs itself needs none of the toolchain jobs. A pull request
+      # is compared against its base; a push against the commit before it, or
+      # built in full when that commit is unknown, as after a force push.
+      # Anything else runs everything.
       - name: Does the change reach the code
         id: changed
         env:
@@ -79,6 +80,7 @@ jobs:
             for f in $(git diff --name-only "$range"); do
               case "$f" in
                 docs/*|.claude/*|*.md) ;;
+                tools/hooktest.sh|tools/ledger.sh|tools/nospecrefs.sh|tools/readmeopen.sh|tools/statecheck.sh) ;;
                 *) code=true; break ;;
               esac
             done
@@ -114,6 +116,11 @@ jobs:
         run: sh tools/ledger.sh lint
       - name: STATE.md is within budget
         run: sh tools/statecheck.sh
+
+      # A hook is a guard, and one that silently passes everything is worse
+      # than none. Each is fed what it must refuse and what it must let through.
+      - name: The hooks refuse what they exist to refuse
+        run: sh tools/hooktest.sh
 
       # buf lint is what enforces snake_case fields, the enum-name value
       # prefix and the _UNSPECIFIED zero value. ADR 0004 says why one standard
