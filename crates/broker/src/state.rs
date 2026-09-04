@@ -179,6 +179,13 @@ pub struct Bridge {
     tokens: RwLock<Vec<Token>>,
     /// Connections authenticated right now, held under `MAX_CONNECTIONS`.
     authenticated: AtomicU64,
+    /// `SeqAck` records consumed. Nothing reads the number they carry until
+    /// the replay spool exists.
+    seq_acks: AtomicU64,
+    /// Messages refused because the session's token lacked the capability
+    /// they require. `commands_rejected_total` by that reason, once stats
+    /// exist.
+    no_capability: AtomicU64,
 }
 
 /// How old the heartbeat may be for the sim to count as alive.
@@ -285,6 +292,8 @@ pub fn bridge() -> &'static Bridge {
         enabled: AtomicBool::new(true),
         tokens: RwLock::new(Vec::new()),
         authenticated: AtomicU64::new(0),
+        seq_acks: AtomicU64::new(0),
+        no_capability: AtomicU64::new(0),
     })
 }
 
@@ -311,6 +320,24 @@ impl Answers for Global {
 
     fn disconnected(&self, session: &Session) {
         bridge().disconnected(session);
+    }
+
+    /// `None`: the hand-off does not exist yet, so there is no schema to
+    /// serve and `GetSchema` is answered with the error.
+    fn schema(&self) -> Option<Record> {
+        None
+    }
+
+    fn seq_ack(&self, seq: u64) {
+        bridge().seq_ack(seq);
+    }
+
+    fn set_enabled(&self, enabled: bool) {
+        bridge().set_enabled(enabled);
+    }
+
+    fn refused_no_capability(&self, _topic: &str) {
+        bridge().no_capability.fetch_add(1, Ordering::Relaxed);
     }
 }
 
@@ -439,6 +466,28 @@ impl Bridge {
     /// The effective value of the `enabled` key.
     pub fn enabled(&self) -> bool {
         self.enabled.load(Ordering::Relaxed)
+    }
+
+    /// Set the kill switch. One atomic store; what a disabled bridge stops
+    /// is the hook driver's to stop, and it reads this to know.
+    pub fn set_enabled(&self, enabled: bool) {
+        self.enabled.store(enabled, Ordering::Relaxed);
+    }
+
+    /// A consumer reported `seq` as durably processed. Counted; the number
+    /// itself waits for the replay spool.
+    pub fn seq_ack(&self, _seq: u64) {
+        self.seq_acks.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// How many `SeqAck` records have been consumed.
+    pub fn seq_acks(&self) -> u64 {
+        self.seq_acks.load(Ordering::Relaxed)
+    }
+
+    /// How many messages were refused for a capability the token lacked.
+    pub fn no_capability(&self) -> u64 {
+        self.no_capability.load(Ordering::Relaxed)
     }
 
     /// Replace the token table whole.
@@ -752,6 +801,8 @@ mod tests {
             enabled: AtomicBool::new(true),
             tokens: RwLock::new(Vec::new()),
             authenticated: AtomicU64::new(0),
+            seq_acks: AtomicU64::new(0),
+            no_capability: AtomicU64::new(0),
         };
         assert_eq!(bridge.authenticate(b"anything"), Err(AuthError::BadToken));
 

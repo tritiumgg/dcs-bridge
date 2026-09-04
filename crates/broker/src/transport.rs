@@ -436,9 +436,64 @@ mod tests {
         }
 
         fn disconnected(&self, _: &Session) {}
+
+        fn schema(&self) -> Option<Record> {
+            None
+        }
+
+        fn seq_ack(&self, _: u64) {}
+
+        fn set_enabled(&self, _: bool) {}
+
+        fn refused_no_capability(&self, _: &str) {}
     }
 
     const SECRET: &[u8] = b"open-sesame";
+
+    /// The stub with the switch and the counters the commands land in, and
+    /// a token that carries `reload` or does not.
+    struct Switch {
+        reload: bool,
+        enabled: Arc<AtomicBool>,
+        acked: Arc<AtomicU64>,
+        refused: Arc<AtomicU64>,
+    }
+
+    impl Answers for Switch {
+        fn handshake(&self) -> Record {
+            Stub.handshake()
+        }
+        fn liveness(&self) -> inbound::Liveness {
+            inbound::Liveness {
+                enabled: self.enabled.load(Ordering::SeqCst),
+                ..Stub.liveness()
+            }
+        }
+        fn authenticate(&self, secret: &[u8]) -> Result<Session, AuthError> {
+            let session = Stub.authenticate(secret)?;
+            Ok(if self.reload {
+                session
+            } else {
+                Session {
+                    caps: [crate::state::Capability::Read].into_iter().collect(),
+                    ..session
+                }
+            })
+        }
+        fn disconnected(&self, _: &Session) {}
+        fn schema(&self) -> Option<Record> {
+            None
+        }
+        fn seq_ack(&self, seq: u64) {
+            self.acked.store(seq, Ordering::SeqCst);
+        }
+        fn set_enabled(&self, enabled: bool) {
+            self.enabled.store(enabled, Ordering::SeqCst);
+        }
+        fn refused_no_capability(&self, _: &str) {
+            self.refused.fetch_add(1, Ordering::SeqCst);
+        }
+    }
 
     fn listener(connections: crate::fanout::Connections<Record>) -> Listener {
         Listener::spawn("127.0.0.1:0", connections, 64, Arc::new(Stub)).unwrap()
@@ -749,6 +804,112 @@ mod tests {
         dcs_last_heard_ms: Option<u64>,
         #[prost(bool, tag = "3")]
         bridge_enabled: bool,
+    }
+
+    /// The three commands the broker handles itself, after authentication:
+    /// `GetSchema` is answered with the error while there is no schema,
+    /// `SeqAck` is consumed and answered by nothing, `SetEnabled` flips the
+    /// switch for a token with `reload` and is counted for one without, and
+    /// `Pong` shows the switch. None of them reaches the commit ring, and
+    /// before authentication each closes the connection.
+    #[test]
+    fn the_three_commands_are_handled_on_the_reader_and_reach_no_ring() {
+        #[derive(Clone, PartialEq, Message)]
+        struct Schema {
+            #[prost(bytes = "vec", optional, tag = "1")]
+            file_descriptor_set: Option<Vec<u8>>,
+            #[prost(string, optional, tag = "2")]
+            error: Option<String>,
+        }
+        let pong = |client: &mut TcpStream| -> Pong {
+            client
+                .write_all(&inbound(1, "dcs.bridge.Ping", &[]))
+                .expect("the ping is sent");
+            let frame = read_frame(client);
+            Pong::decode(&frame.payload.unwrap().value[..]).expect("the pong decodes")
+        };
+
+        let enabled = Arc::new(AtomicBool::new(true));
+        let acked = Arc::new(AtomicU64::new(0));
+        let refused = Arc::new(AtomicU64::new(0));
+        let switch = |reload: bool| {
+            Arc::new(Switch {
+                reload,
+                enabled: Arc::clone(&enabled),
+                acked: Arc::clone(&acked),
+                refused: Arc::clone(&refused),
+            })
+        };
+
+        let (writer, commit, connections) = Writer::spawn(64);
+        let listener = Listener::spawn("127.0.0.1:0", connections, 64, switch(true)).unwrap();
+
+        for early in [
+            "dcs.bridge.GetSchema",
+            "dcs.bridge.SeqAck",
+            "dcs.bridge.SetEnabled",
+        ] {
+            let mut offender = client(listener.local_addr());
+            read_handshake(&mut offender);
+            offender
+                .write_all(&inbound(1, early, &[]))
+                .expect("the frame is sent");
+            assert!(is_closed(&mut offender), "{early} was accepted before auth");
+        }
+
+        let mut admin = client(listener.local_addr());
+        read_handshake(&mut admin);
+        assert!(authenticate(&mut admin, SECRET).1.ok);
+
+        admin
+            .write_all(&inbound(2, "dcs.bridge.GetSchema", &[]))
+            .expect("the request is sent");
+        let frame = read_frame(&mut admin);
+        let any = frame.payload.expect("a payload");
+        assert_eq!(any.type_url, "type.googleapis.com/dcs.bridge.Schema");
+        assert_eq!(
+            Schema::decode(&any.value[..]).expect("the schema decodes"),
+            Schema {
+                file_descriptor_set: None,
+                error: Some(inbound::NO_SCHEMA.into()),
+            }
+        );
+
+        let ack = inbound::SeqAck { seq: 41 }.encode_to_vec();
+        admin
+            .write_all(&inbound(3, "dcs.bridge.SeqAck", &ack))
+            .expect("the ack is sent");
+        let off = inbound::SetEnabled { enabled: false }.encode_to_vec();
+        admin
+            .write_all(&inbound(4, "dcs.bridge.SetEnabled", &off))
+            .expect("the switch is sent");
+        // The pong follows both on the reader thread, so its answer
+        // shows their effect.
+        assert!(!pong(&mut admin).bridge_enabled, "the switch did not flip");
+        assert_eq!(acked.load(Ordering::SeqCst), 41);
+
+        assert!(commit.is_empty(), "a command reached the commit ring");
+        assert_eq!(commit.dropped(), 0);
+        drop(listener);
+        drop(writer);
+
+        let (writer, _commit, connections) = Writer::spawn(64);
+        let listener = Listener::spawn("127.0.0.1:0", connections, 64, switch(false)).unwrap();
+        let mut reader = client(listener.local_addr());
+        read_handshake(&mut reader);
+        assert!(authenticate(&mut reader, SECRET).1.ok);
+        let on = inbound::SetEnabled { enabled: true }.encode_to_vec();
+        reader
+            .write_all(&inbound(2, "dcs.bridge.SetEnabled", &on))
+            .expect("the switch is sent");
+        assert!(
+            !pong(&mut reader).bridge_enabled,
+            "a token without reload flipped the switch"
+        );
+        assert_eq!(refused.load(Ordering::SeqCst), 1);
+
+        drop(listener);
+        drop(writer);
     }
 
     /// A `Ping` is answered with a `Pong` while the logic thread commits
@@ -1075,6 +1236,12 @@ mod tests {
                 Stub.authenticate(secret)
             }
             fn disconnected(&self, _: &Session) {}
+            fn schema(&self) -> Option<Record> {
+                None
+            }
+            fn seq_ack(&self, _: u64) {}
+            fn set_enabled(&self, _: bool) {}
+            fn refused_no_capability(&self, _: &str) {}
         }
         let (writer, _commit, connections) = Writer::spawn(64);
         let listener = Listener::spawn("127.0.0.1:0", connections, 64, Arc::new(Quick)).unwrap();

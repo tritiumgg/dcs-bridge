@@ -98,6 +98,40 @@ enum AuthError {
   AUTH_ERROR_SERVER_FULL = 3;
 }
 
+// Asks for the FileDescriptorSet the broker serves. Requires
+// authentication: unauthenticated, it would disclose the whole API surface
+// to a port scan.
+message GetSchema {}
+
+// What answers a GetSchema: the compiled FileDescriptorSet the hook driver
+// handed the broker, whose SHA-256 the handshake carries. Until the hand-off
+// there is no set to serve, and error says so instead; exactly one of the
+// two is set.
+message Schema {
+  optional bytes file_descriptor_set = 1;
+  optional string error = 2;
+}
+
+// Consumer to broker: the highest seq this consumer has durably processed.
+// Consumed by the broker and answered by nothing. Nothing reads the number
+// until the replay spool ships; the record is on the wire now so that the
+// spool changes nothing on it.
+message SeqAck {
+  uint64 seq = 1;
+}
+
+// The kill switch: sets the effective value of the enabled key. Handled by
+// the broker itself and never reaches Lua, so a re-enable arrives while
+// dispatch is down. Answered by nothing; its effect is Pong's bridge_enabled.
+// It stops every record on the server, which is what a capability exists to
+// gate, so it carries reload where the other broker-handled messages carry
+// none.
+message SetEnabled {
+  option (required_capability) = CAPABILITY_RELOAD;
+
+  bool enabled = 1;
+}
+
 // The drop policy the broker applies to a record under pressure.
 //
 // Not extensible: the broker implements each member, so a new class is a

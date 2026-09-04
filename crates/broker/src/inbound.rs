@@ -27,8 +27,12 @@
 //! secret and one `AuthResult` back; after a failed one the connection is
 //! closed, once the result has reached the wire. After a successful one the
 //! writer thread is told, and records begin to fan out to the connection.
-//! What an authenticated connection may send beyond `Ping` is the next
-//! thing built, so for now any other topic closes it.
+//! Once authenticated a connection may also send the three messages the
+//! broker handles itself: `GetSchema`, answered with the schema or with why
+//! there is none; `SeqAck`, consumed and counted and answered by nothing;
+//! and `SetEnabled`, the kill switch, applied when the token carries
+//! `reload` and counted when it does not. None of them reaches a ring. Any
+//! other topic closes the connection until the rings exist to route it.
 
 use std::collections::HashSet;
 use std::io::{self, Read};
@@ -119,6 +123,16 @@ pub trait Answers: Send + Sync + 'static {
     fn authenticate(&self, secret: &[u8]) -> Result<Session, AuthError>;
     /// A session's connection has closed.
     fn disconnected(&self, session: &Session);
+    /// The schema the broker serves, or `None` until the hook driver hands
+    /// one over.
+    fn schema(&self) -> Option<Record>;
+    /// A consumer reports `seq` as the highest it has durably processed.
+    fn seq_ack(&self, seq: u64);
+    /// A consumer with the `reload` capability sets the kill switch.
+    fn set_enabled(&self, enabled: bool);
+    /// A message was refused because the session's token lacks the
+    /// capability it requires.
+    fn refused_no_capability(&self, topic: &str);
 }
 
 /// Why the reader thread closed a connection.
@@ -250,6 +264,36 @@ pub struct Auth {
     pub token: String,
 }
 
+/// `dcs.bridge.SeqAck` as the broker reads it.
+#[derive(Clone, PartialEq, Message)]
+pub struct SeqAck {
+    /// The highest `seq` the consumer has durably processed.
+    #[prost(uint64, tag = "1")]
+    pub seq: u64,
+}
+
+/// `dcs.bridge.SetEnabled` as the broker reads it.
+#[derive(Clone, PartialEq, Message)]
+pub struct SetEnabled {
+    /// The value the `enabled` key takes.
+    #[prost(bool, tag = "1")]
+    pub enabled: bool,
+}
+
+/// What `Schema` says while there is no schema to serve.
+pub const NO_SCHEMA: &str = "no schema has been handed to the broker";
+
+/// `dcs.bridge.Schema` as an envelope tail: the set, or why not.
+pub fn schema(set: Option<&[u8]>) -> Record {
+    let mut e = Encoder::with_capacity(ANSWER_BYTES + set.map_or(0, <[u8]>::len));
+    e.begin(b"dcs.bridge.Schema");
+    match set {
+        Some(set) => e.string(1, set).expect("the answer fits"),
+        None => e.string(2, NO_SCHEMA.as_bytes()).expect("the answer fits"),
+    }
+    Record::from(e.commit().expect("the answer fits"))
+}
+
 /// `dcs.bridge.AuthResult` as an envelope tail.
 pub fn auth_result(result: Result<(), AuthError>) -> Record {
     let mut e = Encoder::with_capacity(ANSWER_BYTES);
@@ -348,6 +392,24 @@ pub fn serve(
                 }
             }
             (other, None) => return Err(Close::Unauthenticated(other.to_owned())),
+            ("dcs.bridge.GetSchema", Some(_)) => {
+                connections.answer(id, schema(answers.schema().as_deref()));
+            }
+            ("dcs.bridge.SeqAck", Some(_)) => {
+                let ack = SeqAck::decode(payload(&envelope)).map_err(Close::Payload)?;
+                answers.seq_ack(ack.seq);
+            }
+            (topic @ "dcs.bridge.SetEnabled", Some(opened)) => {
+                let set = SetEnabled::decode(payload(&envelope)).map_err(Close::Payload)?;
+                // Nothing answers this, and nothing yet refuses it out loud:
+                // the `Rejected` record is a later task's, so a token
+                // without `reload` is counted and the switch is left alone.
+                if opened.caps.contains(&Capability::Reload) {
+                    answers.set_enabled(set.enabled);
+                } else {
+                    answers.refused_no_capability(topic);
+                }
+            }
             (other, Some(_)) => return Err(Close::Unrouted(other.to_owned())),
         }
     }
@@ -576,6 +638,50 @@ mod tests {
         }
         .encode_to_vec();
         assert_eq!(Auth::decode(&auth[..]).unwrap().token, "s3cret");
+    }
+
+    /// `Schema` carries the set when there is one and the error when there
+    /// is not, never both, and a set the size of a real one fits.
+    #[test]
+    fn schema_carries_the_set_or_the_error() {
+        #[derive(Clone, PartialEq, Message)]
+        struct Schema {
+            #[prost(bytes = "vec", optional, tag = "1")]
+            file_descriptor_set: Option<Vec<u8>>,
+            #[prost(string, optional, tag = "2")]
+            error: Option<String>,
+        }
+        #[derive(Clone, PartialEq, Message)]
+        struct Tail {
+            #[prost(message, optional, tag = "4")]
+            payload: Option<Payload>,
+        }
+        let decode = |tail: Record| {
+            let any = Tail::decode(&tail[..]).unwrap().payload.unwrap();
+            assert_eq!(any.type_url, "type.googleapis.com/dcs.bridge.Schema");
+            Schema::decode(&any.value[..]).unwrap()
+        };
+
+        assert_eq!(
+            decode(schema(None)),
+            Schema {
+                file_descriptor_set: None,
+                error: Some(NO_SCHEMA.into()),
+            }
+        );
+        let set = vec![0x5a; 100_000];
+        assert_eq!(
+            decode(schema(Some(&set))),
+            Schema {
+                file_descriptor_set: Some(set),
+                error: None,
+            }
+        );
+
+        let ack = SeqAck { seq: u64::MAX }.encode_to_vec();
+        assert_eq!(SeqAck::decode(&ack[..]).unwrap().seq, u64::MAX);
+        let off = SetEnabled { enabled: false }.encode_to_vec();
+        assert!(!SetEnabled::decode(&off[..]).unwrap().enabled);
     }
 
     /// `Pong` decodes to what it was given, with the age absent when the
