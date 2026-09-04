@@ -74,6 +74,41 @@ enum RejectedReason {
   REJECTED_REASON_BUSY = 4;
 }
 
+// The acknowledgement: what answers a command when no typed reply does. A
+// read that fails, a mutation that succeeds or fails, and a duplicate all
+// come back as one of these, addressed to the connection that sent the
+// command. A handler sends it with begin_to, and it is the one point-to-point
+// record the bridge itself defines, so the broker knows it by name.
+//
+// request_id and idempotency_key are optional because absence is meaningful
+// and zero is a value: a read carries the first, a mutation the second, and
+// a mutation that declares a typed reply carries both.
+message CommandAck {
+  option (record_class) = RECORD_CLASS_DURABLE;
+
+  // Set on a read, absent on a mutation.
+  optional uint64 request_id = 1;
+  // Set on a mutation, absent on a read.
+  optional string idempotency_key = 2;
+  CommandAckOutcome outcome = 3;
+  // Short, for a person reading a log. The emitting handler truncates it.
+  string detail = 4;
+}
+
+// How a command ended. A consumer that meets a member it does not know
+// treats it as FAILED.
+//
+// NEVER EMITTED at 0. Extensible, so its numbers are partitioned the way
+// Capability's are: the bridge takes 1 to 49, the built-in sets 50 to 99, and
+// an adopter numbers from 100 upward.
+enum CommandAckOutcome {
+  COMMAND_ACK_OUTCOME_UNSPECIFIED = 0;
+  COMMAND_ACK_OUTCOME_OK = 1;
+  COMMAND_ACK_OUTCOME_FAILED = 2;
+  COMMAND_ACK_OUTCOME_DUPLICATE = 3;
+  COMMAND_ACK_OUTCOME_REFUSED = 4;
+}
+
 // The four options every record carries. The generator reads them and writes
 // the class, route and capability tables the broker registers, which is how a
 // broker that holds no schema still applies drop policy, routes by target and

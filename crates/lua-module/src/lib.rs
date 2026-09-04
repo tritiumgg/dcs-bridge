@@ -44,6 +44,9 @@ mod lua {
     /// The type tag of a boolean, for `luaL_checktype`.
     pub const TBOOLEAN: c_int = 1;
 
+    /// The type tag of a number, for `luaL_checktype`.
+    pub const TNUMBER: c_int = 3;
+
     unsafe extern "C" {
         /// Push a fresh table sized for `narr` array and `nrec` hash entries.
         pub unsafe fn lua_createtable(state: *mut c_void, narr: c_int, nrec: c_int);
@@ -80,6 +83,19 @@ mod lua {
 
         /// The number at `narg`, or raise an argument error.
         pub unsafe fn luaL_checknumber(state: *mut c_void, narg: c_int) -> f64;
+
+        /// The number at `index`, or zero for anything that is not one.
+        /// Unlike `luaL_checknumber` it converts a string, so a type check
+        /// comes first where a string must not pass.
+        pub unsafe fn lua_tonumber(state: *mut c_void, index: c_int) -> f64;
+
+        /// Raise an error blaming argument `narg` with `extramsg`. Never
+        /// returns.
+        pub unsafe fn luaL_argerror(
+            state: *mut c_void,
+            narg: c_int,
+            extramsg: *const c_char,
+        ) -> c_int;
 
         /// The string at `narg` with its length in `len`, or raise.
         pub unsafe fn luaL_checklstring(
@@ -196,6 +212,7 @@ mod put {
     use core::ffi::{CStr, c_int, c_void};
 
     use dcsbridge_broker::encode::{Encoder, Error};
+    use dcsbridge_broker::fanout::ConnectionId;
 
     use crate::lua;
 
@@ -203,9 +220,27 @@ mod put {
     /// first `configure` supplies the configured value and allocates then.
     const RECORD_BYTES: usize = 1 << 20;
 
+    /// The largest connection id a Lua number carries exactly. A number is a
+    /// double, exact to 2^53, and an id past that would have lost precision
+    /// on its way out of `poll` before it ever came back here.
+    const ID_MAX: f64 = 9_007_199_254_740_992.0;
+
+    /// One Lua state's record in progress: the encoder, and where the record
+    /// goes when it commits.
+    ///
+    /// `to` is set by `begin_to`, cleared by `begin`, and taken by `commit`
+    /// on every path out of it, so an address never outlives the record it
+    /// was given for: a record left open and abandoned cannot mis-address
+    /// the next one.
+    struct Pending {
+        encoder: Encoder,
+        to: Option<ConnectionId>,
+    }
+
     /// The calls and their names on the table.
-    pub const CALLS: [(&CStr, lua::CFunction); 8] = [
+    pub const CALLS: [(&CStr, lua::CFunction); 9] = [
         (c"begin", begin),
+        (c"begin_to", begin_to),
         (c"integer", integer),
         (c"double", double),
         (c"string", string),
@@ -221,7 +256,10 @@ mod put {
     ///
     /// `state` is live, the table is at -1, and three stack slots are free.
     pub unsafe fn install(state: *mut c_void) {
-        let encoder = Box::into_raw(Box::new(Encoder::with_capacity(RECORD_BYTES)));
+        let pending = Box::into_raw(Box::new(Pending {
+            encoder: Encoder::with_capacity(RECORD_BYTES),
+            to: None,
+        }));
 
         // SAFETY: the userdata is exactly one pointer wide and lives as long
         // as the closures that hold it as their upvalue. Every push below is
@@ -229,8 +267,8 @@ mod put {
         // at -1.
         unsafe {
             let slot =
-                lua::lua_newuserdata(state, size_of::<*mut Encoder>()).cast::<*mut Encoder>();
-            slot.write(encoder);
+                lua::lua_newuserdata(state, size_of::<*mut Pending>()).cast::<*mut Pending>();
+            slot.write(pending);
 
             lua::lua_createtable(state, 0, 1);
             lua::lua_pushcclosure(state, gc, 0);
@@ -253,22 +291,32 @@ mod put {
         // SAFETY: `__gc` is called with the userdata as its one argument, and
         // it was written by `install` with a pointer from Box::into_raw.
         unsafe {
-            let slot = lua::lua_touserdata(state, 1).cast::<*mut Encoder>();
+            let slot = lua::lua_touserdata(state, 1).cast::<*mut Pending>();
             drop(Box::from_raw(slot.replace(core::ptr::null_mut())));
         }
         0
+    }
+
+    /// The calling closure's record in progress.
+    ///
+    /// # Safety
+    ///
+    /// `state` is inside a call to one of [`CALLS`], whose first upvalue is
+    /// the userdata `install` wrote.
+    unsafe fn pending<'a>(state: *mut c_void) -> &'a mut Pending {
+        // SAFETY: the caller's contract, and one Lua state runs one call at
+        // a time, so no other reference to this record is live.
+        unsafe { &mut **lua::lua_touserdata(state, lua::UPVALUE_1).cast::<*mut Pending>() }
     }
 
     /// The calling closure's encoder.
     ///
     /// # Safety
     ///
-    /// `state` is inside a call to one of [`CALLS`], whose first upvalue is
-    /// the userdata `install` wrote.
+    /// As [`pending`].
     unsafe fn encoder<'a>(state: *mut c_void) -> &'a mut Encoder {
-        // SAFETY: the caller's contract, and one Lua state runs one call at
-        // a time, so no other reference to this encoder is live.
-        unsafe { &mut **lua::lua_touserdata(state, lua::UPVALUE_1).cast::<*mut Encoder>() }
+        // SAFETY: the caller's contract.
+        unsafe { &mut pending(state).encoder }
     }
 
     /// The field number at argument 1. Anything outside a field number's
@@ -306,9 +354,10 @@ mod put {
         0
     }
 
-    /// `shim.begin(topic)`: open a record on the topic, discarding and
-    /// counting one left open. The topic names the record's type on the wire.
-    /// Whether it is a registered one is a check registration brings.
+    /// `shim.begin(topic)`: open a record on the topic for every connection,
+    /// discarding and counting one left open. The topic names the record's
+    /// type on the wire. Whether it is a registered one is a check
+    /// registration brings.
     unsafe extern "C" fn begin(state: *mut c_void) -> c_int {
         // SAFETY: a Lua call over the closure `install` built. The topic is
         // an argument, so Lua keeps it alive for the whole call.
@@ -316,7 +365,61 @@ mod put {
             let mut len = 0;
             let s = lua::luaL_checklstring(state, 1, &mut len);
             let topic = core::slice::from_raw_parts(s.cast::<u8>(), len);
-            encoder(state).begin(topic);
+            let pending = pending(state);
+            pending.to = None;
+            pending.encoder.begin(topic);
+        }
+        0
+    }
+
+    /// `shim.begin_to(conn_id, topic)`: open a record on the topic for one
+    /// connection and no other, discarding and counting one left open.
+    ///
+    /// A separate call rather than a flag on `begin`, so that an address set
+    /// by one call and read by another cannot survive an abandoned record and
+    /// mis-address the next.
+    ///
+    /// The id is a number the broker handed out, so it has to be a whole
+    /// number from one, and one a double still carries exactly; anything else
+    /// is an argument error. A string is refused too, where Lua would have
+    /// converted it: an id is never text.
+    ///
+    /// A topic that is neither a reply nor the acknowledgement is refused,
+    /// counted, and raised as an error naming the topic, with no record
+    /// opened: the generator only addresses what the schema marks, so the
+    /// call is hand-written Lua, and an error at the call site is what tells
+    /// its author. A record silently reaching one consumer instead of all of
+    /// them would present as missing data at every other. ADR 0017.
+    unsafe extern "C" fn begin_to(state: *mut c_void) -> c_int {
+        // SAFETY: a Lua call over the closure `install` built. Both
+        // arguments are Lua's for the whole call, and the topic is a Lua
+        // string, which Lua stores with a terminating NUL, so the pointer
+        // serves the error's `%s` as well as the slice. The registry check
+        // holds no lock by the time it answers, so the raise below jumps
+        // past nothing that needs dropping.
+        unsafe {
+            lua::luaL_checktype(state, 1, lua::TNUMBER);
+            let id = lua::lua_tonumber(state, 1);
+            if !(1.0..=ID_MAX).contains(&id) || id.fract() != 0.0 {
+                lua::luaL_argerror(state, 1, c"not a connection id".as_ptr());
+                unreachable!("luaL_argerror does not return")
+            }
+
+            let mut len = 0;
+            let s = lua::luaL_checklstring(state, 2, &mut len);
+            let topic = core::slice::from_raw_parts(s.cast::<u8>(), len);
+            if !dcsbridge_broker::bridge().addressable(topic) {
+                lua::luaL_error(
+                    state,
+                    c"begin_to refused: %s is neither a reply nor an acknowledgement".as_ptr(),
+                    s,
+                );
+                unreachable!("luaL_error does not return")
+            }
+
+            let pending = pending(state);
+            pending.encoder.begin(topic);
+            pending.to = Some(ConnectionId::from_raw(id as u64));
         }
         0
     }
@@ -376,22 +479,31 @@ mod put {
         unsafe { check(state, encoder(state).end_message()) }
     }
 
-    /// `shim.commit()`: close the record and queue it for every connection.
-    /// Returns true when the record was queued and false when it was not: a
-    /// record refused at commit is discarded and counted, and one the
-    /// outbound path could not take is counted there. A commit with no
-    /// record open is a defect and raises.
+    /// `shim.commit()`: close the record and queue it, for every connection
+    /// or for the one `begin_to` named. Returns true when the record was
+    /// queued and false when it was not: a record refused at commit is
+    /// discarded and counted, and one the outbound path could not take is
+    /// counted there. A commit with no record open is a defect and raises.
     ///
     /// Queued is not delivered. A record queued with no connection attached
-    /// is dropped on the writer thread, and one a connection's ring evicts
-    /// shows there as a gap in `seq`.
+    /// is dropped on the writer thread, one addressed to a connection that
+    /// has since closed is dropped and counted there, and one a connection's
+    /// ring evicts shows there as a gap in `seq`.
     unsafe extern "C" fn commit(state: *mut c_void) -> c_int {
         // SAFETY: a Lua call over the closure `install` built. The tail is
         // copied out of the encoder before the call returns, and nothing
         // else touches the encoder meanwhile.
         unsafe {
-            let queued = match encoder(state).commit() {
-                Ok(tail) => dcsbridge_broker::bridge().commit(tail).is_ok(),
+            let pending = pending(state);
+            // Taken before anything can raise, so the address goes with the
+            // record whether or not the record goes anywhere.
+            let to = pending.to.take();
+            let bridge = dcsbridge_broker::bridge();
+            let queued = match pending.encoder.commit() {
+                Ok(tail) => match to {
+                    Some(to) => bridge.commit_to(to, tail).is_ok(),
+                    None => bridge.commit(tail).is_ok(),
+                },
                 Err(Error::NotOpen) => raise(state, Error::NotOpen),
                 Err(_) => false,
             };

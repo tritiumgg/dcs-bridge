@@ -18,7 +18,7 @@ is just deleted. Write entries as one or two lines, never paragraphs.
 
 ## In progress
 
-Nothing. 2.C1 is closed; 2.8 is next.
+Nothing. 2.8 is closed; 2.9 is next.
 
 *One task at most. Say what is done, what is not, and where to resume. Say what
 is committed and what is only in the working tree. Say what is knowingly
@@ -26,31 +26,30 @@ broken. Empty this when the task closes.*
 
 ## Just finished
 
+- **2.8** — `begin_to` addresses a record to one connection; the acknowledgement
+  is the one addressable topic until 2.16; ADR 0017. PRs #48 and #49; #49 carries the live steps.
 - **2.C1** — `dcsb tail` over clap and prost; a stalled socket's evictions
   read as a `seq` gap in a loopback test. PRs #32 and #33; #33 carries the live steps.
-- **hooks** — seven hooks enforce the frozen specs, shell rules, commit format
-  and STATE.md stamp; "done-when" kept out of code. PRs #43 to #46. Agent-verified.
 
 *The last three at most, one line each. Git log holds the rest.*
 
 ## Next
 
-**Task 2.8** — `begin_to` and per-connection addressing; `poll` returns the
-connection id; ids unique for the process and never reused. A `begin_to` on a
-topic the schema did not mark a reply or an acknowledgement is refused and
-counted in `misaddressed_total`. Done when two `dcsb tail` sessions show a
-`begin_to` record reaching one and a `begin` record reaching both, and a
-hand-written `begin_to` on a fan-out topic is refused.
+**Task 2.9** — handshake, then auth, then five messages the broker answers
+itself on the reader thread: `Ping`, `Auth`, `GetSchema`, `SeqAck`,
+`SetEnabled`. The reader thread decodes them through `prost`, the one crate
+the shipped build takes; ADR 0016. Done when `Pong` answers during a
+mission-load blackout and none of the five reaches a ring.
 
-**An agent verifies both** with two loopback connections from a Rust test and
-a refused `begin_to` from a stock Lua; **a person repeats the two-session
-check** against an install, since no handshake exists to name a connection.
+**An agent verifies the ring half** from a loopback test; **a person sees the
+blackout** at an install, since only a mission load stalls the logic thread.
 
 ## After that
 
-- **2.9** — handshake, then auth, then the five reader-thread answers: `Ping`,
-  `Auth`, `GetSchema`, `SeqAck`, `SetEnabled`. The reader thread decodes them
-  through `prost`, the one crate the shipped build takes; ADR 0016.
+- **2.C2** — CLI `ping`: `dcs_alive`, `dcs_last_heard_ms`, `bridge_enabled`,
+  answered while the logic thread is stalled.
+- **2.10** — `shim.schema`: opaque bytes accepted once, hashed, served by
+  `GetSchema`; the handshake omits the hash until the hand-off.
 - **Phase 3** opens on `protoc-gen-dcsbridge-lua`, which reads the four message
   options this schema defines and splits its output by `Target`. It reads the
   plugin request through `prost-types`; ADR 0016.
@@ -85,7 +84,9 @@ entries at most: an eleventh means something here is finished, or belongs in
   built the carrier, `mise run lua`, and closed on that. Each row is owed by
   the task implementing what it describes: capability at 2.14, late join at
   2.17, topic filter at 2.20. The plan's 2.1 done-when reads as though all
-  seventeen run at 2.1, which none of them can.
+  seventeen run at 2.1, which none of them can. Point-to-point landed at 2.8
+  on the acknowledgement alone: `poll` returning the id is 2.12's, and the
+  typed replies join the addressable set at 2.16; ADR 0017.
 - **Task 2.2's load banner is owed by 4.1.** SPEC §13 addresses the banner to
   the Lua side and SPEC §15 has `doctor` check it. Nothing makes the DLL write
   one, and SPEC §4 leaves it no `io`. Delete this when 4.1 closes.

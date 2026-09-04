@@ -26,7 +26,7 @@ end
 
 local shim = open(path)
 for _, name in ipairs({
-  'begin', 'integer', 'double', 'string', 'boolean', 'message', 'end_message', 'commit',
+  'begin', 'begin_to', 'integer', 'double', 'string', 'boolean', 'message', 'end_message', 'commit',
 }) do
   assert(type(shim[name]) == 'function', 'shim.' .. name .. ' is missing')
 end
@@ -92,7 +92,7 @@ second.integer(1, 2)
 queued("the second table's record", second.commit())
 queued("the first table's record, after the second committed", shim.commit())
 
-print('ok  the eight put calls are on the table')
+print('ok  the nine put calls are on the table')
 print('ok  a record of every put queues, and so does an empty one')
 print('ok  a defect raises, a refused commit returns false, a begin discards')
 print('ok  two tables hold two records in progress')

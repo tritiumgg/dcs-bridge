@@ -17,7 +17,7 @@
 //! waited on: `try_lock`, with contention refused and counted, because a
 //! second thread committing is a defect rather than a case. ADR 0014.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::io;
 use std::net::{SocketAddr, ToSocketAddrs};
@@ -81,21 +81,50 @@ pub enum Capability {
     Reload = 3,
 }
 
-/// The three maps the two registrars share.
+/// The bridge's own acknowledgement record, and the one topic a record may
+/// be addressed to before any registration.
+///
+/// The broker holds no schema, so which topics are replies reaches it by
+/// registration, and the registration does not exist yet. The
+/// acknowledgement is different: it is the bridge's own message, in the
+/// bridge's own package, so the broker knows it by name. ADR 0017.
+pub const ACK_TOPIC: &str = "dcs.bridge.CommandAck";
+
+/// The maps the two registrars share.
 ///
 /// They cover different topic sets on purpose. `routes` carries inbound topics
 /// only, because routing is what an inbound record needs, while `classes` and
 /// `caps` carry every topic that crosses in either direction. So an
 /// outbound-only topic has a class and a capability and no route, and that is
-/// complete rather than missing something.
+/// complete rather than missing something. `replies` is the topics a record
+/// may be addressed to one connection on: the typed replies the schema names
+/// in a request's `reply_to`, which the acknowledgement joins by name. ADR
+/// 0017.
 ///
 /// Empty until a registrar fills it, and there is no way to fill it yet: the
-/// merge arrives with `shim.classes`, `shim.routes` and `shim.caps`.
+/// merge arrives with `shim.classes`, `shim.routes`, `shim.caps` and the
+/// reply table beside them.
 #[derive(Debug, Default)]
 pub struct Registry {
     classes: HashMap<Topic, RecordClass>,
     routes: HashMap<Topic, Target>,
     caps: HashMap<Topic, Capability>,
+    replies: HashSet<Topic>,
+}
+
+impl Registry {
+    /// Whether a record on `topic` may be addressed to one connection.
+    ///
+    /// True for the acknowledgement and for a registered typed reply, and
+    /// for nothing else: everything else fans out, and a record that reached
+    /// one consumer instead of all of them would present as missing data at
+    /// every other, which is why the broker refuses rather than trusts.
+    pub fn is_addressable(&self, topic: &[u8]) -> bool {
+        // A topic is a type name, so a topic that is not UTF-8 is registered
+        // nowhere and the lookup can say so without a copy.
+        topic == ACK_TOPIC.as_bytes()
+            || std::str::from_utf8(topic).is_ok_and(|topic| self.replies.contains(topic))
+    }
 }
 
 impl Registry {
@@ -128,6 +157,9 @@ pub struct Bridge {
     /// Held while the outbound path is being started, so two starters
     /// cannot both bind.
     starting: Mutex<()>,
+    /// Records refused at `begin_to` because their topic is neither a reply
+    /// nor the acknowledgement.
+    misaddressed: AtomicU64,
 }
 
 /// The outbound path: the writer thread, the logic thread's end of the
@@ -219,6 +251,7 @@ pub fn bridge() -> &'static Bridge {
         registry: RwLock::new(Registry::default()),
         outbound: OnceLock::new(),
         starting: Mutex::new(()),
+        misaddressed: AtomicU64::new(0),
     })
 }
 
@@ -314,6 +347,31 @@ impl Bridge {
     /// that fails every later reader on someone else's unwind would undo.
     pub fn registry(&self) -> RwLockReadGuard<'_, Registry> {
         self.registry.read().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Whether a record on `topic` may be addressed to one connection,
+    /// counting a refusal.
+    ///
+    /// The answer is a plain boolean with no lock held by the time it
+    /// returns, on purpose: the Lua side raises an error on `false`, and Lua
+    /// raises with `longjmp`, which runs no Rust drop. A read guard alive
+    /// across that jump would never release, and the first registrar to want
+    /// the write lock would wait forever on the logic thread. Taking the read
+    /// lock blocks only against a writer, and the only writers are the
+    /// registrars on this same thread, so it never waits.
+    pub fn addressable(&self, topic: &[u8]) -> bool {
+        let addressable = self.registry().is_addressable(topic);
+        if !addressable {
+            self.misaddressed.fetch_add(1, Ordering::Relaxed);
+        }
+        addressable
+    }
+
+    /// How many `begin_to` calls were refused for naming a topic that is
+    /// neither a reply nor the acknowledgement. Always hand-written Lua: the
+    /// generator addresses only what the schema marks.
+    pub fn misaddressed(&self) -> u64 {
+        self.misaddressed.load(Ordering::Relaxed)
     }
 }
 
@@ -418,6 +476,45 @@ mod tests {
                 .unwrap_or_else(|| panic!("{member} is not in {path}"));
             assert_eq!(theirs, ours, "{member} is {theirs} in the schema");
         }
+
+        // The acknowledgement is known by name, so the name has to be the
+        // schema's: the package the file declares and the message it holds.
+        let (package, message) = ACK_TOPIC
+            .rsplit_once('.')
+            .expect("the topic is a qualified name");
+        assert!(
+            schema
+                .lines()
+                .any(|line| line.trim() == format!("package {package};")),
+            "{path} does not declare package {package}"
+        );
+        assert!(
+            schema
+                .lines()
+                .any(|line| line.trim().starts_with(&format!("message {message} "))),
+            "{path} does not declare message {message}"
+        );
+    }
+
+    /// Before any registration the acknowledgement is the one addressable
+    /// topic, a fan-out topic is refused, and only the refusal is counted.
+    #[test]
+    fn the_acknowledgement_is_addressable_and_a_fan_out_topic_is_refused() {
+        let before = bridge().misaddressed();
+
+        assert!(bridge().addressable(ACK_TOPIC.as_bytes()));
+        assert_eq!(
+            bridge().misaddressed(),
+            before,
+            "an accepted address was counted"
+        );
+
+        assert!(!bridge().addressable(b"dcs.builtin.UnitDestroyed"));
+        assert!(!bridge().addressable(b""));
+        assert!(
+            bridge().misaddressed() >= before + 2,
+            "two refusals were not counted as two"
+        );
     }
 
     /// The outbound path starts once, and a record committed after that
