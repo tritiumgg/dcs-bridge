@@ -29,7 +29,7 @@ use std::time::{Duration, Instant};
 
 use crate::fanout::{Commit, ConnectionId, Writer};
 use crate::handshake;
-use crate::inbound::{Answers, Liveness};
+use crate::inbound::{Answers, AuthError, Liveness, Session};
 use crate::transport::{Listener, Record};
 
 /// A topic: the fully-qualified protobuf type name of a record's payload.
@@ -175,6 +175,10 @@ pub struct Bridge {
     heartbeat: AtomicU64,
     /// The effective value of the `enabled` key, the kill switch.
     enabled: AtomicBool,
+    /// The `tokens` key: every consumer credential, replaced whole.
+    tokens: RwLock<Vec<Token>>,
+    /// Connections authenticated right now, held under `MAX_CONNECTIONS`.
+    authenticated: AtomicU64,
 }
 
 /// How old the heartbeat may be for the sim to count as alive.
@@ -279,6 +283,8 @@ pub fn bridge() -> &'static Bridge {
         started: Instant::now(),
         heartbeat: AtomicU64::new(0),
         enabled: AtomicBool::new(true),
+        tokens: RwLock::new(Vec::new()),
+        authenticated: AtomicU64::new(0),
     })
 }
 
@@ -298,6 +304,51 @@ impl Answers for Global {
     fn liveness(&self) -> Liveness {
         bridge().liveness()
     }
+
+    fn authenticate(&self, secret: &[u8]) -> Result<Session, AuthError> {
+        bridge().authenticate(secret)
+    }
+
+    fn disconnected(&self, session: &Session) {
+        bridge().disconnected(session);
+    }
+}
+
+/// One entry of the `tokens` key: a consumer's credential.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Token {
+    /// Names the token in stats and audit lines. Never the secret.
+    pub id: String,
+    /// What a consumer presents in `Auth`.
+    pub secret: Vec<u8>,
+    /// What the token grants. A token granting nothing is refused at
+    /// `Auth`, because it is a configuration mistake and not a consumer's.
+    pub caps: HashSet<Capability>,
+}
+
+/// How many connections may be authenticated at once. The specification's
+/// default: a bot, a map, a stats collector, and headroom. The first
+/// `configure` is where the configured value arrives.
+pub const MAX_CONNECTIONS: usize = 8;
+
+/// Whether two secrets are the same, in time that depends on their lengths
+/// and on nothing else about them.
+///
+/// Every byte is compared whether or not an earlier one differed, so a
+/// wrong secret takes as long as a right one and a guess learns nothing
+/// from the clock. Two secrets of different lengths are different, and the
+/// comparison still runs over the presented one.
+fn same_secret(presented: &[u8], configured: &[u8]) -> bool {
+    let mut differ = u8::from(presented.len() != configured.len());
+    let against = if presented.len() == configured.len() {
+        configured
+    } else {
+        presented
+    };
+    for (a, b) in presented.iter().zip(against) {
+        differ |= a ^ b;
+    }
+    differ == 0
 }
 
 impl Bridge {
@@ -386,6 +437,71 @@ impl Bridge {
     /// The effective value of the `enabled` key.
     pub fn enabled(&self) -> bool {
         self.enabled.load(Ordering::Relaxed)
+    }
+
+    /// Replace the token table whole.
+    ///
+    /// Live: a connection authenticates against whatever the table holds
+    /// at that moment. A session authenticated under a token the new table
+    /// drops is not closed here; revocation is a later task's.
+    pub fn set_tokens(&self, tokens: Vec<Token>) {
+        *self.tokens.write().unwrap_or_else(PoisonError::into_inner) = tokens;
+    }
+
+    /// Match `secret` against every token and open a session on the one
+    /// that carries it.
+    ///
+    /// Every token is compared whether or not an earlier one matched, so
+    /// the time taken says nothing about which entry, if any, was right.
+    /// A match with an empty capability set is refused: the token can do
+    /// nothing, which is a configuration mistake and worth a distinct error.
+    /// A match past `MAX_CONNECTIONS` authenticated sessions is refused as
+    /// full, and the count is taken here so two racing `Auth`s cannot both
+    /// take the last slot.
+    pub fn authenticate(&self, secret: &[u8]) -> Result<Session, AuthError> {
+        let tokens = self.tokens.read().unwrap_or_else(PoisonError::into_inner);
+        let mut matched = None;
+        for token in tokens.iter() {
+            if same_secret(secret, &token.secret) && matched.is_none() {
+                matched = Some(token);
+            }
+        }
+        let token = matched.ok_or(AuthError::BadToken)?;
+        if token.caps.is_empty() {
+            return Err(AuthError::EmptyCapabilitySet);
+        }
+
+        let limit = MAX_CONNECTIONS as u64;
+        let mut held = self.authenticated.load(Ordering::Relaxed);
+        loop {
+            if held >= limit {
+                return Err(AuthError::ServerFull);
+            }
+            match self.authenticated.compare_exchange_weak(
+                held,
+                held + 1,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => break,
+                Err(now) => held = now,
+            }
+        }
+
+        Ok(Session {
+            token_id: token.id.clone(),
+            caps: token.caps.clone(),
+        })
+    }
+
+    /// A session's connection has closed; its slot is free.
+    pub fn disconnected(&self, _session: &Session) {
+        self.authenticated.fetch_sub(1, Ordering::Relaxed);
+    }
+
+    /// How many connections are authenticated right now.
+    pub fn authenticated(&self) -> u64 {
+        self.authenticated.load(Ordering::Relaxed)
     }
 
     /// Queue an envelope tail for every connection.
@@ -553,7 +669,13 @@ mod tests {
         let schema =
             std::fs::read_to_string(path).unwrap_or_else(|e| panic!("could not read {path}: {e}"));
 
-        let pairs: [(&str, i32); 9] = [
+        let pairs: [(&str, i32); 12] = [
+            ("AUTH_ERROR_BAD_TOKEN", AuthError::BadToken as i32),
+            (
+                "AUTH_ERROR_EMPTY_CAPABILITY_SET",
+                AuthError::EmptyCapabilitySet as i32,
+            ),
+            ("AUTH_ERROR_SERVER_FULL", AuthError::ServerFull as i32),
             ("RECORD_CLASS_DURABLE", RecordClass::Durable as i32),
             ("RECORD_CLASS_LOSSY", RecordClass::Lossy as i32),
             ("RECORD_CLASS_COMMAND", RecordClass::Command as i32),
@@ -592,6 +714,81 @@ mod tests {
                 "{path} does not declare message {message}"
             );
         }
+    }
+
+    /// A secret no token carries is a bad token, a token granting nothing
+    /// is refused as such, the count of sessions is held under the cap and
+    /// comes back down at disconnect, and a secret of the wrong length is
+    /// wrong.
+    #[test]
+    fn authentication_matches_a_token_and_holds_the_session_count() {
+        let bridge = Bridge {
+            opens: AtomicU32::new(0),
+            registry: RwLock::new(Registry::default()),
+            outbound: OnceLock::new(),
+            starting: Mutex::new(()),
+            misaddressed: AtomicU64::new(0),
+            instance_id: 1,
+            started: Instant::now(),
+            heartbeat: AtomicU64::new(0),
+            enabled: AtomicBool::new(true),
+            tokens: RwLock::new(Vec::new()),
+            authenticated: AtomicU64::new(0),
+        };
+        assert_eq!(bridge.authenticate(b"anything"), Err(AuthError::BadToken));
+
+        bridge.set_tokens(vec![
+            Token {
+                id: "reader".into(),
+                secret: b"correct horse".to_vec(),
+                caps: [Capability::Read].into_iter().collect(),
+            },
+            Token {
+                id: "useless".into(),
+                secret: b"battery staple".to_vec(),
+                caps: HashSet::new(),
+            },
+        ]);
+        assert_eq!(
+            bridge.authenticate(b"correct hors"),
+            Err(AuthError::BadToken)
+        );
+        assert_eq!(
+            bridge.authenticate(b"correct horses"),
+            Err(AuthError::BadToken)
+        );
+        assert_eq!(
+            bridge.authenticate(b"battery staple"),
+            Err(AuthError::EmptyCapabilitySet)
+        );
+        assert_eq!(bridge.authenticated(), 0, "a refusal took a slot");
+
+        let sessions: Vec<Session> = (0..MAX_CONNECTIONS)
+            .map(|_| {
+                bridge
+                    .authenticate(b"correct horse")
+                    .expect("under the cap")
+            })
+            .collect();
+        assert_eq!(sessions[0].token_id, "reader");
+        assert_eq!(
+            sessions[0].caps,
+            [Capability::Read].into_iter().collect::<HashSet<_>>()
+        );
+        assert_eq!(
+            bridge.authenticate(b"correct horse"),
+            Err(AuthError::ServerFull)
+        );
+
+        bridge.disconnected(&sessions[0]);
+        assert!(
+            bridge.authenticate(b"correct horse").is_ok(),
+            "a freed slot was not reused"
+        );
+
+        assert!(same_secret(b"", b""));
+        assert!(!same_secret(b"a", b""));
+        assert!(!same_secret(b"", b"a"));
     }
 
     /// Before any registration the acknowledgement is the one addressable

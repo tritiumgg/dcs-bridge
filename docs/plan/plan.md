@@ -176,19 +176,22 @@ with the schema message it addresses:
 reads. The typed replies join the addressable set at 2.16, through a fourth
 registered table the generator writes from `reply_to`; ADR 0017.
 
-**Task 2.9 lands as a sequence of five.** The path an answer takes to the
+**Task 2.9 lands as a sequence of seven.** The path an answer takes to the
 socket is reviewable before anything reads a socket, the frame parser is
 reviewable before any thread runs it, the reader thread is reviewable with
-one message on it, and authentication is reviewable before a live install
-can be given a token:
+one message on it, the token table is reviewable before anything on the wire
+consults it, authentication is reviewable apart from the commands behind
+it, and all of it is reviewable before a live install can be given a token:
 
 | Branch | What it holds | Reviewable against |
 |---|---|---|
 | `task/2.9-1-answer-path` | An answer from off the logic thread reaches the writer thread through the attach channel and takes its `seq` there; the handshake as every connection's first frame, `dcs.bridge.Handshake` in the schema, `PROTOCOL_VERSION`, the instance id. Fan-out and loopback tests. ADR 0018. | SPEC §5.2 "Handshake and order of operations", ADR 0018 |
 | `task/2.9-2-inbound-frame` | `prost` inside the broker; the inbound frame: the length cap before any allocation, the envelope header decoded through `prost`, the type URL cap; `Ping` and `Pong` in the schema and `Pong` encoded; what the reader thread asks of the broker, as a trait. Unit tests over bytes. | SPEC §14.2's parser rules, SPEC §5.2's `Pong` table, ADR 0016 |
 | `task/2.9-3-reader-thread` | A reader thread per connection, a fault caught at it; `handshake_timeout_ms`; `Ping` answered with `Pong` from the heartbeat and the `enabled` key; a message before authentication other than `Ping` and `Auth` closes the connection. Loopback tests, one with the logic thread committing nothing. | SPEC §5.2 "`Pong` carries DCS liveness", SPEC §14.3's timeout, ADR 0018 |
-| `task/2.9-4-auth-and-commands` | The token table and `Bridge::set_tokens`; `Auth` and `AuthResult` with its three errors and the close after a failure; fan-out withheld until authentication; `GetSchema` answered with an error until the hand-off; `SeqAck` consumed and counted; `SetEnabled` behind the `reload` capability, read by `Pong`. Loopback tests, one showing none of the five reaches the commit ring. | SPEC §5.2 "Authentication is two messages", SPEC §9.5's `SeqAck` and `SetEnabled` rows, SPEC §11 "Kill switch" |
-| `task/2.9-5-tokens-and-tail` | A provisional `shim.tokens`, retired into `configure` at 2.15; `tests/lua/tokens.lua`; `dcsb tail` reading the handshake and authenticating from `DCSB_TOKEN` or `--token-file`; README; the live-install steps, in the pull request. `STATE.md`. | SPEC §14.4's token rules, and the done-when |
+| `task/2.9-4-token-table` | `Auth`, `AuthResult` and `AuthError` in the schema; the token table on the bridge and `Bridge::set_tokens`; `Bridge::authenticate`, comparing every secret in constant time, refusing an empty capability set, and holding the session count under `max_connections`; the session the reader will hold, and what it asks of the broker to open one. Unit tests; nothing on the wire changes. | SPEC §14.4's token rules, SPEC §14.3's connection cap, SPEC §5.2's `AuthResult` errors |
+| `task/2.9-5-auth` | The reader answers `Auth`: a failed result on the wire before the close, a successful one followed by the writer thread being told; fan-out withheld until then, with no gap after it. Fan-out and loopback tests. | SPEC §5.2 "Authentication is two messages" and "Handshake and order of operations" |
+| `task/2.9-6-commands` | `GetSchema` answered with an error until the hand-off; `SeqAck` consumed and counted; `SetEnabled` behind the `reload` capability, read by `Pong`. Loopback tests, one showing none of the five reaches the commit ring. | SPEC §9.5's `SeqAck` and `SetEnabled` rows, SPEC §11 "Kill switch", SPEC §5.1's `GetSchema` error |
+| `task/2.9-7-tokens-and-tail` | A provisional `shim.tokens`, retired into `configure` at 2.15; `tests/lua/tokens.lua`; `dcsb tail` reading the handshake and authenticating from `DCSB_TOKEN` or `--token-file`; README; the live-install steps, in the pull request. `STATE.md`. | SPEC §14.4 "read the token from a file or an environment variable", and the done-when |
 
 ### Phase 3 — Generator
 

@@ -23,9 +23,13 @@
 //! then everything else. Before authentication it may send `Ping` and
 //! `Auth` and nothing else; any other topic closes the connection, and so
 //! does a connection that has not authenticated within
-//! [`HANDSHAKE_TIMEOUT`]. Nothing can authenticate yet, so every connection
-//! is closed at the timeout: `Auth` is the next thing built.
+//! [`HANDSHAKE_TIMEOUT`]. Authentication is one `Auth` carrying the token's
+//! secret and one `AuthResult` back. The messages, the session an `Auth`
+//! opens and what the reader asks of the broker to open it are here; the
+//! reader does not send an `Auth` to the broker yet, so every connection is
+//! still closed at the timeout.
 
+use std::collections::HashSet;
 use std::io::{self, Read};
 use std::net::{Shutdown, TcpStream};
 use std::time::{Duration, Instant};
@@ -34,6 +38,7 @@ use prost::Message;
 
 use crate::encode::{Encoder, TYPE_URL_PREFIX};
 use crate::fanout::{ConnectionId, Connections};
+use crate::state::Capability;
 use crate::transport::Record;
 
 /// The most bytes a frame may claim. Read before anything is allocated for
@@ -106,6 +111,11 @@ pub trait Answers: Send + Sync + 'static {
     fn handshake_timeout(&self) -> Duration {
         HANDSHAKE_TIMEOUT
     }
+    /// Match `secret` against the configured tokens, in constant time, and
+    /// open a session on the one that carries it.
+    fn authenticate(&self, secret: &[u8]) -> Result<Session, AuthError>;
+    /// A session's connection has closed.
+    fn disconnected(&self, session: &Session);
 }
 
 /// Why the reader thread closed a connection.
@@ -195,6 +205,48 @@ pub fn pong(liveness: Liveness) -> Record {
         e.integer(2, ms as i64).expect("the answer fits");
     }
     e.boolean(3, liveness.enabled).expect("the answer fits");
+    Record::from(e.commit().expect("the answer fits"))
+}
+
+/// What a connection is once it has authenticated: which token, and what
+/// that token may do. Held by the reader thread for the connection's life.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Session {
+    /// The token's id, which names it in stats and audit lines and is never
+    /// the secret.
+    pub token_id: String,
+    /// The capabilities the token grants.
+    pub caps: HashSet<Capability>,
+}
+
+/// Why an `Auth` failed. Mirrors `dcs.bridge.AuthError`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AuthError {
+    /// No configured token carries the secret.
+    BadToken = 1,
+    /// The token matched and grants nothing.
+    EmptyCapabilitySet = 2,
+    /// `max_connections` have authenticated already.
+    ServerFull = 3,
+}
+
+/// `dcs.bridge.Auth` as the broker reads it: the token's secret and
+/// nothing else.
+#[derive(Clone, PartialEq, Message)]
+pub struct Auth {
+    /// The secret. Never logged, never echoed.
+    #[prost(string, tag = "1")]
+    pub token: String,
+}
+
+/// `dcs.bridge.AuthResult` as an envelope tail.
+pub fn auth_result(result: Result<(), AuthError>) -> Record {
+    let mut e = Encoder::with_capacity(ANSWER_BYTES);
+    e.begin(b"dcs.bridge.AuthResult");
+    e.boolean(1, result.is_ok()).expect("the answer fits");
+    if let Err(error) = result {
+        e.integer(2, error as i64).expect("the answer fits");
+    }
     Record::from(e.commit().expect("the answer fits"))
 }
 
@@ -394,6 +446,53 @@ mod tests {
             topic(&long),
             Err(Close::TypeUrlTooLong(n)) if n == MAX_TYPE_URL_BYTES + 1
         ));
+    }
+
+    /// `AuthResult` decodes to `ok` with no error, or to the error's schema
+    /// number with `ok` false, and `Auth` round-trips its secret.
+    #[test]
+    fn auth_messages_decode_as_the_schema_numbers_them() {
+        #[derive(Clone, PartialEq, Message)]
+        struct AuthResult {
+            #[prost(bool, tag = "1")]
+            ok: bool,
+            #[prost(int32, tag = "2")]
+            error: i32,
+        }
+        #[derive(Clone, PartialEq, Message)]
+        struct Tail {
+            #[prost(message, optional, tag = "4")]
+            payload: Option<Payload>,
+        }
+        let decode = |tail: Record| {
+            let any = Tail::decode(&tail[..]).unwrap().payload.unwrap();
+            assert_eq!(any.type_url, "type.googleapis.com/dcs.bridge.AuthResult");
+            AuthResult::decode(&any.value[..]).unwrap()
+        };
+
+        assert_eq!(
+            decode(auth_result(Ok(()))),
+            AuthResult { ok: true, error: 0 }
+        );
+        for error in [
+            AuthError::BadToken,
+            AuthError::EmptyCapabilitySet,
+            AuthError::ServerFull,
+        ] {
+            assert_eq!(
+                decode(auth_result(Err(error))),
+                AuthResult {
+                    ok: false,
+                    error: error as i32
+                }
+            );
+        }
+
+        let auth = Auth {
+            token: "s3cret".into(),
+        }
+        .encode_to_vec();
+        assert_eq!(Auth::decode(&auth[..]).unwrap().token, "s3cret");
     }
 
     /// `Pong` decodes to what it was given, with the age absent when the

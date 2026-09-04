@@ -341,6 +341,7 @@ mod tests {
     use super::*;
     use crate::encode::{Encoder, TYPE_URL_PREFIX};
     use crate::fanout::Writer;
+    use crate::inbound::{AuthError, Session};
     use prost::Message;
     use std::io::Read;
     use std::time::{Duration, Instant};
@@ -408,7 +409,29 @@ mod tests {
                 enabled: true,
             }
         }
+
+        /// One token, `SECRET`, with every capability.
+        fn authenticate(&self, secret: &[u8]) -> Result<Session, AuthError> {
+            if secret == SECRET {
+                Ok(Session {
+                    token_id: "stub".into(),
+                    caps: [
+                        crate::state::Capability::Read,
+                        crate::state::Capability::Command,
+                        crate::state::Capability::Reload,
+                    ]
+                    .into_iter()
+                    .collect(),
+                })
+            } else {
+                Err(AuthError::BadToken)
+            }
+        }
+
+        fn disconnected(&self, _: &Session) {}
     }
+
+    const SECRET: &[u8] = b"open-sesame";
 
     fn listener(connections: crate::fanout::Connections<Record>) -> Listener {
         Listener::spawn("127.0.0.1:0", connections, 64, Arc::new(Stub)).unwrap()
@@ -858,6 +881,10 @@ mod tests {
             fn handshake_timeout(&self) -> Duration {
                 Duration::from_millis(300)
             }
+            fn authenticate(&self, secret: &[u8]) -> Result<Session, AuthError> {
+                Stub.authenticate(secret)
+            }
+            fn disconnected(&self, _: &Session) {}
         }
         let (writer, _commit, connections) = Writer::spawn(64);
         let listener = Listener::spawn("127.0.0.1:0", connections, 64, Arc::new(Quick)).unwrap();

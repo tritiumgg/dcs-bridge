@@ -67,6 +67,37 @@ message Pong {
   bool bridge_enabled = 3;
 }
 
+// Authentication, the second thing a connection does and the other message
+// it may send before it has done so. It carries the token's secret and
+// nothing else. The broker compares it against every configured token in
+// constant time and answers with one AuthResult; after a failed one it
+// closes the connection.
+message Auth {
+  string token = 1;
+}
+
+// What answers an Auth. ok true means everything else may follow, and the
+// records the connection's capability set covers begin to arrive. ok false
+// carries why, and the connection is closed after it.
+message AuthResult {
+  bool ok = 1;
+  AuthError error = 2;
+}
+
+// Why an Auth failed.
+//
+// NEVER EMITTED at 0 on a failure. Not extensible: the broker produces every
+// member. BAD_TOKEN is a secret no configured token carries. EMPTY_CAPABILITY_SET
+// is a token that matched and can do nothing, which is a configuration mistake
+// rather than a consumer's. SERVER_FULL is max_connections authenticated
+// already.
+enum AuthError {
+  AUTH_ERROR_UNSPECIFIED = 0;
+  AUTH_ERROR_BAD_TOKEN = 1;
+  AUTH_ERROR_EMPTY_CAPABILITY_SET = 2;
+  AUTH_ERROR_SERVER_FULL = 3;
+}
+
 // The drop policy the broker applies to a record under pressure.
 //
 // Not extensible: the broker implements each member, so a new class is a
