@@ -186,9 +186,30 @@ Where the build needs to go somewhere the specifications did not anticipate,
 copy `docs/decisions/TEMPLATE.md` and number it next. `docs/audit.md` records
 what the documents disagree about. `STATE.md` is the handoff between sessions.
 
+## Hooks
+
+`.claude/hooks/` holds the checks the harness runs around an agent's tool
+calls, wired in `.claude/settings.json`. Each is POSIX `sh` with no `jq`;
+`payload.sh` parses the JSON payload with `awk` and every hook sources it.
+
+| Hook | Event | Does |
+|---|---|---|
+| `guard-spec-reads.sh` | before `Read` | refuses an unbounded read of a specification |
+| `guard-frozen-writes.sh` | before `Edit`, `Write` | refuses a write to a frozen document or `.gitattributes` |
+| `guard-bash.sh` | before `Bash` | refuses `sed -i`, `grep -P`, a bare toolchain command, `rustup`, a merge without `--ff-only`, a force push without a lease, a shell write to a frozen document, a pull request without the template's headings; asks before a push to `main`, a tag, a release, a merge |
+| `precommit.sh` | before `Bash` | before `git commit`, runs `nospecrefs.sh`, `statecheck.sh` and a portability scan of changed `.sh` files |
+| `postcommit.sh` | after `Bash` | after `git commit`, checks the message at `HEAD` against Conventional Commits |
+| `session-start.sh` | session start | prints `STATE.md`, the README's open claims and the working tree into context |
+| `check-state-stamp.sh` | stop | refuses to end a turn that changed the tree without stamping `STATE.md` today, once |
+
+A refusal exits 2 with the reason on stderr, which the agent reads. An ask
+prints a permission decision, which prompts the person at the keyboard.
+`tools/hooktest.sh` feeds each hook the payloads it must refuse and the ones
+it must pass, and `mise run docs` runs it.
+
 ## Two portability limits
 
-**`sh` on Windows.** The tools and the read guard are POSIX `sh`, resolved
+**`sh` on Windows.** The tools and the hooks are POSIX `sh`, resolved
 through Git for Windows. Without it, none of them run.
 
 **The read guard has one hole.** `PreToolUse` fires on tool calls only, so a

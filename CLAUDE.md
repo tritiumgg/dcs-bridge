@@ -22,7 +22,8 @@ vendor/lua/lua.def     the import definition for DCS's Lua
 tests/lua/             the module opened by a stock Lua 5.1, no DCS present
 tools/                 ledger.sh, luatest.sh, mkimplib.sh, mkschema.sh, readmeopen.sh, statecheck.sh
 .github/workflows/     CI, release, version bump
-.claude/               the read guard
+.claude/               hooks: the read guard, the frozen-write guard, the shell guard,
+                       the commit checks, the session start, the stop check
 ```
 
 ## `STATE.md` is the handoff between sessions
@@ -121,7 +122,7 @@ exempt, because documents cite documents.
 The ledger beside each document holds a row per claim with an anchor that
 locates the prose, so retrieval happens in `grep` and `awk` rather than in
 a context window. A `PreToolUse` hook refuses an unbounded `Read` of a
-specification.
+specification, and another refuses an edit to one.
 
 ```
 tools/ledger.sh codes                     document codes and paths
@@ -256,6 +257,13 @@ where nothing applies.
 Do these without asking: branch, commit, rebase onto `main`, push a topic
 branch, force-with-lease a topic branch that is yours, delete a branch that is
 already merged, and open a pull request with `gh`.
+
+The hooks in `.claude/hooks/` hold the rest of this section: the shell guard
+refuses a merge without `--ff-only` and a force push without a lease, and
+turns a push to `main`, a tag, a release and a pull request merge into a
+prompt for the maintainer. The commit checks run `tools/nospecrefs.sh` and
+`tools/statecheck.sh` before a commit and check the message after. `mise run
+docs` runs `tools/hooktest.sh` against every hook.
 
 **Ask first before merging a pull request, before pushing `main`, before
 rewriting history that has been pushed, and before tagging.** A small diff and

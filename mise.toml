@@ -93,9 +93,10 @@ run = "cargo xwin build --release --workspace --target x86_64-pc-windows-msvc"
 run_windows = "cargo build --release --workspace --target x86_64-pc-windows-msvc"
 
 [tasks.docs]
-description = "Lint the ledgers, hold STATE.md to its budget, list the README's open claims"
+description = "Lint the ledgers, hold STATE.md to its budget, list the README's open claims, test the hooks"
 run = [
   "sh tools/ledger.sh lint",
   "sh tools/statecheck.sh",
   "sh tools/readmeopen.sh",
+  "sh tools/hooktest.sh",
 ]

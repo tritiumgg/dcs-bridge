@@ -120,6 +120,42 @@ expect_ask guard-bash.sh "$(bash_payload 'git tag -a v0.3.0 -m x')"
 expect_ask guard-bash.sh "$(bash_payload 'gh release create v0.3.0')"
 expect_ask guard-bash.sh "$(bash_payload 'gh pr merge 12 --squash')"
 
+# precommit and postcommit ignore everything but a commit
+expect 0 precommit.sh "$(bash_payload 'git status')"
+expect 0 postcommit.sh "$(bash_payload 'git status')"
+# postcommit reads the subject at HEAD, so it runs against a throwaway
+# repository rather than this checkout, whose HEAD on a CI pull request is
+# a merge commit.
+tmp=$(mktemp -d 2>/dev/null || mktemp -d -t hooktest)
+git init -q "$tmp"
+commit_in() {
+    git -C "$tmp" -c user.name=hooktest -c user.email=hooktest@localhost -c commit.gpgsign=false \
+        commit -q --allow-empty -m "$1"
+}
+CLAUDE_PROJECT_DIR=$tmp
+commit_in 'feat(ring): take exactly the records it was sized for'
+expect 0 postcommit.sh "$(bash_payload 'git commit -m x')"
+commit_in 'bad message'
+expect 2 postcommit.sh "$(bash_payload 'git commit -m x')"
+commit_in 'feat(ring): a subject that runs on well past the seventy-two character limit of the format'
+expect 2 postcommit.sh "$(bash_payload 'git commit -m x')"
+CLAUDE_PROJECT_DIR=$ROOT
+rm -rf "$tmp"
+
+# session-start prints STATE.md on startup and nothing on compact
+out=$(printf '{"source":"startup"}' | sh "$HOOKS/session-start.sh")
+n=$((n + 1))
+case "$out" in
+    *'## STATE.md'*) ;;
+    *) printf 'FAIL session-start.sh did not print STATE.md\n' >&2; fail=1 ;;
+esac
+out=$(printf '{"source":"compact"}' | sh "$HOOKS/session-start.sh")
+n=$((n + 1))
+[ -z "$out" ] || { printf 'FAIL session-start.sh printed on compact\n' >&2; fail=1; }
+
+# check-state-stamp passes when told it already ran
+expect 0 check-state-stamp.sh '{"stop_hook_active":true}'
+
 if [ "$fail" -ne 0 ]; then
     printf '\nhook tests failed\n' >&2
     exit 1
