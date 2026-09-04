@@ -14,12 +14,18 @@
 //! taking bytes fills its own ring, which evicts and counts, and stalls nothing
 //! else. ADR 0011.
 //!
+//! A record is fanned out to every connection, or addressed to one. A reply
+//! or an acknowledgement answers the connection that sent the command, and
+//! goes to that connection's ring and no other; the writer thread pushes it
+//! there and clones nothing. So two connections see different record streams,
+//! which is why the numbering below is per connection rather than global.
+//!
 //! The writer thread numbers what it pushes. Each connection has its own
 //! `seq`, rising by one per record from one, assigned before the push and so
 //! before the ring decides whether the record stays. A record the ring evicts
-//! took its number with it, and the consumer reads the loss as a gap. Two
-//! connections see different record streams once addressing exists, so the
-//! numbering is per connection rather than global.
+//! took its number with it, and the consumer reads the loss as a gap. An
+//! addressed record moves only its own connection's `seq`, so it leaves no
+//! gap anywhere else.
 //!
 //! The ring itself has no way to say a record arrived, so the writer thread
 //! parks when the commit ring has stayed empty for a while and the logic thread
@@ -37,19 +43,41 @@ use std::sync::mpsc::TryRecvError;
 use crate::ring::{Consumer, Producer, Push, Ring};
 use crate::sync::{Arc, AtomicBool, AtomicU64, Ordering, fence, mpsc, thread};
 
-/// Names one connection for the life of the writer, and is never reused.
+/// Names one connection for the life of the process, and is never reused.
 ///
-/// Numbered from one, in the order connections attach. The rule that an id is
-/// unique for the process rather than for one writer is a later task's, and
-/// this is the counter it will draw from.
+/// Numbered from one, in the order connections attach, by a counter the
+/// writer owns that only ever rises. The process starts one writer, behind
+/// the bridge's outbound path, so a number handed out once is handed out
+/// once for the life of the process: a late answer addressed to a closed
+/// connection cannot reach a newer one, because no newer one has that
+/// number. A test binary spawns many writers and each numbers from one,
+/// which is what lets a test know the id an accepted socket was given.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct ConnectionId(u64);
 
 impl ConnectionId {
+    /// The id behind a number this writer handed out.
+    ///
+    /// Lua receives an id as a number and hands it back to address an answer,
+    /// so this is the way back. A number the writer never handed out names
+    /// no connection, and a record addressed to it is dropped and counted.
+    pub const fn from_raw(n: u64) -> Self {
+        Self(n)
+    }
+
     /// The number behind the id.
     pub fn get(self) -> u64 {
         self.0
     }
+}
+
+/// A record as the commit ring carries it: for every connection, or for one.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Addressed<T> {
+    /// The one connection the record is for, or every connection.
+    pub to: Option<ConnectionId>,
+    /// The record itself.
+    pub record: T,
 }
 
 /// A record as one connection receives it: numbered in that connection's
@@ -183,7 +211,7 @@ impl Clone for Waker {
 /// `push` takes `&mut self`, so there is one committer, and it is whoever holds
 /// this. Nothing in here blocks, allocates or waits on the writer thread.
 pub struct Commit<T> {
-    producer: Producer<T>,
+    producer: Producer<Addressed<T>>,
     waker: Waker,
 }
 
@@ -196,7 +224,27 @@ impl<T> Commit<T> {
     /// ADR 0011 accepts that until the record type is fixed and its drop cost
     /// is known.
     pub fn push(&mut self, value: T) -> Push<T> {
-        let pushed = self.producer.push(value);
+        self.push_addressed(None, value)
+    }
+
+    /// Commit a record for one connection and no other.
+    ///
+    /// The record is queued whether or not `to` is still attached: the writer
+    /// thread is the one that knows, and it drops and counts a record whose
+    /// connection is gone. Nothing here looks the connection up, so the call
+    /// costs the logic thread what `push` does.
+    pub fn push_to(&mut self, to: ConnectionId, value: T) -> Push<T> {
+        self.push_addressed(Some(to), value)
+    }
+
+    /// Push with an address, and hand back what the ring turned away as the
+    /// record alone: where it was going is nobody's concern once it is lost.
+    fn push_addressed(&mut self, to: Option<ConnectionId>, record: T) -> Push<T> {
+        let pushed = match self.producer.push(Addressed { to, record }) {
+            Push::Stored => Push::Stored,
+            Push::Evicted(lost) => Push::Evicted(lost.record),
+            Push::Refused(lost) => Push::Refused(lost.record),
+        };
         self.waker.wake_if_parked();
 
         pushed
@@ -302,6 +350,9 @@ pub struct Writer<T> {
     handle: Option<thread::JoinHandle<()>>,
     control: mpsc::Sender<Control<T>>,
     thread: thread::Thread,
+    /// Records addressed to a connection that was gone when the writer
+    /// thread reached them.
+    unaddressed: Arc<AtomicU64>,
 }
 
 impl<T: Clone + Send + 'static> Writer<T> {
@@ -322,11 +373,13 @@ impl<T: Clone + Send + 'static> Writer<T> {
         let (producer, consumer) = Ring::split(capacity);
         let (control, inbox) = mpsc::channel();
         let flag = Arc::new(ParkFlag::new());
+        let unaddressed = Arc::new(AtomicU64::new(0));
 
         let sleeping = Arc::clone(&flag);
+        let counting = Arc::clone(&unaddressed);
         let handle = thread::Builder::new()
             .name("dcsbridge-writer".into())
-            .spawn(move || Self::run(consumer, inbox, sleeping))
+            .spawn(move || Self::run(consumer, inbox, sleeping, &counting))
             .expect("the writer thread spawns");
         let thread = handle.thread().clone();
 
@@ -344,9 +397,21 @@ impl<T: Clone + Send + 'static> Writer<T> {
             handle: Some(handle),
             control,
             thread,
+            unaddressed,
         };
 
         (writer, commit, connections)
+    }
+
+    /// How many addressed records found their connection gone and were
+    /// dropped on the writer thread.
+    ///
+    /// The count is what the specification asks for a `begin_to` record whose
+    /// connection has closed: discarded, and counted. It is one number for
+    /// the writer rather than one per closed connection, because a
+    /// connection that is gone has nothing left to hold a count on.
+    pub fn unaddressed(&self) -> u64 {
+        self.unaddressed.load(Ordering::Relaxed)
     }
 
     /// The writer thread's loop.
@@ -355,7 +420,12 @@ impl<T: Clone + Send + 'static> Writer<T> {
     /// holds. Control before records, so a detached connection stops receiving
     /// at the first pass after the detach. An empty pass yields, and only after
     /// [`LOOKS_BEFORE_PARK`] empty passes in a row does the thread park.
-    fn run(mut commit: Consumer<T>, inbox: mpsc::Receiver<Control<T>>, flag: Arc<ParkFlag>) {
+    fn run(
+        mut commit: Consumer<Addressed<T>>,
+        inbox: mpsc::Receiver<Control<T>>,
+        flag: Arc<ParkFlag>,
+        unaddressed: &AtomicU64,
+    ) {
         let mut connections: Vec<Connection<T>> = Vec::new();
         let mut empty_passes = 0;
 
@@ -376,7 +446,7 @@ impl<T: Clone + Send + 'static> Writer<T> {
 
             let mut fanned = false;
             while let Some(record) = commit.pop() {
-                fan_out(&mut connections, record);
+                fan_out(&mut connections, record, unaddressed);
                 fanned = true;
             }
             if fanned {
@@ -458,14 +528,38 @@ impl<T> Connection<T> {
     }
 }
 
-/// Push one record into every connection's ring, numbered per connection.
+/// Push one record where it is addressed: into every connection's ring, or
+/// into one, numbered per connection either way.
 ///
-/// Each connection but the last gets a clone, and the last gets the record
-/// itself, so a single connection costs no clone at all. A record a ring turns
-/// away is dropped here, on the writer thread, and the ring has already counted
-/// it against that connection. With no connection attached the record is
-/// dropped and counted nowhere: there was no one to lose it.
-fn fan_out<T: Clone>(connections: &mut [Connection<T>], record: T) {
+/// Fanned out, each connection but the last gets a clone, and the last gets
+/// the record itself, so a single connection costs no clone at all. With no
+/// connection attached the record is dropped and counted nowhere: there was
+/// no one to lose it.
+///
+/// Addressed, the one connection gets the record and no other connection's
+/// `seq` moves. A connection that has detached, or a number that was never
+/// handed out, is a record with nowhere to go: dropped here and counted in
+/// `unaddressed`, because somebody sent it.
+///
+/// A record a ring turns away is dropped here, on the writer thread, and the
+/// ring has already counted it against that connection.
+fn fan_out<T: Clone>(
+    connections: &mut [Connection<T>],
+    addressed: Addressed<T>,
+    unaddressed: &AtomicU64,
+) {
+    let Addressed { to, record } = addressed;
+
+    if let Some(to) = to {
+        match connections.iter_mut().find(|held| held.id == to) {
+            Some(connection) => connection.push(record),
+            None => {
+                unaddressed.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        return;
+    }
+
     let Some((last, rest)) = connections.split_last_mut() else {
         return;
     };
@@ -654,6 +748,15 @@ mod tests {
         }
         assert_eq!(drain_until(&mut first, 5), (10..15).collect::<Vec<_>>());
 
+        // A number is never handed out twice: a connection attached after a
+        // detach takes a new one, so an answer addressed to the old
+        // connection cannot reach the new.
+        let (third_id, _third) = connections.attach(ROOMY);
+        assert!(
+            third_id > second_id,
+            "a detached id was reused: {second_id:?} then {third_id:?}"
+        );
+
         // The detach and the five pushes race on the writer thread, so how many
         // of the five reached the second ring is the scheduler's. What every
         // schedule owes is order, and nothing from before the detach going
@@ -664,6 +767,80 @@ mod tests {
             late.len() <= 5 && late.iter().zip(10..).all(|(got, want)| *got == want),
             "a detached connection received out of order: {late:?}"
         );
+    }
+
+    /// An addressed record reaches the one connection it names, numbered in
+    /// that connection's sequence, and no other connection's `seq` moves: a
+    /// reply to one consumer is not a gap at every other.
+    #[test]
+    fn an_addressed_record_reaches_one_connection_and_moves_no_other_seq() {
+        let (writer, mut commit, connections) = Writer::spawn(ROOMY);
+        let (first_id, mut first) = connections.attach(ROOMY);
+        let (_, mut second) = connections.attach(ROOMY);
+
+        commit.push(0u32);
+        commit.push_to(first_id, 1);
+        commit.push_to(first_id, 2);
+        commit.push(3);
+
+        let on_first = drain_numbered(&mut first, 4);
+        let on_second = drain_numbered(&mut second, 2);
+        assert_eq!(
+            on_first,
+            vec![
+                Numbered { seq: 1, record: 0 },
+                Numbered { seq: 2, record: 1 },
+                Numbered { seq: 3, record: 2 },
+                Numbered { seq: 4, record: 3 },
+            ],
+            "the addressed connection did not receive its records in sequence"
+        );
+        assert_eq!(
+            on_second,
+            vec![
+                Numbered { seq: 1, record: 0 },
+                Numbered { seq: 2, record: 3 },
+            ],
+            "the other connection saw the addressed records, or a gap for them"
+        );
+        assert_eq!(
+            writer.unaddressed(),
+            0,
+            "a delivered record was counted lost"
+        );
+
+        drop(writer);
+    }
+
+    /// A record addressed to a connection that has detached, or to a number
+    /// never handed out, is dropped on the writer thread and counted, and
+    /// reaches nobody else.
+    #[test]
+    fn an_addressed_record_to_a_missing_connection_is_counted_and_reaches_nobody() {
+        let (writer, mut commit, connections) = Writer::spawn(ROOMY);
+        let (gone_id, gone) = connections.attach(ROOMY);
+        let (_, mut staying) = connections.attach(ROOMY);
+        connections.detach(gone_id);
+        drop(gone);
+
+        commit.push_to(gone_id, 0u32);
+        commit.push_to(ConnectionId::from_raw(u64::MAX), 1);
+        commit.push(2);
+
+        assert_eq!(
+            drain_numbered(&mut staying, 1),
+            vec![Numbered { seq: 1, record: 2 }],
+            "a record addressed elsewhere reached the staying connection"
+        );
+        // The staying connection has the fan-out record, so the writer thread
+        // has passed both addressed records before it.
+        assert_eq!(
+            writer.unaddressed(),
+            2,
+            "two records with nowhere to go were not counted as two"
+        );
+
+        drop(writer);
     }
 
     /// A record committed with no connection attached goes nowhere, and is

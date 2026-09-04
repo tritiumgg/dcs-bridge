@@ -434,6 +434,62 @@ mod tests {
         drop(writer);
     }
 
+    /// A record addressed to one connection arrives there as its next frame,
+    /// and the other connection's next frame is the fan-out record after it
+    /// with no gap: a reply to one consumer is not missing data at another.
+    ///
+    /// The writer numbers connections from one in attach order, and the
+    /// listener attaches in accept order, so the first client is connection
+    /// one. Its first frame is read before the second connects, which is
+    /// what fixes the order.
+    #[test]
+    fn an_addressed_record_reaches_one_connection_and_leaves_no_gap_on_the_other() {
+        let (writer, mut commit, connections) = Writer::spawn(64);
+        let listener = Listener::spawn("127.0.0.1:0", connections, 64).unwrap();
+
+        let mut first = client(listener.local_addr());
+        let on_first = first_frame(&mut commit, &mut first);
+        let mut second = client(listener.local_addr());
+        let on_second = first_frame(&mut commit, &mut second);
+
+        commit.push_to(ConnectionId::from_raw(1), record(7_001));
+        commit.push(record(7_002));
+
+        // Whatever the warm-ups committed after each first frame arrives
+        // before these; read through it, and every frame on the way numbers
+        // one past the last.
+        let read_until =
+            |client: &mut TcpStream, mut seq: u64, want: i64| -> (Envelope, Vec<i64>) {
+                let mut passed = Vec::new();
+                loop {
+                    let frame = read_frame(client);
+                    assert_eq!(frame.seq, seq + 1, "seq skipped or repeated");
+                    seq = frame.seq;
+                    if value(&frame) == want {
+                        return (frame, passed);
+                    }
+                    passed.push(value(&frame));
+                }
+            };
+
+        let (addressed, _) = read_until(&mut first, on_first.seq, 7_001);
+        let (fanned, _) = read_until(&mut first, addressed.seq, 7_002);
+        assert_eq!(
+            fanned.seq,
+            addressed.seq + 1,
+            "the fan-out record did not follow the addressed one"
+        );
+
+        let (_, passed) = read_until(&mut second, on_second.seq, 7_002);
+        assert!(
+            !passed.contains(&7_001),
+            "the other connection received the addressed record"
+        );
+
+        drop(listener);
+        drop(writer);
+    }
+
     /// Dropping the listener returns its thread and every connection's, and
     /// a client that was connected reads end of stream.
     #[test]

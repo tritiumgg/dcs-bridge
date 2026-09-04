@@ -22,9 +22,11 @@ use std::fmt;
 use std::io;
 use std::net::{SocketAddr, ToSocketAddrs};
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, OnceLock, PoisonError, RwLock, RwLockReadGuard, TryLockError};
+use std::sync::{
+    Arc, Mutex, MutexGuard, OnceLock, PoisonError, RwLock, RwLockReadGuard, TryLockError,
+};
 
-use crate::fanout::{Commit, Writer};
+use crate::fanout::{Commit, ConnectionId, Writer};
 use crate::transport::{Listener, Record};
 
 /// A topic: the fully-qualified protobuf type name of a record's payload.
@@ -131,8 +133,8 @@ pub struct Bridge {
 /// The outbound path: the writer thread, the logic thread's end of the
 /// commit ring, and the listener whose connections the writer fans out to.
 pub struct Outbound {
-    /// Dropping it stops the writer thread; nothing else reaches it.
-    _writer: Writer<Record>,
+    /// Dropping it stops the writer thread, and its count is read here.
+    writer: Writer<Record>,
     commit: Mutex<Commit<Record>>,
     listener: Listener,
     contended: AtomicU64,
@@ -143,6 +145,7 @@ impl fmt::Debug for Outbound {
         f.debug_struct("Outbound")
             .field("listening", &self.listener.local_addr())
             .field("contended", &self.contended.load(Ordering::Relaxed))
+            .field("unaddressed", &self.writer.unaddressed())
             .finish_non_exhaustive()
     }
 }
@@ -157,6 +160,29 @@ impl Outbound {
     /// commit ring's producer at that moment.
     pub fn contended(&self) -> u64 {
         self.contended.load(Ordering::Relaxed)
+    }
+
+    /// How many addressed records were dropped because their connection was
+    /// gone by the time the writer thread reached them.
+    pub fn unaddressed(&self) -> u64 {
+        self.writer.unaddressed()
+    }
+
+    /// The commit ring's producer, or why not.
+    ///
+    /// Never waited on: a second thread committing is a defect rather than a
+    /// case, so contention is refused and counted. A panic under the lock
+    /// left the producer as it was; the ring itself is sound, so committing
+    /// through the poison is right.
+    fn producer(&self) -> Result<MutexGuard<'_, Commit<Record>>, CommitError> {
+        match self.commit.try_lock() {
+            Ok(commit) => Ok(commit),
+            Err(TryLockError::Poisoned(poisoned)) => Ok(poisoned.into_inner()),
+            Err(TryLockError::WouldBlock) => {
+                self.contended.fetch_add(1, Ordering::Relaxed);
+                Err(CommitError::Busy)
+            }
+        }
     }
 }
 
@@ -221,7 +247,7 @@ impl Bridge {
         let addr = listener.local_addr();
         // The lock above makes this the only setter.
         let _ = self.outbound.set(Outbound {
-            _writer: writer,
+            writer,
             commit: Mutex::new(commit),
             listener,
             contended: AtomicU64::new(0),
@@ -245,17 +271,24 @@ impl Bridge {
         let outbound = self.outbound.get().ok_or(CommitError::NotStarted)?;
         let record: Record = Arc::from(tail);
 
-        let mut commit = match outbound.commit.try_lock() {
-            Ok(commit) => commit,
-            // A panic under the lock left the producer as it was; the ring
-            // itself is sound, so committing through the poison is right.
-            Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
-            Err(TryLockError::WouldBlock) => {
-                outbound.contended.fetch_add(1, Ordering::Relaxed);
-                return Err(CommitError::Busy);
-            }
-        };
+        let mut commit = outbound.producer()?;
         drop(commit.push(record));
+        Ok(())
+    }
+
+    /// Queue an envelope tail for one connection and no other.
+    ///
+    /// Queued the same way [`commit`](Self::commit) queues, and with the same
+    /// one allocation. Whether `to` is still attached is not checked here:
+    /// the writer thread is the one that knows, and it drops and counts a
+    /// record whose connection has gone, which [`Outbound::unaddressed`]
+    /// reports. So a record addressed to a closed connection returns `Ok`.
+    pub fn commit_to(&self, to: ConnectionId, tail: &[u8]) -> Result<(), CommitError> {
+        let outbound = self.outbound.get().ok_or(CommitError::NotStarted)?;
+        let record: Record = Arc::from(tail);
+
+        let mut commit = outbound.producer()?;
+        drop(commit.push_to(to, record));
         Ok(())
     }
 
@@ -432,6 +465,22 @@ mod tests {
             .expect("the frame's body arrives");
         assert_eq!(frame, [0x08, 0x01, 0x22, 0x00], "seq 1 then the tail");
         assert_eq!(bridge().outbound().unwrap().contended(), 0);
+
+        // A record addressed to a connection that does not exist is queued,
+        // and the writer thread is where it is dropped and counted. This is
+        // the one addressed commit in the binary against the shared bridge.
+        bridge()
+            .commit_to(ConnectionId::from_raw(u64::MAX), &tail)
+            .expect("an address is not checked at commit");
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        while bridge().outbound().unwrap().unaddressed() < 1 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the record with nowhere to go was not counted"
+            );
+            std::thread::yield_now();
+        }
+        assert_eq!(bridge().outbound().unwrap().unaddressed(), 1);
     }
 
     /// The number `schema` gives `member`, out of a line reading `NAME = N;`.
