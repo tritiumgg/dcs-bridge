@@ -1,0 +1,9 @@
+# rust-analyzer reads this at the workspace root. The host-native build turns
+# the Lua module's dcs-lua feature off, the way mise.toml's tasks do; with it
+# on, the analyzer resolves DCS's lua.dll, which a machine without DCS lacks.
+# check.command matches what `mise run check` gates on.
+[cargo]
+noDefaultFeatures = true
+
+[check]
+command = "clippy"

@@ -29,6 +29,10 @@ buf = "1.72.0"
 # no symbol at load, and the lua plugin builds the interpreter from source with
 # make, which a Windows host does not have. So the tool is not installed there.
 lua = { version = "5.1", os = ["linux", "macos"] }
+# The Lua language server reads .luarc.json at the root, which pins the
+# files to Lua 5.1. Claude Code's lua-lsp plugin runs the bare name, so the
+# binary has to be on PATH; `mise activate` or `mise exec` puts it there.
+lua-language-server = "3.19.1"
 
 # --no-default-features below turns the Lua module's dcs-lua feature off, which
 # is what the host-native build is. Leaving it on links DCS's lua.dll into the
