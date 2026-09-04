@@ -11,42 +11,10 @@
 #
 # Exit 2 blocks the tool call and hands stderr to the model as the reason.
 # Exit 0 renders no decision and the normal permission flow continues.
-#
-# No jq. It is not installed by default on macOS or Windows, so the payload
-# is parsed with awk instead.
+
+. "$(dirname -- "$0")/payload.sh"
 
 CAP=${SPEC_READ_MAX_LINES:-400}
-
-payload=$(cat)
-
-parse() {
-    printf '%s' "$payload" | awk -v key="$1" '
-        {
-            # String form: "key": "value", with escaped quotes tolerated.
-            pat = "\"" key "\"[ \t]*:[ \t]*\""
-            if (match($0, pat)) {
-                rest = substr($0, RSTART + RLENGTH)
-                out = ""
-                for (i = 1; i <= length(rest); i++) {
-                    ch = substr(rest, i, 1)
-                    if (ch == "\\") { out = out substr(rest, i + 1, 1); i++; continue }
-                    if (ch == "\"") break
-                    out = out ch
-                }
-                print out
-                exit
-            }
-            # Number form: "key": 123
-            pat = "\"" key "\"[ \t]*:[ \t]*[0-9]+"
-            if (match($0, pat)) {
-                s = substr($0, RSTART, RLENGTH)
-                sub(/^.*:[ \t]*/, "", s)
-                print s
-                exit
-            }
-        }
-    '
-}
 
 tool=$(parse tool_name)
 [ "$tool" = "Read" ] || exit 0
@@ -54,9 +22,7 @@ tool=$(parse tool_name)
 path=$(parse file_path)
 [ -n "$path" ] || exit 0
 
-# Normalize separators so one pattern covers both platforms, and squeeze
-# repeats so a doubled separator cannot slip a path past the patterns below.
-norm=$(printf '%s' "$path" | tr '\\' '/' | tr -s '/')
+norm=$(normalize_path "$path")
 
 # Only the frozen specifications. The plan is 428 lines, changes weekly, and
 # its ledger drifts between regenerations, so routing reads of it through a
