@@ -223,17 +223,21 @@ ship no stopgap. 2.12 routes by the registered route map, which 2.16 fills, so
 2.16 comes first; 2.16's done-when kept the two clauses that are its own and
 gave the class-aware drop to 2.18, as `docs/audit.md` argues.
 
-**Task 2.15 lands as a sequence of four.** The model was estimated at 350
+**Task 2.15 lands as a sequence of six.** The model was estimated at 350
 lines and measured 720 with its tests, so it is cut where checking one value
-ends and applying a table begins; the two branches after it are estimated at
-about 350 each.
+ends and applying a table begins. The wiring was one branch estimated at 350
+and measured 530: the reader taking its caps from a trait call is its own
+change, and retiring `shim.tokens` deletes about 250 lines, which count, so
+the Lua call is its own branch between the Rust wiring and the first call.
 
 | Branch | What it holds | Reviewable against |
 |---|---|---|
 | `task/2.15-1-config-keys` | A `Config` with every broker-owned SPEC §13.1 key, its default and its tier; the check a value passes to be stored under a key, refusing by name and leaving the field as it was. Unit tests over values. No Lua, no wiring. 466 lines measured. | SPEC §13.1's broker-owned rows and their tiers |
-| `task/2.15-2-config-apply` | A whole table applied as one swap or refused whole: the first call over every tier, a later call over the live keys with a changed restart-tier key reported as pending, the cross-key invariants checked against effective values, unknown keys counted. Unit tests over tables. About 330 lines. | SPEC §13.2 "Applying a configuration change" |
-| `task/2.15-3-apply-live` | The live keys published to the reader, writer and connection threads by one atomic swap, and read there: timeouts, caps, thresholds, rate limits, the token table. `shim.tokens` retires and `tests/lua/tokens.lua` becomes `configure`'s. `config_keys_pending_restart`. Loopback tests that change a limit under load. | SPEC §13.2's live tier, and the done-when's "a later call changes a rate limit and refuses a ring size" |
-| `task/2.15-4-first-call` | The first `configure` allocates the rings and binds the listener, which the module open stops doing; the interface version answered and compared; the Lua `configure`; `tests/lua/configure.lua`; README `Configure`; `STATE.md` with the constants' carry-forward deleted. | SPEC §5.1 "`configure` comes first", SPEC §13.3's `interface` row, SPEC §11's broker-failure path |
+| `task/2.15-2-config-apply` | A whole table applied as one swap or refused whole: the first call over every tier, a later call over the live keys with a changed restart-tier key reported as pending, the cross-key invariants checked against effective values, unknown keys counted. Unit tests over tables. 448 lines measured, ADR 0019 among them. | SPEC §13.2 "Applying a configuration change", ADR 0019 |
+| `task/2.15-3-reader-limits` | The reader thread's handshake timeout and frame and URL caps come from one `Answers` call, asked before every read, in place of three constants; a loopback test lowers a cap under a live connection and the next frame is refused. No change in behaviour at the defaults. 258 lines measured. | SPEC §13.2's live tier |
+| `task/2.15-4-apply-live` | The bridge holds the configuration behind one atomic swap, read by every thread that decides by a live key: the reader's limits, the connection cap, the alive threshold, the kill switch, the token table. `config_keys_pending_restart` and the unknown count. `shim.tokens` writes through it. No Lua change. 270 lines measured. | SPEC §13.2's live tier, and the done-when's "a later call changes a rate limit and refuses a ring size" |
+| `task/2.15-5-lua-configure` | The Lua `configure`: a flat table with the nested `tokens` list, applied through the bridge, answering the interface version and the counts, and raising the refusal. `shim.tokens` retires and `tests/lua/tokens.lua` becomes `tests/lua/configure.lua`. The open still binds. About 350 lines. | SPEC §5.1 "`configure` takes the same shape `stats` returns", SPEC §13.3's `interface` row |
+| `task/2.15-6-first-call` | The first `configure` allocates the rings and binds the listener, which the module open stops doing; a `begin` or `commit` before it errors; README `Configure`; `STATE.md` with the constants' carry-forward deleted. About 300 lines. | SPEC §5.1 "`configure` comes first", SPEC §11's broker-failure path |
 
 **Task 2.C2 lands as one branch**, about 250 lines: `ping` sends `Ping`,
 prints the three `Pong` fields, and exits non-zero when the sim is not alive,
