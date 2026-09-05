@@ -422,9 +422,28 @@ mod tests {
         stream
     }
 
+    /// Read one frame's bytes off the socket, whole.
+    fn take_frame(client: &mut TcpStream) -> Vec<u8> {
+        client
+            .set_read_timeout(Some(Duration::from_secs(30)))
+            .expect("a read timeout is set");
+        let mut length = [0u8; 4];
+        client
+            .read_exact(&mut length)
+            .expect("a frame's length arrives");
+        let mut bytes = length.to_vec();
+        bytes.resize(4 + u32::from_le_bytes(length) as usize, 0);
+        client
+            .read_exact(&mut bytes[4..])
+            .expect("a frame's body arrives");
+        bytes
+    }
+
     /// Commit small records until `client` has a frame waiting. A record
-    /// committed before the writer thread knows the connection is not
-    /// delivered to it, and nothing outside that thread says when that is.
+    /// committed before the writer thread knows the connection has
+    /// authenticated is passed over, and nothing outside that thread says
+    /// when that is. The handshake and the auth result have to be off the
+    /// socket first, or their arrival is what this returns on.
     fn warm_up(commit: &mut Commit<Record>, client: &TcpStream) {
         let deadline = Instant::now() + Duration::from_secs(30);
         client
@@ -478,6 +497,11 @@ mod tests {
         let answers = Arc::new(dcsbridge_broker::state::Global);
         let listener = Listener::spawn("127.0.0.1:0", connections, 4, answers).unwrap();
         let mut client = client(listener.local_addr());
+        // The handshake and the auth result, kept so `tail` reads the
+        // stream from seq 1; nothing fans out to the connection before the
+        // result, so the burst waits for it.
+        let mut bytes = take_frame(&mut client);
+        bytes.extend(take_frame(&mut client));
         warm_up(&mut commit, &client);
 
         let big = record(64 << 10);
@@ -485,7 +509,7 @@ mod tests {
             drop(commit.push(Arc::clone(&big)));
         }
 
-        let bytes = drain(&mut client);
+        bytes.extend(drain(&mut client));
         drop(listener);
         drop(writer);
 
@@ -493,7 +517,8 @@ mod tests {
         let summary = run(&bytes[..], &mut out).unwrap();
         let out = String::from_utf8(out).unwrap();
 
-        assert!(summary.frames >= 1, "no frame was read");
+        assert!(!summary.refused, "the token was refused:\n{out}");
+        assert!(summary.frames >= 3, "no record was read:\n{out}");
         assert!(summary.gaps >= 1, "the stall left no gap:\n{out}");
         assert!(summary.dropped >= 1, "a gap dropped nothing:\n{out}");
         assert!(
