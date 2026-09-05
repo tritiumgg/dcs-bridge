@@ -258,17 +258,10 @@ jobs:
       #
       # rustup would update a nightly it finds installed, so the install is
       # skipped when the cached one already carries Miri.
-      - name: Miri
-        run: |
-          rustup run nightly cargo miri --version >/dev/null 2>&1 \
-            || rustup toolchain install nightly --component miri --profile minimal
-          rustup run nightly cargo miri setup
+      # The script is what `mise run miri` runs too, so what a contributor
+      # runs before a push is what this job runs after it.
       - name: Miri over the ring's and the fan-out's tests
-        # Quoted because a filter ends in a colon, which YAML would otherwise
-        # read as the start of a mapping. Two filters rather than the whole
-        # library because a state test reads the schema off disk, which Miri's
-        # isolation refuses.
-        run: "rustup run nightly cargo miri test -p dcsbridge-broker --no-default-features --lib -- ring:: fanout::"
+        run: sh tools/miri.sh
         env:
           MIRIFLAGS: -Zmiri-preemption-rate=0.1
 

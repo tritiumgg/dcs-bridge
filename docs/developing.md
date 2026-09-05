@@ -46,9 +46,11 @@ mise install
 mise run check
 ```
 
-`check` runs what CI gates a pull request on: `cargo fmt --all --check`,
-`cargo clippy -D warnings`, `cargo build`, `cargo test` and the Lua load
-below, against the host target. `mise tasks` lists the rest.
+`check` runs the host-native gate: `cargo fmt --all --check`, `cargo clippy
+-D warnings`, `cargo build`, `cargo test` and the Lua load below. `ci` runs
+everything a pull request is gated on, which adds the schema checks, the
+document checks, Loom and Miri, the last on a nightly toolchain it installs
+beside the pinned one; run it before a push. `mise tasks` lists the rest.
 
 `cargo run -p dcsb -- tail` connects to a running bridge on the module's
 default address, `127.0.0.1:7742`, and prints one line per frame and one line

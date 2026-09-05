@@ -20,7 +20,7 @@ docs/
 proto/                 the record schema. buf.yaml configures the lint
 vendor/lua/lua.def     the import definition for DCS's Lua
 tests/lua/             the module opened by a stock Lua 5.1, no DCS present
-tools/                 ledger.sh, luatest.sh, mkimplib.sh, mkschema.sh, readmeopen.sh, statecheck.sh
+tools/                 ledger.sh, luatest.sh, miri.sh, mkimplib.sh, mkschema.sh, readmeopen.sh, statecheck.sh
 .github/workflows/     CI, release, version bump
 .claude/               hooks: the read guard, the frozen-write guard, the shell guard,
                        the commit checks, the session start, the stop check
@@ -240,6 +240,17 @@ The estimates go in the plan's sequence table. A phase's remaining
 rows are cut at the start of the phase and again at each of its milestones,
 which the plan names; a milestone is something a person sees, and reaching
 one is when the rows ahead are re-measured, re-cut and re-ordered.
+
+**Review the stack locally, run `mise run ci`, then push everything once.**
+A push starts a CI run per branch, and a fix found after the push costs a
+rebase and a run for every branch above it. So a task's branches are
+finished on the machine first: one adversarial reviewer per branch, on
+Sonnet, read-only, told the claim the branch makes and asked to break it;
+every finding fixed on the branch that introduced it and the stack rebased
+down its length; then `mise run ci` on the top, which runs what the Linux
+job runs, Miri included. Only then is anything pushed, every branch at once,
+and the pull requests opened. `mise run check` alone is what a Windows host
+can run and what a mid-task commit needs; it is not what a push needs.
 
 **History is linear. Rebase, never merge-commit.** Bring a branch up to date
 with `git rebase origin/main`; the maintainer lands it with `git merge

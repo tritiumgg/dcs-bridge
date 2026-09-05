@@ -80,6 +80,18 @@ description = "Enumerate the ring's and the writer's interleavings with Loom"
 env = { RUSTFLAGS = "--cfg loom -D warnings" }
 run = "cargo test -p dcsbridge-broker --no-default-features --lib loom"
 
+[tasks.miri]
+description = "Run Miri over the ring's and the fan-out's tests, on the nightly it installs"
+run = "sh tools/miri.sh"
+
+# Everything a pull request is gated on, in the order CI runs it, so a push
+# is the last step rather than the first test. A run here that passes is a
+# CI run that passes, Windows aside; a push that starts a run which fails is
+# a run nobody needed.
+[tasks.ci]
+description = "Everything CI gates a pull request on: check, schema, docs, loom, miri"
+depends = ["check", "schema", "docs", "loom", "miri"]
+
 [tasks.bench-fanout]
 description = "Time logic-thread cost per commit against zero to eight consumers"
 run = "cargo run --release -p dcsbridge-broker --no-default-features --example fanout_cost"

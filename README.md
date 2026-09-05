@@ -232,8 +232,8 @@ mise install
 mise run check
 ```
 
-`mise run check` builds and tests the host-native build. It is the same set of
-checks CI runs on a pull request.
+`mise run check` builds and tests the host-native build. `mise run ci` runs
+every check a pull request is gated on.
 
 ### The Windows artifacts on Linux or macOS
 
