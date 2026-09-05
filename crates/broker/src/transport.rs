@@ -179,18 +179,22 @@ fn accept_loop(
         // it starts by waiting for the ring, which arrives once the writer
         // thread knows whom to wake.
         let flag = Arc::new(ParkFlag::new());
+        // Raised by the reader when it has closed the socket, so the
+        // drainer returns from an empty ring rather than parking on it.
+        let closing = Arc::new(AtomicBool::new(false));
         let (hand, take) = std::sync::mpsc::channel();
         let handle = {
             let flag = Arc::clone(&flag);
             let stop = Arc::clone(&stop);
             let connections = connections.clone();
+            let closing = Arc::clone(&closing);
             thread::Builder::new()
                 .name("dcsbridge-conn".into())
                 .spawn(move || {
                     let Ok((id, consumer)) = take.recv() else {
                         return;
                     };
-                    let _ = serve(&mut writing, consumer, &flag, &stop);
+                    let _ = serve(&mut writing, consumer, &flag, &stop, &closing);
                     // A socket that refused a write is done in both
                     // directions; the shutdown returns the reader.
                     let _ = writing.shutdown(Shutdown::Both);
@@ -199,7 +203,7 @@ fn accept_loop(
                 .expect("a connection thread spawns")
         };
 
-        let waker = Waker::new(flag, handle.thread().clone());
+        let waker = Waker::new(Arc::clone(&flag), handle.thread().clone());
         // The handshake rides the attach, so the writer thread numbers it 1
         // as it attaches the ring and nothing fanned out can come first.
         let attached: (ConnectionId, Consumer<Numbered<Record>>) =
@@ -208,13 +212,21 @@ fn accept_loop(
 
         // The reader: a second thread on the same socket, because a read
         // blocks the way a write does and neither may wait on the other. It
-        // shuts the socket down when it returns, which returns the drainer.
+        // shuts the socket down when it returns, which returns a drainer
+        // blocked in a write; a drainer parked on an empty ring is woken
+        // through its flag, since no socket event reaches a parked thread.
         let reader = {
             let connections = connections.clone();
             let answers = Arc::clone(&answers);
+            let closing = Arc::clone(&closing);
+            let drainer = Waker::new(flag, handle.thread().clone());
             thread::Builder::new()
                 .name("dcsbridge-read".into())
-                .spawn(move || inbound::run(reading, id, connections, &*answers))
+                .spawn(move || {
+                    inbound::run(reading, id, connections, &*answers);
+                    closing.store(true, Ordering::SeqCst);
+                    drainer.wake();
+                })
                 .expect("a reader thread spawns")
         };
 
@@ -238,12 +250,14 @@ fn accept_loop(
 
 /// A connection thread's loop: drain the ring into the socket, and sleep on
 /// the ring when it is empty, the way the writer thread sleeps on the commit
-/// ring. Returns when the socket refuses a write or the listener stops.
+/// ring. Returns when the socket refuses a write, the reader has closed it,
+/// or the listener stops.
 fn serve(
     stream: &mut TcpStream,
     mut consumer: Consumer<Numbered<Record>>,
     flag: &ParkFlag,
     stop: &AtomicBool,
+    closing: &AtomicBool,
 ) -> io::Result<()> {
     let mut empty_passes = 0;
 
@@ -251,18 +265,26 @@ fn serve(
         if stop.load(Ordering::SeqCst) {
             return Ok(());
         }
+        // `closing` is the reader's: it has shut the socket down, and
+        // nothing in the ring is going anywhere. Checked once the ring is
+        // empty, so what was queued before the close is still written.
         match consumer.pop() {
             Some(record) => {
                 write_frame(stream, &record)?;
                 empty_passes = 0;
             }
+            None if closing.load(Ordering::SeqCst) => return Ok(()),
             None if empty_passes < LOOKS_BEFORE_PARK => {
                 empty_passes += 1;
                 thread::yield_now();
             }
             None => {
                 empty_passes = 0;
-                flag.park_unless(|| !consumer.is_empty() || stop.load(Ordering::SeqCst));
+                flag.park_unless(|| {
+                    !consumer.is_empty()
+                        || stop.load(Ordering::SeqCst)
+                        || closing.load(Ordering::SeqCst)
+                });
             }
         }
     }
@@ -627,10 +649,15 @@ mod tests {
     }
 
     /// Whether `client` reads end of stream, or a reset, before a timeout.
+    /// A socket that refuses the timeout has already been reset under a
+    /// write, which is closed too.
     fn is_closed(client: &mut TcpStream) -> bool {
-        client
+        if client
             .set_read_timeout(Some(Duration::from_secs(10)))
-            .expect("a read timeout is set");
+            .is_err()
+        {
+            return true;
+        }
         let mut sink = [0u8; 4096];
         loop {
             match client.read(&mut sink) {
@@ -726,6 +753,91 @@ mod tests {
             "the staying connection saw a gap"
         );
         assert_eq!(value(&frame), 9_001);
+
+        drop(listener);
+        drop(writer);
+    }
+
+    /// A connection the reader closes is detached from the writer while
+    /// nothing is committed: the drainer is parked on an empty ring, and no
+    /// socket event reaches a parked thread, so the reader wakes it. The
+    /// detach is read as an answer to that connection counted unaddressed;
+    /// the first accepted socket is connection 1.
+    #[test]
+    fn a_connection_the_reader_closes_is_detached_with_nothing_committed() {
+        let (writer, _commit, connections) = Writer::spawn(64);
+        let answering = connections.clone();
+        let listener = listener(connections);
+
+        let mut offender = client(listener.local_addr());
+        read_handshake(&mut offender);
+        offender
+            .write_all(&[3u8, 0, 0, 0, 0xff, 0xff, 0xff])
+            .expect("the frame is sent");
+        assert!(is_closed(&mut offender), "the offender was not closed");
+
+        // Detach travels the control channel ahead of this answer, so the
+        // answer finds no connection once the drainer has returned.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            answering.answer(ConnectionId::from_raw(1), record(1));
+            thread::sleep(Duration::from_millis(10));
+            if writer.unaddressed() > 0 {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the closed connection was never detached"
+            );
+        }
+
+        drop(listener);
+        drop(writer);
+    }
+
+    /// A peer that trickles a frame a byte at a time is cut at the
+    /// deadline, not one read past it: the deadline is wall-clock and every
+    /// read under it is armed with what is left.
+    #[test]
+    fn a_trickled_frame_does_not_outlive_the_handshake_timeout() {
+        struct Quick;
+        impl Answers for Quick {
+            fn handshake(&self) -> Record {
+                Stub.handshake()
+            }
+            fn liveness(&self) -> inbound::Liveness {
+                Stub.liveness()
+            }
+            fn handshake_timeout(&self) -> Duration {
+                Duration::from_millis(300)
+            }
+        }
+        let (writer, _commit, connections) = Writer::spawn(64);
+        let listener = Listener::spawn("127.0.0.1:0", connections, 64, Arc::new(Quick)).unwrap();
+        let mut trickling = client(listener.local_addr());
+        read_handshake(&mut trickling);
+
+        let started = Instant::now();
+        let frame = inbound(1, "dcs.bridge.Ping", &[]);
+        let mut sent = 0;
+        // One byte every 100 ms would keep a per-read timeout of 300 ms
+        // reset forever; the deadline closes the socket at 300 ms anyway.
+        while sent < frame.len() && trickling.write_all(&frame[sent..=sent]).is_ok() {
+            sent += 1;
+            thread::sleep(Duration::from_millis(100));
+            if started.elapsed() > Duration::from_secs(3) {
+                break;
+            }
+        }
+        assert!(
+            is_closed(&mut trickling),
+            "the trickling peer was not closed"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "the deadline let a trickled frame run {:?}",
+            started.elapsed()
+        );
 
         drop(listener);
         drop(writer);

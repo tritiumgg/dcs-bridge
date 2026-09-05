@@ -207,27 +207,23 @@ pub fn pong(liveness: Liveness) -> Record {
 /// touches Lua or waits for the logic thread, which is what lets a `Ping`
 /// be answered while the sim is loading a mission.
 pub fn serve(
-    mut stream: TcpStream,
+    stream: TcpStream,
     id: ConnectionId,
     connections: &Connections<Record>,
     answers: &dyn Answers,
 ) -> Result<(), Close> {
     let mut body = Vec::new();
-    let deadline = Instant::now() + answers.handshake_timeout();
     let authenticated = false;
+    // The deadline is wall-clock: every read under it, a frame's length
+    // and its body alike, is armed with what is left, so neither a peer
+    // that keeps sending `Ping` nor one that trickles a frame a byte at a
+    // time can stay past it.
+    let mut stream = Deadline {
+        stream,
+        until: Some(Instant::now() + answers.handshake_timeout()),
+    };
 
     loop {
-        if !authenticated {
-            // The socket's read timeout is set to what is left of the
-            // deadline before each read, so a peer that keeps sending
-            // `Ping` cannot keep the connection open past it. A zero
-            // timeout is refused by the socket, so it is treated as passed.
-            let remaining = deadline
-                .checked_duration_since(Instant::now())
-                .filter(|left| !left.is_zero())
-                .ok_or(Close::HandshakeTimeout)?;
-            stream.set_read_timeout(Some(remaining))?;
-        }
         let envelope = match read_frame(&mut stream, &mut body) {
             Ok(Some(envelope)) => envelope,
             Ok(None) => return Ok(()),
@@ -247,6 +243,33 @@ pub fn serve(
             "dcs.bridge.Ping" => connections.answer(id, pong(answers.liveness())),
             other => return Err(Close::Unauthenticated(other.to_owned())),
         }
+    }
+}
+
+/// A socket read under a wall-clock deadline.
+///
+/// The socket's own timeout bounds one read, so a peer that trickles a
+/// frame a byte at a time would pass a fixed timeout on every read and
+/// never be caught by it. Before each read this re-arms the timeout with
+/// what is left of the deadline, and reports a passed deadline as a timed
+/// out read. With no deadline it is the socket, unbounded.
+struct Deadline {
+    stream: TcpStream,
+    until: Option<Instant>,
+}
+
+impl Read for Deadline {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if let Some(until) = self.until {
+            // A zero timeout is refused by the socket, so a deadline that
+            // has passed is reported without a read.
+            let left = until
+                .checked_duration_since(Instant::now())
+                .filter(|left| !left.is_zero())
+                .ok_or_else(|| io::Error::from(io::ErrorKind::TimedOut))?;
+            self.stream.set_read_timeout(Some(left))?;
+        }
+        self.stream.read(buf)
     }
 }
 
