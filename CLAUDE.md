@@ -233,9 +233,10 @@ among the lines that changed.
 
 **Estimate before cutting, and cut at the phase, not at the task.** A branch
 is sized before its first line is written: estimate its changed lines with
-tests counted as code, and split any estimate past about 300 then, since a
-split found by measuring the diff afterwards costs a rewrite of every branch
-above it. The estimates go in the plan's sequence table. A phase's remaining
+tests counted as code, and split any estimate past the 400 above then, since
+a split found by measuring the diff afterwards costs a rewrite of every
+branch above it. An estimate near the line names the seam it would split at.
+The estimates go in the plan's sequence table. A phase's remaining
 rows are cut at the start of the phase and again at each of its milestones,
 which the plan names; a milestone is something a person sees, and reaching
 one is when the rows ahead are re-measured, re-cut and re-ordered.

@@ -84,7 +84,7 @@ states which hosts build what.
 | 2.C4 | CLI `send`. | A record sent by `dcsb send` arrives on the right ring, which is how 2.12 is checked. |
 | 2.13 | `Rejected` on the reader thread, carrying the inbound envelope's `seq`, the topic id and one of the four `RejectedReason` members; `rejected_max_per_sec`, `busy_max_per_sec` and `inbound_records_per_sec` per connection. | A refused command is answered once, and a flood of them is not. A frame whose header does not parse drops the connection instead. |
 | 2.14 | Outbound capability filter at fan-out, before `seq`; `records_filtered_total`. Point-to-point records are addressed rather than fanned out, so the filter does not touch a reply, an acknowledgement or a `Rejected`. | A filtered consumer sees no `seq` gap. `records_dropped_total` does not move. |
-| 2.18 | The outbound drop rule, both halves: evict the oldest non-`LIFECYCLE` record, and refuse the newest non-`LIFECYCLE` record once the `LIFECYCLE` reserve is reached. A ring holding only `LIFECYCLE` drops the connection and counts `lifecycle_disconnects_total`. The maintainer's ring-per-class decision is taken here; ADR 0009. | `LOSSY` drops before `DURABLE` under pressure and `LIFECYCLE` survives. An `EpochClosed` survives a `LOSSY` flood. A consumer far enough behind is disconnected rather than losing a boundary record. |
+| 2.18 | The outbound drop rule, both halves: evict the oldest non-`LIFECYCLE` record, and refuse the newest non-`LIFECYCLE` record once the `LIFECYCLE` reserve is reached. A ring holding only `LIFECYCLE` drops the connection and counts `lifecycle_disconnects_total`. Built on ADR 0009's ring per class, which is where the carry-forward's ring question is settled or the record superseded. | `LOSSY` drops before `DURABLE` under pressure and `LIFECYCLE` survives. An `EpochClosed` survives a `LOSSY` flood. A consumer far enough behind is disconnected rather than losing a boundary record. |
 | 2.17 | `LIFECYCLE` retention: latest per topic, slots allocated at `shim.classes` under `max_lifecycle_topics`, replayed after auth in emit order before live traffic, through the same capability filter. `lifecycle_replayed_total`. | An `dcsb tail` started mid-epoch receives `EpochOpened` before any live record. A `shim.classes` call above the cap is refused whole. |
 | 2.19 | Landed with 2.9: `SeqAck` is consumed and counted, with no spool behind it and no per-connection tracking (PR #55). Nothing reads an acknowledged `seq` until the spool ships (SPEC §11). | The wire carries it and the broker accepts it without error. |
 | 2.20 | `SetTopicFilter` and `GetTopics` on the reader thread: `ALL` as the default, replace rather than accumulate, `LIFECYCLE` always admitted, the four refused shapes with `ok` false and a `refusal` reason, `topic_filter_max_topics`, and the filter published to the writer thread by pointer swap. Filtering runs at fan-out before `seq` and counts in `records_filtered_total`. | A connection naming one topic under `ONLY` receives that topic and every `LIFECYCLE` topic and no other. `records_dropped_total` does not move and the consumer sees no `seq` gap. `GetTopics` lists every topic the token's capability set covers and no topic outside it. |
@@ -208,8 +208,10 @@ milestone before it is reached.
 | Milestone | Reached when | Rows |
 |---|---|---|
 | **M2.1 — A configured, live bridge** | `dcsb ping` on an install reports the sim alive and the configured values in force, and `dcsb schema` returns `schema.pb`. | 2.15, 2.C2, 2.10, 2.C3, 2.11 |
-| **M2.2 — A command reaches Lua** | `dcsb send` lands a record on the ring its registered route names, an unrouted one is answered with `Rejected`, and the maintainer's ring-per-class decision is taken. | 2.16, 2.12, 2.C4, 2.13, 2.14 |
-| **M2.3 — The drop policy holds** | A late `dcsb tail` receives `EpochOpened` first, an `EpochClosed` survives a `LOSSY` flood, and a capture replays with no DCS. | 2.18, 2.17, 2.20, 2.C5, 2.C6 |
+| **M2.2 — A command reaches Lua** | `dcsb send` lands a record on the ring its registered route names, and an unrouted one is answered with `Rejected`. | 2.16, 2.12, 2.C4, 2.13, 2.14 |
+| **M2.3 — The drop policy holds** | A late `dcsb tail` receives `EpochOpened` first, an `EpochClosed` survives a `LOSSY` flood, and a capture replays with no DCS. 2.18 comes before 2.17 so that replay is built onto the rings it will fill rather than reworked for them. | 2.18, 2.17, 2.20, 2.C5, 2.C6 |
+
+2.19 is in no milestone: it landed with 2.9, and its row stays for the id.
 
 **2.15 moves to the front, and 2.16 ahead of 2.12.** Every constant 2.7 and
 2.9 left in the code — the listen address, the ring sizes, the record buffer,
@@ -232,7 +234,10 @@ gave the class-aware drop to 2.18, as `docs/audit.md` argues.
 **Task 2.C2 lands as one branch**, about 250 lines: `ping` sends `Ping`,
 prints the three `Pong` fields, and exits non-zero when the sim is not alive,
 so a script can read it. The live-install steps are the blackout half of 2.9's
-done-when, read through `Pong` this time.
+done-when, read through `Pong` this time. Until 2.11 stamps the heartbeat a
+live `Pong` reads the sim as never heard from, so the done-when's `dcs_alive`
+is read in full only once M2.1 closes; what 2.C2 alone shows is the answer
+arriving during the load.
 
 **Task 2.10 lands as a sequence of two.** The hash needs a SHA-256 inside the
 shipped build, which ADR 0016 does not cover; the first branch carries the
@@ -284,8 +289,10 @@ each connection's capability set from its `Authenticated` control and passes a
 record over at fan-out when the set does not cover it, before `seq`;
 `records_filtered_total`.
 
-**Task 2.18 lands as a sequence of two**, once the maintainer's ring-per-class
-decision is taken; the first branch is where ADR 0009 is accepted or replaced:
+**Task 2.18 lands as a sequence of two.** ADR 0009 stands accepted, and the
+carry-forward's question, one ring or one per class, is what its first branch
+builds or supersedes; the estimate sits at the split point, and the merge on
+drain is the seam to cut at if it runs long:
 
 | Branch | What it holds | Reviewable against |
 |---|---|---|
