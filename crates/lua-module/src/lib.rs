@@ -149,8 +149,28 @@ mod lua {
 
         /// Raise an error formatted like `printf`. Never returns.
         pub unsafe fn luaL_error(state: *mut c_void, fmt: *const c_char, ...) -> c_int;
+
+        /// Raise the value at the top of the stack as an error. Never
+        /// returns. Unlike `luaL_error` it formats nothing, so a message
+        /// built on the Rust side is pushed, dropped, and then raised.
+        pub unsafe fn lua_error(state: *mut c_void) -> c_int;
+
+        /// Push `n`.
+        pub unsafe fn lua_pushnumber(state: *mut c_void, n: f64);
+
+        /// Pop the top value into `t[n]` for the table at `index`, without
+        /// metamethods.
+        pub unsafe fn lua_rawseti(state: *mut c_void, index: c_int, n: c_int);
     }
 }
+
+/// The Interface A call surface: the calls on the table `luaopen_dcsbridge`
+/// leaves, their arguments and what they return.
+///
+/// The hook driver compares it at its first `configure` and disables itself
+/// on a mismatch, so it moves when a call is added, removed or changes
+/// signature, and for nothing else. It is an opaque equality, not an order.
+pub const INTERFACE_VERSION: &str = "1";
 
 /// Open the bridge in `state`, leaving one table on the stack.
 ///
@@ -159,10 +179,10 @@ mod lua {
 /// gets its own table over one set of rings, sockets and registration maps.
 /// ADR 0007.
 ///
-/// The table carries the broker version, `opens`, the number of times the
-/// module has been opened in this process, and the put calls. The first table
-/// reads 1 and the second reads 2, which is how two tables are shown to sit
-/// over one bridge.
+/// The table carries the broker version, the interface version, `opens`, the
+/// number of times the module has been opened in this process, `configure`
+/// and the put calls. The first table reads 1 and the second reads 2, which
+/// is how two tables are shown to sit over one bridge.
 ///
 /// The first open also starts the outbound path, listening on the default
 /// address, with the ring sizes below. That belongs to the first
@@ -202,7 +222,7 @@ pub unsafe extern "C" fn luaopen_dcsbridge(state: *mut core::ffi::c_void) -> cor
     // value back off. Lua copies the bytes it is given, so nothing this crate
     // allocated is left for DCS's C runtime to free.
     unsafe {
-        lua::lua_createtable(state, 0, 3 + put::CALLS.len() as core::ffi::c_int);
+        lua::lua_createtable(state, 0, 4 + put::CALLS.len() as core::ffi::c_int);
         lua::lua_pushlstring(
             state,
             version.as_ptr().cast::<core::ffi::c_char>(),
@@ -210,35 +230,43 @@ pub unsafe extern "C" fn luaopen_dcsbridge(state: *mut core::ffi::c_void) -> cor
         );
         // -1 is the version string just pushed, so the table is at -2.
         lua::lua_setfield(state, -2, c"version".as_ptr());
+        lua::lua_pushlstring(
+            state,
+            INTERFACE_VERSION.as_ptr().cast::<core::ffi::c_char>(),
+            INTERFACE_VERSION.len(),
+        );
+        lua::lua_setfield(state, -2, c"interface".as_ptr());
 
         // A count that outgrew isize would need more Lua states than DCS has.
         lua::lua_pushinteger(state, opens as isize);
         lua::lua_setfield(state, -2, c"opens".as_ptr());
 
         put::install(state);
-        tokens::install(state);
+        configure::install(state);
     }
 
     1
 }
 
-/// `shim.tokens(list)`: the consumer credentials, replaced whole.
+/// `shim.configure(table)`: the broker's keys from `Config\DCSBridge.lua`,
+/// applied as one swap or refused whole.
 ///
-/// Provisional. The specification puts `tokens` in `Config\DCSBridge.lua`,
-/// which reaches the broker through `configure`, and `configure` does not
-/// exist yet. Until it does, a hook script hands the list to this call so
-/// that a live install has something a consumer can authenticate against.
-/// `configure` takes the key over when it arrives, and this call goes.
+/// The hook driver is the file's one reader. It hands the broker the keys
+/// the broker owns as a flat table of strings, numbers and booleans, plus
+/// the `tokens` list, and gets back the interface version it compares
+/// against its own, and what the call did with the table. Until the first
+/// call allocates and binds, the module open does, at the defaults.
 #[cfg(any(unix, feature = "dcs-lua"))]
-mod tokens {
+mod configure {
     use core::ffi::{CStr, c_int, c_void};
     use std::collections::HashSet;
 
+    use dcsbridge_broker::config::{Applied, Value};
     use dcsbridge_broker::state::{Capability, Token};
 
     use crate::lua;
 
-    /// Put `tokens` on the table at the top of the stack.
+    /// Put `configure` on the table at the top of the stack.
     ///
     /// # Safety
     ///
@@ -246,63 +274,209 @@ mod tokens {
     pub unsafe fn install(state: *mut c_void) {
         // SAFETY: the push and the setfield pair, leaving the table on top.
         unsafe {
-            lua::lua_pushcclosure(state, tokens, 0);
-            lua::lua_setfield(state, -2, c"tokens".as_ptr());
+            lua::lua_pushcclosure(state, configure, 0);
+            lua::lua_setfield(state, -2, c"configure".as_ptr());
         }
     }
 
-    /// What a bad entry is refused with: which entry, and what about it.
+    /// What a bad token entry is refused with: which entry, and what about
+    /// it.
     struct Refused {
         entry: usize,
         why: &'static CStr,
     }
 
-    /// `shim.tokens({ { id = 'map', secret = '...', caps = { 'read' } }, ... })`.
+    /// `shim.configure({ port = 7742, tokens = { { id = 'map', secret = '...',
+    /// caps = { 'read' } } }, ... })`.
     ///
-    /// Each entry is a table with an `id` string, a `secret` string, and a
-    /// `caps` list of capability names or numbers. The whole list is read
-    /// before any of it takes effect, so a bad entry leaves the table the
-    /// bridge holds as it was, and the error names the entry.
-    unsafe extern "C" fn tokens(state: *mut c_void) -> c_int {
+    /// Every key is a string and every value a number, a string or a
+    /// boolean, except `tokens`, which is a list of entries each with an
+    /// `id` string, a `secret` string and a `caps` list of capability names
+    /// or numbers. The whole table is read before any of it takes effect,
+    /// so a bad value leaves the configuration in force as it was, and the
+    /// error names the key. A table that reads applies as the broker
+    /// applies it: every key at the first call, the live keys after.
+    ///
+    /// Returns a table: `interface`, the version the hook driver compares;
+    /// `applied`, the live keys the table named; `unknown`, the keys the
+    /// broker does not own; and `pending`, a list of `{ key, effective,
+    /// file }` for each restart-tier key whose file value differs from the
+    /// one in force, with `pending_restart` its length.
+    unsafe extern "C" fn configure(state: *mut c_void) -> c_int {
         // SAFETY: a Lua call. The argument is a table for the whole call,
-        // and every value pushed while reading it is popped before the
-        // read returns, so the raise below jumps past nothing on the stack
-        // that is this crate's, and past nothing on the heap: the list is
-        // dropped before the raise.
+        // and every value pushed while reading it is popped before the read
+        // returns, so a raise jumps past nothing on the stack that is this
+        // crate's, and past nothing on the heap: the table read is consumed
+        // or dropped before the raise, and the message is Lua's by then.
         unsafe {
             lua::luaL_checktype(state, 1, lua::TTABLE);
-            match read_list(state) {
-                Ok(list) => dcsbridge_broker::bridge().set_tokens(list),
-                Err(Refused { entry, why }) => {
-                    lua::luaL_error(
-                        state,
-                        c"tokens: entry %d %s".as_ptr(),
-                        entry as c_int,
-                        why.as_ptr(),
-                    );
-                    unreachable!("luaL_error does not return")
+            let table = match read_table(state) {
+                Ok(table) => table,
+                Err(why) => raise(state, why),
+            };
+            match dcsbridge_broker::bridge().configure(table) {
+                Ok(applied) => push_applied(state, &applied),
+                Err(error) => {
+                    // Rendered and dropped before the jump: the error owns
+                    // a string the jump would otherwise leak.
+                    let why = error.to_string();
+                    drop(error);
+                    raise(state, why)
                 }
             }
         }
-        0
+        1
     }
 
-    /// Read every entry of the list at argument 1.
+    /// Raise `message` as a Lua error. Never returns.
+    ///
+    /// The message is pushed and dropped before the raise, so the jump
+    /// runs no Rust drop it needed to.
+    unsafe fn raise(state: *mut c_void, why: String) -> ! {
+        let message = format!("configure refused: {why}");
+        drop(why);
+        // SAFETY: Lua copies the bytes it is given, and the raise takes
+        // the copy off the top of the stack. Both strings are dropped by
+        // hand before the jump, which runs no drop of its own.
+        unsafe {
+            lua::lua_pushlstring(state, message.as_ptr().cast(), message.len());
+            drop(message);
+            lua::lua_error(state);
+        }
+        unreachable!("lua_error does not return")
+    }
+
+    /// Read the flat table at argument 1 into its keys and values, or say
+    /// which key is not one the call takes. Leaves the stack as found.
     ///
     /// # Safety
     ///
-    /// `state` is live and argument 1 is a table.
-    unsafe fn read_list(state: *mut c_void) -> Result<Vec<Token>, Refused> {
-        // SAFETY: each rawgeti pushes one value and the settop below pops it,
-        // whichever way the entry's read ends.
+    /// `state` is live, argument 1 is a table, and five stack slots are
+    /// free.
+    unsafe fn read_table(state: *mut c_void) -> Result<Vec<(String, Value)>, String> {
+        // SAFETY: each `lua_next` pops the key it was given and pushes a
+        // pair; the value is popped before the next call and both are
+        // popped on the way out of a refusal. The key is checked to be a
+        // string before it is read as one, because reading a number key as
+        // a string converts it in place and breaks the walk.
         unsafe {
-            let count = dense_length(state, 1).map_err(|entry| Refused {
+            let mut table = Vec::new();
+            lua::lua_pushnil(state);
+            while lua::lua_next(state, 1) != 0 {
+                if lua::lua_type(state, -2) != lua::TSTRING {
+                    lua::lua_settop(state, -3);
+                    return Err("a key is not a string".into());
+                }
+                let mut len = 0;
+                let s = lua::lua_tolstring(state, -2, &mut len);
+                let key = String::from_utf8_lossy(core::slice::from_raw_parts(s.cast(), len))
+                    .into_owned();
+                let value = match lua::lua_type(state, -1) {
+                    lua::TBOOLEAN => Ok(Value::Boolean(lua::lua_toboolean(state, -1) != 0)),
+                    lua::TNUMBER => Ok(Value::Number(lua::lua_tonumber(state, -1))),
+                    lua::TSTRING => {
+                        let s = lua::lua_tolstring(state, -1, &mut len);
+                        let bytes = core::slice::from_raw_parts(s.cast(), len);
+                        Ok(Value::String(String::from_utf8_lossy(bytes).into_owned()))
+                    }
+                    lua::TTABLE if key == "tokens" => read_list(state, -1)
+                        .map(Value::Tokens)
+                        .map_err(|Refused { entry, why }| {
+                            format!("`tokens` entry {entry} {}", why.to_string_lossy())
+                        }),
+                    lua::TTABLE => Err(format!("`{key}` is a table, and only `tokens` is one")),
+                    _ => Err(format!("`{key}` is not a number, a string or a boolean")),
+                };
+                lua::lua_settop(state, -2);
+                match value {
+                    Ok(value) => table.push((key, value)),
+                    Err(why) => {
+                        lua::lua_settop(state, -2);
+                        return Err(why);
+                    }
+                }
+            }
+            Ok(table)
+        }
+    }
+
+    /// Push the table `configure` returns for `applied`.
+    ///
+    /// # Safety
+    ///
+    /// `state` is live and five stack slots are free.
+    unsafe fn push_applied(state: *mut c_void, applied: &Applied) {
+        let interface = crate::INTERFACE_VERSION;
+        // SAFETY: every push pairs with the setfield or rawseti that pops
+        // it, and the result table stays on top between them.
+        unsafe {
+            lua::lua_createtable(state, 0, 5);
+            lua::lua_pushlstring(state, interface.as_ptr().cast(), interface.len());
+            lua::lua_setfield(state, -2, c"interface".as_ptr());
+            lua::lua_pushinteger(state, applied.live as isize);
+            lua::lua_setfield(state, -2, c"applied".as_ptr());
+            lua::lua_pushinteger(state, applied.unknown.len() as isize);
+            lua::lua_setfield(state, -2, c"unknown".as_ptr());
+            lua::lua_pushinteger(state, applied.pending.len() as isize);
+            lua::lua_setfield(state, -2, c"pending_restart".as_ptr());
+
+            lua::lua_createtable(state, applied.pending.len() as c_int, 0);
+            for (n, pending) in applied.pending.iter().enumerate() {
+                lua::lua_createtable(state, 0, 3);
+                lua::lua_pushlstring(state, pending.key.as_ptr().cast(), pending.key.len());
+                lua::lua_setfield(state, -2, c"key".as_ptr());
+                push_value(state, &pending.effective);
+                lua::lua_setfield(state, -2, c"effective".as_ptr());
+                push_value(state, &pending.file);
+                lua::lua_setfield(state, -2, c"file".as_ptr());
+                lua::lua_rawseti(state, -2, n as c_int + 1);
+            }
+            lua::lua_setfield(state, -2, c"pending".as_ptr());
+        }
+    }
+
+    /// Push `value` as the Lua value it came from. A token list is never
+    /// pending, since the key is live, so it pushes nil.
+    ///
+    /// # Safety
+    ///
+    /// `state` is live and one stack slot is free.
+    unsafe fn push_value(state: *mut c_void, value: &Value) {
+        // SAFETY: one push, and Lua copies the string's bytes.
+        unsafe {
+            match value {
+                Value::Boolean(b) => lua::lua_pushboolean(state, c_int::from(*b)),
+                Value::Number(n) => lua::lua_pushnumber(state, *n),
+                Value::String(s) => lua::lua_pushlstring(state, s.as_ptr().cast(), s.len()),
+                Value::Tokens(_) => lua::lua_pushnil(state),
+            }
+        }
+    }
+
+    /// Read every entry of the token list at `index`. Leaves the stack as
+    /// found.
+    ///
+    /// # Safety
+    ///
+    /// `state` is live, a table is at `index`, and four stack slots are
+    /// free.
+    unsafe fn read_list(state: *mut c_void, index: c_int) -> Result<Vec<Token>, Refused> {
+        // SAFETY: the index is made absolute before anything is pushed, and
+        // each rawgeti pushes one value the settop below pops, whichever
+        // way the entry's read ends.
+        unsafe {
+            let table = if index < 0 {
+                lua::lua_gettop(state) + index + 1
+            } else {
+                index
+            };
+            let count = dense_length(state, table).map_err(|entry| Refused {
                 entry,
                 why: c"is missing: the list has a hole, or a key that is not a position",
             })?;
             let mut list = Vec::with_capacity(count);
             for n in 1..=count {
-                lua::lua_rawgeti(state, 1, n as c_int);
+                lua::lua_rawgeti(state, table, n as c_int);
                 let entry = read_entry(state, n);
                 lua::lua_settop(state, -2);
                 list.push(entry?);

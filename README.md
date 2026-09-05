@@ -80,7 +80,7 @@ to `127.0.0.1:7742`. The full set of keys is not final.
 A consumer authenticates with a token: an id, a secret, and the capabilities
 the token grants, from `read`, `command` and `reload`. The `tokens` key holds
 one entry per consumer. Reading it from the file is not yet built; until then
-a hook script hands the list to the bridge with `shim.tokens`.
+a hook script hands the table to the bridge with `shim.configure`.
 
 The loader has an `ENABLED` flag. Set it to `false` to keep the bridge
 installed but inactive.
