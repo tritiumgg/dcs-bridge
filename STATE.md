@@ -90,12 +90,6 @@ entries at most: an eleventh means something here is finished, or belongs in
 - **Task 2.2's load banner is owed by 4.1.** SPEC §13 addresses the banner to
   the Lua side and SPEC §15 has `doctor` check it. Nothing makes the DLL write
   one, and SPEC §4 leaves it no `io`. Delete this when 4.1 closes.
-- **Maintainer decision — one outbound ring per connection, or one per class.**
-  A slot is addressed by its record number, so a single ring cannot search for
-  a non-`LIFECYCLE` victim the way 2.18 requires. `seq` is assigned before the
-  drop decision, so a ring per class reorders nothing that a merge at drain
-  cannot restore. What it changes is that a full `LIFECYCLE` ring disconnects
-  where one ring would have evicted. Needed before 2.18. ADR 0008 names it.
 - **What 2.4 to 2.9 left to 2.12, 2.13, 2.15 and 9.7.** Every constant is
   `configure`'s at 2.15: the listen address, the ring sizes, the record
   buffer, the timeout, the frame, URL and connection caps, the alive

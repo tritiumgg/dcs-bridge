@@ -84,7 +84,7 @@ states which hosts build what.
 | 2.C4 | CLI `send`. | A record sent by `dcsb send` arrives on the right ring, which is how 2.12 is checked. |
 | 2.13 | `Rejected` on the reader thread, carrying the inbound envelope's `seq`, the topic id and one of the four `RejectedReason` members; `rejected_max_per_sec`, `busy_max_per_sec` and `inbound_records_per_sec` per connection. | A refused command is answered once, and a flood of them is not. A frame whose header does not parse drops the connection instead. |
 | 2.14 | Outbound capability filter at fan-out, before `seq`; `records_filtered_total`. Point-to-point records are addressed rather than fanned out, so the filter does not touch a reply, an acknowledgement or a `Rejected`. | A filtered consumer sees no `seq` gap. `records_dropped_total` does not move. |
-| 2.18 | The outbound drop rule, both halves: evict the oldest non-`LIFECYCLE` record, and refuse the newest non-`LIFECYCLE` record once the `LIFECYCLE` reserve is reached. A ring holding only `LIFECYCLE` drops the connection and counts `lifecycle_disconnects_total`. Built on ADR 0009's ring per class, which is where the carry-forward's ring question is settled or the record superseded. | `LOSSY` drops before `DURABLE` under pressure and `LIFECYCLE` survives. An `EpochClosed` survives a `LOSSY` flood. A consumer far enough behind is disconnected rather than losing a boundary record. |
+| 2.18 | The outbound drop rule, both halves: evict the oldest non-`LIFECYCLE` record, and refuse the newest non-`LIFECYCLE` record once the `LIFECYCLE` reserve is reached. A ring holding only `LIFECYCLE` drops the connection and counts `lifecycle_disconnects_total`. Built on ADR 0009's ring per class, the maintainer's settled decision. | `LOSSY` drops before `DURABLE` under pressure and `LIFECYCLE` survives. An `EpochClosed` survives a `LOSSY` flood. A consumer far enough behind is disconnected rather than losing a boundary record. |
 | 2.17 | `LIFECYCLE` retention: latest per topic, slots allocated at `shim.classes` under `max_lifecycle_topics`, replayed after auth in emit order before live traffic, through the same capability filter. `lifecycle_replayed_total`. | An `dcsb tail` started mid-epoch receives `EpochOpened` before any live record. A `shim.classes` call above the cap is refused whole. |
 | 2.19 | Landed with 2.9: `SeqAck` is consumed and counted, with no spool behind it and no per-connection tracking (PR #55). Nothing reads an acknowledged `seq` until the spool ships (SPEC §11). | The wire carries it and the broker accepts it without error. |
 | 2.20 | `SetTopicFilter` and `GetTopics` on the reader thread: `ALL` as the default, replace rather than accumulate, `LIFECYCLE` always admitted, the four refused shapes with `ok` false and a `refusal` reason, `topic_filter_max_topics`, and the filter published to the writer thread by pointer swap. Filtering runs at fan-out before `seq` and counts in `records_filtered_total`. | A connection naming one topic under `ONLY` receives that topic and every `LIFECYCLE` topic and no other. `records_dropped_total` does not move and the consumer sees no `seq` gap. `GetTopics` lists every topic the token's capability set covers and no topic outside it. |
@@ -289,10 +289,9 @@ each connection's capability set from its `Authenticated` control and passes a
 record over at fan-out when the set does not cover it, before `seq`;
 `records_filtered_total`.
 
-**Task 2.18 lands as a sequence of two.** ADR 0009 stands accepted, and the
-carry-forward's question, one ring or one per class, is what its first branch
-builds or supersedes; the estimate sits at the split point, and the merge on
-drain is the seam to cut at if it runs long:
+**Task 2.18 lands as a sequence of two.** The first branch builds ADR 0009's
+ring per class, the maintainer's settled decision; its estimate sits at the
+split point, and the merge on drain is the seam to cut at if it runs long:
 
 | Branch | What it holds | Reviewable against |
 |---|---|---|
