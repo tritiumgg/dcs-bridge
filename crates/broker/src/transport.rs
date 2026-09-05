@@ -834,6 +834,10 @@ mod tests {
             fn handshake_timeout(&self) -> Duration {
                 Duration::from_millis(300)
             }
+            fn authenticate(&self, secret: &[u8]) -> Result<Session, AuthError> {
+                Stub.authenticate(secret)
+            }
+            fn disconnected(&self, _: &Session) {}
         }
         let (writer, _commit, connections) = Writer::spawn(64);
         let listener = Listener::spawn("127.0.0.1:0", connections, 64, Arc::new(Quick)).unwrap();

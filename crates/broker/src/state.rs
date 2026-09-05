@@ -331,13 +331,15 @@ pub struct Token {
 /// `configure` is where the configured value arrives.
 pub const MAX_CONNECTIONS: usize = 8;
 
-/// Whether two secrets are the same, in time that depends on their lengths
-/// and on nothing else about them.
+/// Whether two secrets are the same, in time that depends on the presented
+/// secret's length and on nothing about either secret's content.
 ///
 /// Every byte is compared whether or not an earlier one differed, so a
 /// wrong secret takes as long as a right one and a guess learns nothing
 /// from the clock. Two secrets of different lengths are different, and the
-/// comparison still runs over the presented one.
+/// comparison still runs over the presented one, against itself. What the
+/// clock can tell is whether the lengths matched, since only then is the
+/// configured secret's memory touched; a length is not a secret.
 fn same_secret(presented: &[u8], configured: &[u8]) -> bool {
     let mut differ = u8::from(presented.len() != configured.len());
     let against = if presented.len() == configured.len() {
@@ -495,8 +497,17 @@ impl Bridge {
     }
 
     /// A session's connection has closed; its slot is free.
+    ///
+    /// The count never goes below zero: a call with no session behind it
+    /// would otherwise wrap the counter and refuse every consumer as
+    /// `SERVER_FULL` until the process restarted, which is too large a
+    /// blast radius for one misplaced call.
     pub fn disconnected(&self, _session: &Session) {
-        self.authenticated.fetch_sub(1, Ordering::Relaxed);
+        let _ = self
+            .authenticated
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |held| {
+                held.checked_sub(1)
+            });
     }
 
     /// How many connections are authenticated right now.
@@ -785,6 +796,14 @@ mod tests {
             bridge.authenticate(b"correct horse").is_ok(),
             "a freed slot was not reused"
         );
+        // A disconnect with no session behind it leaves the count at zero
+        // rather than wrapping it into a permanent `SERVER_FULL`.
+        for session in &sessions {
+            bridge.disconnected(session);
+        }
+        bridge.disconnected(&sessions[0]);
+        assert_eq!(bridge.authenticated(), 0, "the count went below zero");
+        assert!(bridge.authenticate(b"correct horse").is_ok());
 
         assert!(same_secret(b"", b""));
         assert!(!same_secret(b"a", b""));
