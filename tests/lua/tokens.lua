@@ -4,9 +4,10 @@
 -- a token lets a consumer do is not observable from here: the Rust tests
 -- authenticate against the table off a socket. What this checks is the Lua
 -- side of the call: it is on the table, a well-formed list is accepted with
--- capabilities by name or by number, an empty list is accepted, and a bad
+-- capabilities by name or by number, an empty list is accepted, a bad
 -- entry is refused with an error naming the entry and leaving the whole
--- list unapplied.
+-- list unapplied, and a list with a hole is refused by the position that
+-- is missing rather than read up to the hole.
 --
 -- Run it through tools/luatest.sh, which builds the module and finds it.
 
@@ -56,6 +57,19 @@ raises('tokens with no argument', shim.tokens)
 raises('tokens with a string', shim.tokens, 'map')
 complains('a bare string entry', { 'map' }, 'entry 1 is not a table')
 
+-- A list with a hole is refused by the position that is missing rather
+-- than read up to the hole: an entry commented out of the middle of a hook
+-- file must not silently drop the ones after it. A key that is not a
+-- position is refused the same way, and so is a hole in a caps list.
+local entry = { id = 'a', secret = 's', caps = { 'read' } }
+complains('a hole in the list', { [1] = entry, [3] = entry }, 'entry 2 is missing')
+complains('a named key in the list', { entry, map = entry }, 'entry 2 is missing')
+complains(
+  'a hole in a caps list',
+  { { id = 'a', secret = 's', caps = { [1] = 'read', [3] = 'reload' } } },
+  'entry 1 has no caps list'
+)
+
 -- Each entry names its id, its secret and its caps, and the complaint says
 -- which entry, so the third bad entry in a list of three is entry 3.
 complains('an entry with no id', { { secret = 's', caps = {} } }, 'entry 1 has no id string')
@@ -75,5 +89,6 @@ complains(
 )
 
 print('ok  tokens is on the table and a well-formed list is accepted')
-print('ok  capabilities are read by name and by number')
+print('ok  capabilities written by name and by number are accepted')
+print('ok  a hole in the list is refused by the position that is missing')
 print('ok  a bad entry is refused with an error naming the entry')

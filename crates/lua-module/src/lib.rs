@@ -41,6 +41,9 @@ mod lua {
     /// at -10002.
     pub const UPVALUE_1: c_int = -10003;
 
+    /// The type tag of nil, for `lua_type`.
+    pub const TNIL: c_int = 0;
+
     /// The type tag of a boolean, for `luaL_checktype`.
     pub const TBOOLEAN: c_int = 1;
 
@@ -122,8 +125,16 @@ mod lua {
         /// Push `t[n]` for the table at `index`, without metamethods.
         pub unsafe fn lua_rawgeti(state: *mut c_void, index: c_int, n: c_int);
 
-        /// The length of the table or string at `index`.
-        pub unsafe fn lua_objlen(state: *mut c_void, index: c_int) -> usize;
+        /// The stack's height, which is also the absolute index of its top.
+        pub unsafe fn lua_gettop(state: *mut c_void) -> c_int;
+
+        /// Push nil.
+        pub unsafe fn lua_pushnil(state: *mut c_void);
+
+        /// Pop a key and push the next key and value of the table at
+        /// `index`, or pop the key and push nothing at the end. Returns
+        /// whether a pair was pushed.
+        pub unsafe fn lua_next(state: *mut c_void, index: c_int) -> c_int;
 
         /// The string at `index` with its length in `len`, or null for a
         /// value that is not a string or a number.
@@ -285,7 +296,10 @@ mod tokens {
         // SAFETY: each rawgeti pushes one value and the settop below pops it,
         // whichever way the entry's read ends.
         unsafe {
-            let count = lua::lua_objlen(state, 1);
+            let count = dense_length(state, 1).map_err(|entry| Refused {
+                entry,
+                why: c"is missing: the list has a hole, or a key that is not a position",
+            })?;
             let mut list = Vec::with_capacity(count);
             for n in 1..=count {
                 lua::lua_rawgeti(state, 1, n as c_int);
@@ -294,6 +308,64 @@ mod tokens {
                 list.push(entry?);
             }
             Ok(list)
+        }
+    }
+
+    /// The length of the list at `index`, once it is known to be one: every
+    /// key a position from 1 to the length with none missing.
+    ///
+    /// The length operator answers any border of a table with a hole, so a
+    /// list with an entry commented out of its middle could read short and
+    /// the entries past the hole would be dropped without a word. Walking
+    /// every key instead makes a hole, or a key that is not a position, a
+    /// refusal naming the first position that is missing. Leaves the stack
+    /// as found.
+    ///
+    /// # Safety
+    ///
+    /// `state` is live, a table is at `index`, and three stack slots are
+    /// free.
+    unsafe fn dense_length(state: *mut c_void, index: c_int) -> Result<usize, usize> {
+        // SAFETY: the table's index is made absolute before anything is
+        // pushed, so the pushes of the walk do not move it. Each `lua_next`
+        // pops the key it was given and pushes a pair, and the value is
+        // popped before the next call, so the walk ends with the stack as
+        // it began; a walk cut short pops both.
+        unsafe {
+            let table = if index < 0 {
+                lua::lua_gettop(state) + index + 1
+            } else {
+                index
+            };
+            let mut count = 0usize;
+            let mut highest = 0usize;
+            lua::lua_pushnil(state);
+            while lua::lua_next(state, table) != 0 {
+                let key = if lua::lua_type(state, -2) == lua::TNUMBER {
+                    lua::lua_tonumber(state, -2)
+                } else {
+                    f64::NAN
+                };
+                if !(1.0..=f64::from(c_int::MAX)).contains(&key) || key.fract() != 0.0 {
+                    lua::lua_settop(state, -3);
+                    return Err(count + 1);
+                }
+                count += 1;
+                highest = highest.max(key as usize);
+                lua::lua_settop(state, -2);
+            }
+            if count == highest {
+                return Ok(count);
+            }
+            for n in 1..=highest {
+                lua::lua_rawgeti(state, table, n as c_int);
+                let missing = lua::lua_type(state, -1) == lua::TNIL;
+                lua::lua_settop(state, -2);
+                if missing {
+                    return Err(n);
+                }
+            }
+            Ok(count)
         }
     }
 
@@ -368,8 +440,9 @@ mod tokens {
             if lua::lua_type(state, -1) != lua::TTABLE {
                 return None;
             }
+            let count = dense_length(state, -1).ok()?;
             let mut caps = HashSet::new();
-            for n in 1..=lua::lua_objlen(state, -1) {
+            for n in 1..=count {
                 lua::lua_rawgeti(state, -1, n as c_int);
                 let cap = match lua::lua_type(state, -1) {
                     lua::TSTRING => {
