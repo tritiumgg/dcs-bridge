@@ -142,7 +142,17 @@ impl From<io::Error> for Close {
 /// stream, between frames.
 pub fn read_frame(stream: &mut impl Read, body: &mut Vec<u8>) -> Result<Option<Envelope>, Close> {
     let mut length = [0u8; 4];
-    match stream.read(&mut length)? {
+    // The first read tells a clean close between frames from a cut inside
+    // one, which `read_exact` cannot; it retries an interrupted read the
+    // way `read_exact` does, so a signal is not a closed connection.
+    let first = loop {
+        match stream.read(&mut length) {
+            Ok(n) => break n,
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+            Err(error) => return Err(Close::Io(error)),
+        }
+    };
+    match first {
         0 => return Ok(None),
         4 => {}
         n => stream.read_exact(&mut length[n..])?,
@@ -229,6 +239,23 @@ mod tests {
     #[test]
     fn a_bad_frame_is_refused_with_its_reason() {
         let mut body = Vec::new();
+
+        // A read interrupted by a signal is retried, not taken for a close.
+        struct Interrupted<'a>(&'a [u8], bool);
+        impl Read for Interrupted<'_> {
+            fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+                if !self.1 {
+                    self.1 = true;
+                    return Err(io::Error::from(io::ErrorKind::Interrupted));
+                }
+                self.0.read(buf)
+            }
+        }
+        let bytes = frame(3, "dcs.bridge.Ping", &[]);
+        let envelope = read_frame(&mut Interrupted(&bytes, false), &mut Vec::new())
+            .expect("an interrupted read is retried")
+            .expect("a frame follows it");
+        assert_eq!(envelope.seq, 3);
 
         let mut bytes = (MAX_FRAME_BYTES + 1).to_le_bytes().to_vec();
         bytes.extend([0u8; 16]);
