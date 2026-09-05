@@ -4,14 +4,25 @@
 //! The hook driver is the one reader of `Config\DCSBridge.lua`. It parses
 //! the file and hands the broker the keys the broker owns, as a flat table,
 //! through `shim.configure`. This module is what each value in that table is
-//! checked against: no Lua, no threads, a name and a value in, and either
-//! the field set or the reason it is not.
+//! checked against, and what the whole table is applied by: no Lua, no
+//! threads, a table in and a [`Config`] out, or the reason there is none.
+//!
+//! A call applies as one swap or not at all. Every value is checked for its
+//! type and range, then the cross-key invariants are checked against the
+//! values that would be in force, and any failure refuses the whole call and
+//! leaves the running configuration as it was. A partial apply would let a
+//! paired key drift from the key its basis ties it to.
 //!
 //! Each key has a tier. A **live** key is read at decision time, so a later
 //! `configure` swaps it in. A **restart** key sizes an allocation or binds a
-//! socket, decided once at the first `configure` and never revisited. The
-//! tier is data here, so that what applies a table can tell the two apart
-//! without a second list to drift from this one.
+//! socket, decided once at the first `configure` and never revisited; a
+//! later call reports a changed one as pending a restart and changes nothing.
+//! Invariants are checked against effective values, so a pending value never
+//! makes a live one pass or fail.
+//!
+//! A table is the whole configuration, not a delta: a key the table leaves
+//! out takes its default. `ReloadConfig` re-reads the whole file, so a key
+//! deleted from the file reverts rather than lingering.
 
 use std::fmt;
 use std::net::IpAddr;
@@ -45,7 +56,7 @@ pub enum Value {
     Tokens(Vec<Token>),
 }
 
-/// Why a value was refused.
+/// Why a `configure` was refused. The whole call is, whichever key it names.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Error {
     /// The value under `key` is not what the key takes.
@@ -55,17 +66,47 @@ pub enum Error {
         /// What the key takes, in words a person fixes the file with.
         expected: String,
     },
+    /// The values that would be in force break a rule that ties two keys.
+    Invariant(&'static str),
 }
 
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Error::Value { key, expected } => write!(f, "`{key}` must be {expected}"),
+            Error::Invariant(rule) => f.write_str(rule),
         }
     }
 }
 
 impl std::error::Error for Error {}
+
+/// What a `configure` produced: the configuration to put in force, and what
+/// the table carried that is not in it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Applied {
+    /// The configuration to put in force.
+    pub config: Config,
+    /// Live keys the table named.
+    pub live: usize,
+    /// Restart-tier keys the table named with a value other than the one in
+    /// force. Each is logged and counted, and nothing about it changes.
+    pub pending: Vec<Pending>,
+    /// Keys the broker does not own, in the table's order. Counted, and
+    /// otherwise ignored: a misspelling is an operator's to notice.
+    pub unknown: Vec<String>,
+}
+
+/// A restart-tier key whose file value differs from its effective one.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Pending {
+    /// The key.
+    pub key: &'static str,
+    /// The value in force, which stays.
+    pub effective: Value,
+    /// The value the table carried, which waits for a restart.
+    pub file: Value,
+}
 
 /// One key's shape: how a value is checked and stored.
 #[derive(Clone, Copy, Debug)]
@@ -311,6 +352,122 @@ impl Config {
         self.store(key, value);
         Ok(())
     }
+
+    /// The first `configure`: every key applies, whatever its tier, and a
+    /// key the table leaves out takes its default.
+    pub fn first<S, I>(table: I) -> Result<Applied, Error>
+    where
+        S: AsRef<str>,
+        I: IntoIterator<Item = (S, Value)>,
+    {
+        Config::default().merge(table, true)
+    }
+
+    /// A later `configure` over the configuration in force: the live keys
+    /// apply, a live key the table leaves out takes its default, and a
+    /// changed restart-tier key is reported and left as it is.
+    pub fn apply<S, I>(&self, table: I) -> Result<Applied, Error>
+    where
+        S: AsRef<str>,
+        I: IntoIterator<Item = (S, Value)>,
+    {
+        self.merge(table, false)
+    }
+
+    fn merge<S, I>(&self, table: I, every_tier: bool) -> Result<Applied, Error>
+    where
+        S: AsRef<str>,
+        I: IntoIterator<Item = (S, Value)>,
+    {
+        let mut next = Config::default();
+        let mut applied = Applied {
+            config: Config::default(),
+            live: 0,
+            pending: Vec::new(),
+            unknown: Vec::new(),
+        };
+        // A restart-tier key keeps its effective value until the table says
+        // otherwise, and after the first call the table never does.
+        for key in KEYS.iter().filter(|key| key.tier == Tier::Restart) {
+            next.store(key, self.get(key.name).expect("a key from KEYS"));
+        }
+
+        for (name, value) in table {
+            let Some(key) = Key::named(name.as_ref()) else {
+                applied.unknown.push(name.as_ref().to_owned());
+                continue;
+            };
+            match key.tier {
+                Tier::Live => {
+                    applied.live += 1;
+                    next.set(key, value)?;
+                }
+                Tier::Restart if every_tier => next.set(key, value)?,
+                Tier::Restart => {
+                    // Set on a scratch copy, so a bad value is refused now
+                    // rather than at the restart, and so the comparison is
+                    // between two values of the field's own type: `1e3`
+                    // against `1000`, an address against an address.
+                    let mut file = next.clone();
+                    file.set(key, value)?;
+                    let (effective, file) = (next.get(key.name), file.get(key.name));
+                    if effective != file {
+                        applied.pending.push(Pending {
+                            key: key.name,
+                            effective: effective.expect("a key from KEYS"),
+                            file: file.expect("a key from KEYS"),
+                        });
+                    }
+                }
+            }
+        }
+
+        next.check_invariants()?;
+        applied.config = next;
+        Ok(applied)
+    }
+
+    /// The rules that tie one key to another, checked against the values
+    /// that would be in force. Each rule's basis is beside its key in the
+    /// specification's defaults table.
+    fn check_invariants(&self) -> Result<(), Error> {
+        if self.max_unauthenticated_connections >= self.max_connections {
+            return Err(Error::Invariant(
+                "`max_unauthenticated_connections` must be below `max_connections`, so a slowloris cannot exhaust the pool",
+            ));
+        }
+        if self.ring_out_lifecycle_reserve >= self.ring_out_records {
+            return Err(Error::Invariant(
+                "`ring_out_lifecycle_reserve` must be below `ring_out_records`, or nothing but LIFECYCLE ever fits",
+            ));
+        }
+        if self.heartbeat_interval_ms >= self.dcs_alive_threshold_ms {
+            return Err(Error::Invariant(
+                "`heartbeat_interval_ms` must be below `dcs_alive_threshold_ms`, or the sim reads dead between beats",
+            ));
+        }
+        if self.dcs_alive_threshold_loading_ms < self.load_timeout_ms {
+            return Err(Error::Invariant(
+                "`dcs_alive_threshold_loading_ms` must be at least `load_timeout_ms`, or a normal mission load reads as a dead sim",
+            ));
+        }
+        if !self.allow_public_bind && !is_private(self.bind_address) {
+            return Err(Error::Invariant(
+                "`bind_address` is public; set `allow_public_bind` to listen there anyway",
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Whether an address is loopback or private: one the broker binds to
+/// without `allow_public_bind`. The unspecified address is public, because
+/// it binds every interface.
+fn is_private(addr: IpAddr) -> bool {
+    match addr {
+        IpAddr::V4(v4) => v4.is_loopback() || v4.is_private() || v4.is_link_local(),
+        IpAddr::V6(v6) => v6.is_loopback() || v6.is_unique_local() || v6.is_unicast_link_local(),
+    }
 }
 
 #[cfg(test)]
@@ -385,9 +542,13 @@ mod tests {
             let before = config.get(name);
             let error = config.set(key, value).expect_err("refused");
             assert_eq!(config.get(name), before, "{name} moved on a refusal");
-            let Error::Value { key, expected } = error;
-            assert_eq!(key, name);
-            expected
+            match error {
+                Error::Value { key, expected } => {
+                    assert_eq!(key, name);
+                    expected
+                }
+                Error::Invariant(rule) => panic!("an invariant fired: {rule}"),
+            }
         };
 
         assert_eq!(refused("enabled", n(1.0)), "true or false");
@@ -460,5 +621,189 @@ mod tests {
                 .set(Key::named("ring_out_lifecycle_reserve").unwrap(), n(0.0))
                 .is_ok()
         );
+    }
+
+    /// A first call over an empty table is the defaults, in force. Over a
+    /// full one it applies every tier, a key left out takes its default,
+    /// and unknown keys are named rather than refused.
+    #[test]
+    fn the_first_call_applies_every_tier() {
+        let applied = Config::first(Vec::<(&str, Value)>::new()).expect("the defaults hold");
+        assert_eq!(applied.config, Config::default());
+        assert_eq!((applied.live, applied.pending.len()), (0, 0));
+        assert!(applied.unknown.is_empty());
+
+        let token = Token {
+            id: "map".into(),
+            secret: b"s".to_vec(),
+            caps: [Capability::Read].into_iter().collect(),
+        };
+        let applied = Config::first([
+            ("port", n(0.0)),
+            ("bind_address", Value::String("::1".into())),
+            ("ring_out_records", n(128.0)),
+            ("handshake_timeout_ms", n(250.0)),
+            ("tokens", Value::Tokens(vec![token.clone()])),
+            ("route", Value::String("A".into())),
+            ("max_spots", n(16.0)),
+        ])
+        .expect("a valid table");
+
+        assert_eq!(applied.config.port, 0);
+        assert_eq!(
+            applied.config.bind_address,
+            IpAddr::from([0, 0, 0, 0, 0, 0, 0, 1])
+        );
+        assert_eq!(applied.config.ring_out_records, 128);
+        assert_eq!(applied.config.handshake_timeout_ms, 250);
+        assert_eq!(applied.config.tokens, vec![token]);
+        assert_eq!(applied.config.max_connections, 8, "a key left out");
+        assert_eq!(applied.live, 2);
+        assert!(applied.pending.is_empty());
+        assert_eq!(applied.unknown, ["route", "max_spots"]);
+    }
+
+    /// A later call swaps the live keys, reverts a live key the table
+    /// dropped, and reports a changed restart-tier key without applying it.
+    /// An unchanged one, however the file spells it, is not pending.
+    #[test]
+    fn a_later_call_applies_live_keys_and_reports_restart_keys() {
+        let first = Config::first([
+            ("port", n(0.0)),
+            ("bind_address", Value::String("::1".into())),
+            ("handshake_timeout_ms", n(250.0)),
+        ])
+        .expect("a valid table")
+        .config;
+
+        let later = first
+            .apply([
+                ("rejected_max_per_sec", n(20.0)),
+                ("port", n(7743.0)),
+                ("ring_out_records", n(4096.0)),
+                ("bind_address", Value::String("0:0:0:0:0:0:0:1".into())),
+                ("max_connections", n(16.0)),
+            ])
+            .expect("a valid table");
+
+        assert_eq!(later.config.rejected_max_per_sec, 20);
+        assert_eq!(later.config.handshake_timeout_ms, 5000, "a dropped key");
+        assert_eq!(later.config.port, 0, "a restart-tier key moved");
+        assert_eq!(later.config.max_connections, 8);
+        assert_eq!(later.live, 1);
+        assert_eq!(
+            later.pending,
+            [
+                Pending {
+                    key: "port",
+                    effective: n(0.0),
+                    file: n(7743.0)
+                },
+                Pending {
+                    key: "max_connections",
+                    effective: n(8.0),
+                    file: n(16.0)
+                },
+            ]
+        );
+    }
+
+    /// A bad value anywhere in the table refuses the whole call: a good
+    /// key before it does not apply, and a restart-tier key carrying one is
+    /// refused on a later call rather than at the restart.
+    #[test]
+    fn a_bad_value_refuses_the_whole_call() {
+        let config = Config::default();
+        let refused = config
+            .apply([("enabled", Value::Boolean(false)), ("port", n(-1.0))])
+            .expect_err("refused");
+        assert_eq!(
+            refused.to_string(),
+            "`port` must be a whole number from 0 to 65535"
+        );
+        assert!(config.apply([("ring_out_records", n(0.5))]).is_err());
+        assert!(Config::first([("tokens", n(1.0))]).is_err());
+    }
+
+    /// Each rule that ties two keys refuses the call, and it is checked
+    /// against the values that would be in force: a pending restart-tier
+    /// value neither passes a live key nor fails it.
+    #[test]
+    fn invariants_are_checked_against_effective_values() {
+        let invariant = |table: Vec<(&str, Value)>| match Config::first(table) {
+            Err(Error::Invariant(rule)) => rule,
+            other => panic!("expected an invariant to fire, got {other:?}"),
+        };
+
+        assert!(
+            invariant(vec![("max_unauthenticated_connections", n(8.0))])
+                .contains("`max_connections`")
+        );
+        assert!(
+            invariant(vec![("ring_out_lifecycle_reserve", n(4096.0))])
+                .contains("`ring_out_records`")
+        );
+        assert!(
+            invariant(vec![("heartbeat_interval_ms", n(30_000.0))])
+                .contains("`dcs_alive_threshold_ms`")
+        );
+        assert!(invariant(vec![("load_timeout_ms", n(120_001.0))]).contains("`load_timeout_ms`"));
+        assert!(
+            invariant(vec![("bind_address", Value::String("0.0.0.0".into()))])
+                .contains("`allow_public_bind`")
+        );
+
+        // Raising both sides together passes, and so does a public bind
+        // with the gate set. A private or loopback address needs no gate.
+        Config::first([
+            ("max_connections", n(16.0)),
+            ("max_unauthenticated_connections", n(8.0)),
+        ])
+        .expect("both raised");
+        Config::first([
+            ("bind_address", Value::String("0.0.0.0".into())),
+            ("allow_public_bind", Value::Boolean(true)),
+        ])
+        .expect("gated");
+        for private in [
+            "10.0.0.1",
+            "172.16.0.1",
+            "192.168.1.1",
+            "169.254.1.1",
+            "::1",
+            "fd00::1",
+            "fe80::1",
+        ] {
+            Config::first([("bind_address", Value::String(private.into()))])
+                .unwrap_or_else(|e| panic!("{private} needs no gate: {e}"));
+        }
+
+        // In force: 16 connections, 8 unauthenticated. A file that lowers
+        // `max_connections` to 8 has a pending value; the effective 16 is
+        // what the invariant sees, so the call passes.
+        let config = Config::first([
+            ("max_connections", n(16.0)),
+            ("max_unauthenticated_connections", n(8.0)),
+        ])
+        .expect("valid")
+        .config;
+        let later = config
+            .apply([
+                ("max_connections", n(8.0)),
+                ("max_unauthenticated_connections", n(8.0)),
+            ])
+            .expect("the effective cap is 16");
+        assert_eq!(later.pending.len(), 1);
+        assert_eq!(later.config.max_unauthenticated_connections, 8);
+
+        // And a live key that breaks the rule against the effective value
+        // is refused, however the file's pending value would read.
+        assert!(matches!(
+            config.apply([
+                ("max_connections", n(64.0)),
+                ("max_unauthenticated_connections", n(16.0)),
+            ]),
+            Err(Error::Invariant(_))
+        ));
     }
 }
