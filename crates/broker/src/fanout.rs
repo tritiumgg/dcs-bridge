@@ -898,9 +898,15 @@ mod tests {
     /// thread's, and the ring is large, so the first record is read before
     /// the flood behind it can evict it: eviction is the ring's business
     /// and not what this checks.
+    ///
+    /// Not run under Miri: a thread committing against the clock is what
+    /// the race needs, and Miri interprets a paced committer at minutes per
+    /// attach. What Miri checks here is the ring's ownership, which this
+    /// test moves through the same paths as the others.
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn the_first_record_rides_the_attach_ahead_of_a_continuous_commit() {
-        let attaches: u32 = if cfg!(miri) { 8 } else { 500 };
+        let attaches: u32 = 500;
         let (writer, mut commit, connections) = Writer::spawn(ROOMY);
         let stop = Arc::new(AtomicBool::new(false));
 
