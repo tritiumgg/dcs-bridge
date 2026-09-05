@@ -14,6 +14,8 @@ mod sync;
 // share with the model is the park flag, which the fan-out's Loom test
 // drives from both sides.
 #[cfg(not(loom))]
+pub mod config;
+#[cfg(not(loom))]
 pub mod handshake;
 #[cfg(not(loom))]
 pub mod inbound;
