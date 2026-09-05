@@ -184,10 +184,10 @@ pub const INTERFACE_VERSION: &str = "1";
 /// and the put calls. The first table reads 1 and the second reads 2, which
 /// is how two tables are shown to sit over one bridge.
 ///
-/// The first open also starts the outbound path, listening on the default
-/// address, with the ring sizes below. That belongs to the first
-/// `shim.configure`, which does not exist yet; until it does, an open that
-/// cannot bind raises rather than loading a module nothing can connect to.
+/// An open allocates nothing and listens on nothing. The first
+/// `shim.configure` does both, from the configuration it is handed, so a
+/// state that opens the module after that call finds the bridge running and
+/// disturbs it in no way.
 ///
 /// # Safety
 ///
@@ -198,24 +198,6 @@ pub const INTERFACE_VERSION: &str = "1";
 pub unsafe extern "C" fn luaopen_dcsbridge(state: *mut core::ffi::c_void) -> core::ffi::c_int {
     let version = dcsbridge_broker::BROKER_VERSION;
     let opens = dcsbridge_broker::bridge().open();
-
-    if let Err(error) = dcsbridge_broker::bridge().start_outbound(
-        outbound::LISTEN,
-        outbound::COMMIT_RING_RECORDS,
-        outbound::RING_OUT_RECORDS,
-    ) {
-        let message = format!("cannot listen on {}: {error}", outbound::LISTEN);
-        let message = std::ffi::CString::new(message).unwrap_or_default();
-        // SAFETY: the caller guarantees a live lua_State, and the format
-        // string names one argument and one is passed. luaL_error does not
-        // return, and nothing on this stack needs dropping: the CString
-        // leaks by design, because Lua copies the message before the jump
-        // and the leak is once per failed open.
-        unsafe {
-            lua::luaL_error(state, c"%s".as_ptr(), message.into_raw());
-        }
-        unreachable!("luaL_error does not return")
-    }
 
     // SAFETY: the caller guarantees a live lua_State with four free slots. The
     // table takes one, each pushed value the other, and lua_setfield pops the
@@ -410,7 +392,7 @@ mod configure {
         // SAFETY: every push pairs with the setfield or rawseti that pops
         // it, and the result table stays on top between them.
         unsafe {
-            lua::lua_createtable(state, 0, 5);
+            lua::lua_createtable(state, 0, 6);
             lua::lua_pushlstring(state, interface.as_ptr().cast(), interface.len());
             lua::lua_setfield(state, -2, c"interface".as_ptr());
             lua::lua_pushinteger(state, applied.live as isize);
@@ -419,6 +401,11 @@ mod configure {
             lua::lua_setfield(state, -2, c"unknown".as_ptr());
             lua::lua_pushinteger(state, applied.pending.len() as isize);
             lua::lua_setfield(state, -2, c"pending_restart".as_ptr());
+            if let Some(outbound) = dcsbridge_broker::bridge().outbound() {
+                let listening = outbound.local_addr().to_string();
+                lua::lua_pushlstring(state, listening.as_ptr().cast(), listening.len());
+                lua::lua_setfield(state, -2, c"listening".as_ptr());
+            }
 
             lua::lua_createtable(state, applied.pending.len() as c_int, 0);
             for (n, pending) in applied.pending.iter().enumerate() {
@@ -651,29 +638,14 @@ mod configure {
     }
 }
 
-/// What the outbound path is started with at the first open.
-///
-/// Every value here is provisional. The first `shim.configure` is where
-/// `bind_address`, `port` and `ring_out_records` arrive and where the rings
-/// are meant to be allocated, and the commit ring has no configuration key
-/// yet. Until that call exists these are the specification's defaults, and
-/// the commit ring takes the per-connection size.
-#[cfg(any(unix, feature = "dcs-lua"))]
-mod outbound {
-    /// Loopback, on the port the CLI needs no argument for.
-    pub const LISTEN: &str = "127.0.0.1:7742";
-    /// Records the commit ring holds.
-    pub const COMMIT_RING_RECORDS: usize = 4096;
-    /// Records each connection's ring holds.
-    pub const RING_OUT_RECORDS: usize = 4096;
-}
-
 /// The put calls: one record at a time, built by typed puts into this state's
 /// own encoder.
 ///
 /// A record never spans Lua states, so each state gets its own encoder and no
 /// lock sits on the put path. The encoder lives behind a userdata every put
-/// call closes over, and the userdata's `__gc` drops it with the state.
+/// call closes over, and the userdata's `__gc` drops it with the state. It is
+/// allocated by the state's first `begin`, sized by the frame cap in force
+/// then, because `configure` comes first and an open allocates nothing.
 #[cfg(any(unix, feature = "dcs-lua"))]
 mod put {
     use core::ffi::{CStr, c_int, c_void};
@@ -682,10 +654,6 @@ mod put {
     use dcsbridge_broker::fanout::ConnectionId;
 
     use crate::lua;
-
-    /// The most bytes one record may hold: the default frame cap, until the
-    /// first `configure` supplies the configured value and allocates then.
-    const RECORD_BYTES: usize = 1 << 20;
 
     /// The largest connection id a Lua number carries exactly. A number is a
     /// double, exact to 2^53, and an id past that would have lost precision
@@ -699,8 +667,12 @@ mod put {
     /// on every path out of it, so an address never outlives the record it
     /// was given for: a record left open and abandoned cannot mis-address
     /// the next one.
+    ///
+    /// `encoder` is `None` until the first `begin`, which is refused before
+    /// the first `configure`. A put or a commit with no encoder is one with
+    /// no record open, and says so.
     struct Pending {
-        encoder: Encoder,
+        encoder: Option<Encoder>,
         to: Option<ConnectionId>,
     }
 
@@ -724,7 +696,7 @@ mod put {
     /// `state` is live, the table is at -1, and three stack slots are free.
     pub unsafe fn install(state: *mut c_void) {
         let pending = Box::into_raw(Box::new(Pending {
-            encoder: Encoder::with_capacity(RECORD_BYTES),
+            encoder: None,
             to: None,
         }));
 
@@ -776,14 +748,49 @@ mod put {
         unsafe { &mut **lua::lua_touserdata(state, lua::UPVALUE_1).cast::<*mut Pending>() }
     }
 
-    /// The calling closure's encoder.
+    /// The calling closure's encoder, or the error a put gets when no
+    /// record is open, since none can be before the first `begin`.
     ///
     /// # Safety
     ///
     /// As [`pending`].
-    unsafe fn encoder<'a>(state: *mut c_void) -> &'a mut Encoder {
+    unsafe fn encoder<'a>(state: *mut c_void) -> Result<&'a mut Encoder, Error> {
         // SAFETY: the caller's contract.
-        unsafe { &mut pending(state).encoder }
+        unsafe { pending(state).encoder.as_mut().ok_or(Error::NotOpen) }
+    }
+
+    /// The calling closure's encoder for a `begin`, sized at the frame cap
+    /// in force: allocated on the first one, and again on a `begin` that
+    /// finds the cap moved, since the cap is live and a buffer at the old
+    /// one would refuse records the reader now takes. That is one
+    /// allocation per `configure` that changes it, on a record boundary,
+    /// and none otherwise. Raises before the first `configure`, which is
+    /// what sizes it: a record opened before then would be built against a
+    /// default and queued to nothing.
+    ///
+    /// # Safety
+    ///
+    /// As [`pending`], and called with nothing on the Rust stack that needs
+    /// dropping, because it may raise.
+    unsafe fn opening<'a>(state: *mut c_void) -> &'a mut Pending {
+        let bridge = dcsbridge_broker::bridge();
+        if !bridge.configured() {
+            // SAFETY: the caller is a Lua call; the message is static.
+            unsafe {
+                lua::luaL_error(
+                    state,
+                    c"configure comes first: no record can be opened before it".as_ptr(),
+                );
+            }
+            unreachable!("luaL_error does not return")
+        }
+        // SAFETY: the caller's contract.
+        let pending = unsafe { pending(state) };
+        let cap = bridge.config().max_frame_bytes as usize;
+        if pending.encoder.as_ref().is_none_or(|e| e.capacity() != cap) {
+            pending.encoder = Some(Encoder::with_capacity(cap));
+        }
+        pending
     }
 
     /// The field number at argument 1. Anything outside a field number's
@@ -824,17 +831,22 @@ mod put {
     /// `shim.begin(topic)`: open a record on the topic for every connection,
     /// discarding and counting one left open. The topic names the record's
     /// type on the wire. Whether it is a registered one is a check
-    /// registration brings.
+    /// registration brings. Raises before the first `configure`.
     unsafe extern "C" fn begin(state: *mut c_void) -> c_int {
         // SAFETY: a Lua call over the closure `install` built. The topic is
-        // an argument, so Lua keeps it alive for the whole call.
+        // an argument, so Lua keeps it alive for the whole call, and the
+        // raise in `opening` happens before anything else is held.
         unsafe {
             let mut len = 0;
             let s = lua::luaL_checklstring(state, 1, &mut len);
             let topic = core::slice::from_raw_parts(s.cast::<u8>(), len);
-            let pending = pending(state);
+            let pending = opening(state);
             pending.to = None;
-            pending.encoder.begin(topic);
+            pending
+                .encoder
+                .as_mut()
+                .expect("opening set it")
+                .begin(topic);
         }
         0
     }
@@ -884,8 +896,12 @@ mod put {
                 unreachable!("luaL_error does not return")
             }
 
-            let pending = pending(state);
-            pending.encoder.begin(topic);
+            let pending = opening(state);
+            pending
+                .encoder
+                .as_mut()
+                .expect("opening set it")
+                .begin(topic);
             pending.to = Some(ConnectionId::from_raw(id as u64));
         }
         0
@@ -899,7 +915,10 @@ mod put {
         // SAFETY: a Lua call over the closure `install` built.
         unsafe {
             let n = lua::luaL_checknumber(state, 2) as i64;
-            check(state, encoder(state).integer(field(state), n))
+            check(
+                state,
+                encoder(state).and_then(|e| e.integer(field(state), n)),
+            )
         }
     }
 
@@ -908,7 +927,10 @@ mod put {
         // SAFETY: a Lua call over the closure `install` built.
         unsafe {
             let x = lua::luaL_checknumber(state, 2);
-            check(state, encoder(state).double(field(state), x))
+            check(
+                state,
+                encoder(state).and_then(|e| e.double(field(state), x)),
+            )
         }
     }
 
@@ -920,7 +942,10 @@ mod put {
             let mut len = 0;
             let s = lua::luaL_checklstring(state, 2, &mut len);
             let bytes = core::slice::from_raw_parts(s.cast::<u8>(), len);
-            check(state, encoder(state).string(field(state), bytes))
+            check(
+                state,
+                encoder(state).and_then(|e| e.string(field(state), bytes)),
+            )
         }
     }
 
@@ -930,20 +955,23 @@ mod put {
         unsafe {
             lua::luaL_checktype(state, 2, lua::TBOOLEAN);
             let b = lua::lua_toboolean(state, 2) != 0;
-            check(state, encoder(state).boolean(field(state), b))
+            check(
+                state,
+                encoder(state).and_then(|e| e.boolean(field(state), b)),
+            )
         }
     }
 
     /// `shim.message(field)`: open a nested message.
     unsafe extern "C" fn message(state: *mut c_void) -> c_int {
         // SAFETY: a Lua call over the closure `install` built.
-        unsafe { check(state, encoder(state).message(field(state))) }
+        unsafe { check(state, encoder(state).and_then(|e| e.message(field(state)))) }
     }
 
     /// `shim.end_message()`: close the innermost open message.
     unsafe extern "C" fn end_message(state: *mut c_void) -> c_int {
         // SAFETY: a Lua call over the closure `install` built.
-        unsafe { check(state, encoder(state).end_message()) }
+        unsafe { check(state, encoder(state).and_then(Encoder::end_message)) }
     }
 
     /// `shim.commit()`: close the record and queue it, for every connection
@@ -966,7 +994,10 @@ mod put {
             // record whether or not the record goes anywhere.
             let to = pending.to.take();
             let bridge = dcsbridge_broker::bridge();
-            let queued = match pending.encoder.commit() {
+            let Some(encoder) = pending.encoder.as_mut() else {
+                raise(state, Error::NotOpen)
+            };
+            let queued = match encoder.commit() {
                 Ok(tail) => match to {
                     Some(to) => bridge.commit_to(to, tail).is_ok(),
                     None => bridge.commit(tail).is_ok(),

@@ -25,6 +25,8 @@ local function open(module)
 end
 
 local shim = open(path)
+-- configure comes first: nothing opens a record before it.
+shim.configure({ port = 0 })
 assert(type(shim.begin_to) == 'function', 'shim.begin_to is missing')
 
 local ack = 'dcs.bridge.CommandAck'

@@ -258,6 +258,37 @@ impl Outbound {
     }
 }
 
+/// Why a `configure` was refused, with nothing changed.
+#[derive(Debug)]
+pub enum ConfigureError {
+    /// The table failed a check.
+    Config(config::Error),
+    /// The first call could not bind its listener.
+    Bind {
+        /// The address the table named.
+        addr: SocketAddr,
+        /// What the bind said.
+        error: io::Error,
+    },
+}
+
+impl From<config::Error> for ConfigureError {
+    fn from(error: config::Error) -> Self {
+        ConfigureError::Config(error)
+    }
+}
+
+impl fmt::Display for ConfigureError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ConfigureError::Config(error) => error.fmt(f),
+            ConfigureError::Bind { addr, error } => write!(f, "cannot listen on {addr}: {error}"),
+        }
+    }
+}
+
+impl std::error::Error for ConfigureError {}
+
 /// Why a record was not queued.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CommitError {
@@ -413,13 +444,22 @@ impl Bridge {
     /// so a connection authenticating after this sees the new one; a
     /// session opened under a token the table drops is not closed here.
     ///
+    /// The first call is also what allocates and binds: the commit ring,
+    /// the listener on `bind_address` and `port`, and the ring each
+    /// connection gets, all sized from the table. A bind that fails refuses
+    /// the call with nothing in force and nothing started, so the hook
+    /// driver can fix the address and call again. A later call never
+    /// reallocates and never rebinds. The commit ring has no key of its own
+    /// and takes `ring_out_records`: one thread drains it into every
+    /// connection's ring, so it needs no more room than one of them.
+    ///
     /// The swap is one pointer store, so a reader sees the old
     /// configuration or the new one and never a mix. The read lock is held
     /// by no reader for longer than a pointer copy, so nothing on a reader
     /// thread waits on the logic thread through it. The two counts are
     /// stored beside the swap rather than inside it: they are read by
     /// nothing that decides, only reported.
-    pub fn configure<S, I>(&self, table: I) -> Result<Applied, config::Error>
+    pub fn configure<S, I>(&self, table: I) -> Result<Applied, ConfigureError>
     where
         S: AsRef<str>,
         I: IntoIterator<Item = (S, Value)>,
@@ -431,7 +471,12 @@ impl Bridge {
         let applied = if *configured {
             self.config().apply(table)?
         } else {
-            Config::first(table)?
+            let applied = Config::first(table)?;
+            let addr = SocketAddr::new(applied.config.bind_address, applied.config.port);
+            let ring = applied.config.ring_out_records as usize;
+            self.start_outbound(addr, ring, ring)
+                .map_err(|error| ConfigureError::Bind { addr, error })?;
+            applied
         };
         self.pending_restart
             .store(applied.pending.len() as u64, Ordering::Relaxed);
@@ -980,9 +1025,11 @@ mod tests {
         assert!(!bridge.configured());
         assert!(bridge.liveness().enabled);
 
-        // The first call: every tier applies, including the cap.
+        // The first call: every tier applies, including the cap, and the
+        // listener binds on the port the table names.
         let applied = bridge
             .configure([
+                ("port", n(0.0)),
                 ("max_connections", n(2.0)),
                 ("max_unauthenticated_connections", n(1.0)),
                 ("handshake_timeout_ms", n(250.0)),

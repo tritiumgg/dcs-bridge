@@ -44,11 +44,20 @@ local function complains(what, table, about)
   assert(err:find(about, 1, true), what .. ': the wrong complaint: ' .. err)
 end
 
+-- Before the first call nothing listens and no record can be opened: a
+-- begin raises saying so, and a put or a commit says no record is open.
+local early = raises('begin before configure', shim.begin, 't')
+assert(early:find('configure comes first', 1, true), 'the wrong complaint: ' .. early)
+raises('begin_to before configure', shim.begin_to, 1, 'dcs.bridge.CommandAck')
+assert(raises('integer before configure', shim.integer, 1, 1):find('no record is open', 1, true))
+assert(raises('commit before configure', shim.commit):find('no record is open', 1, true))
+
 -- The first call: every tier applies, a key the broker does not own is
--- counted, and the answer carries the interface version the hook driver
--- compares.
+-- counted, the listener binds on the port the table names, and the answer
+-- carries the interface version the hook driver compares and the address
+-- bound. Port 0 lets the system pick, so the run collides with nothing.
 local first = shim.configure({
-  port = 7742,
+  port = 0,
   max_connections = 8,
   max_unauthenticated_connections = 2,
   handshake_timeout_ms = 2500,
@@ -65,6 +74,15 @@ assert(first.applied == 4, 'the first call applied ' .. tostring(first.applied))
 assert(first.unknown == 1, 'the first call counted ' .. tostring(first.unknown) .. ' unknown')
 assert(first.pending_restart == 0, 'the first call left something pending')
 assert(#first.pending == 0)
+assert(
+  type(first.listening) == 'string' and first.listening:find('^127%.0%.0%.1:%d+$'),
+  'listening reads ' .. tostring(first.listening)
+)
+assert(first.listening ~= '127.0.0.1:0', 'the answer carries the port asked for, not the one bound')
+
+-- A record opens once configured, and queues.
+shim.begin('dcs.builtin.UnitDestroyed')
+assert(shim.commit() == true, 'a record after configure did not queue')
 
 -- A later call: the live keys apply and a changed restart-tier key is
 -- reported with both values, not applied. An unchanged one is not pending.
@@ -77,8 +95,22 @@ local later = shim.configure({
 assert(later.applied == 2, 'the later call applied ' .. tostring(later.applied))
 assert(later.pending_restart == 1, 'pending_restart is ' .. tostring(later.pending_restart))
 assert(later.pending[1].key == 'port', 'pending names ' .. tostring(later.pending[1].key))
-assert(later.pending[1].effective == 7742 and later.pending[1].file == 7743)
+assert(later.pending[1].effective == 0 and later.pending[1].file == 7743)
+assert(later.listening == first.listening, 'a later call rebound the listener')
 assert(later.unknown == 0)
+
+-- The frame cap is live, and the record buffer follows it at the next
+-- begin: under a cap of 64 bytes a 200-byte string outgrows the buffer
+-- and the put raises, and once the cap is back at its default the same
+-- record queues.
+shim.configure({ max_frame_bytes = 64 })
+shim.begin('dcs.builtin.UnitDestroyed')
+local full = raises('a put over the lowered cap', shim.string, 1, string.rep('x', 200))
+assert(full:find('outgrew its buffer', 1, true), 'the wrong complaint: ' .. full)
+shim.configure({})
+shim.begin('dcs.builtin.UnitDestroyed')
+shim.string(1, string.rep('x', 200))
+assert(shim.commit() == true, 'the record buffer did not follow the cap back up')
 
 -- An empty table is a valid configuration: every live key at its default,
 -- and no token, which is what a bridge nobody can authenticate to looks
@@ -142,6 +174,7 @@ complains(
 )
 
 print('ok  configure is on the table and answers the interface version')
+print('ok  nothing opens a record before the first call, which binds and allocates')
 print('ok  the first call applies every tier and a later one the live keys')
 print('ok  a changed restart-tier key is reported pending with both values')
 print('ok  a bad value is refused naming the key')

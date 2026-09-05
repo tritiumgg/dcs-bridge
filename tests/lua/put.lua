@@ -25,6 +25,9 @@ local function open(module)
 end
 
 local shim = open(path)
+-- configure comes first: nothing opens a record before it. configure.lua
+-- checks the refusal; here the call is what lets the puts run.
+shim.configure({ port = 0 })
 for _, name in ipairs({
   'begin', 'begin_to', 'integer', 'double', 'string', 'boolean', 'message', 'end_message', 'commit',
 }) do

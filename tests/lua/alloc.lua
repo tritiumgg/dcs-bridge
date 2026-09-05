@@ -29,6 +29,10 @@ local function open(module)
 end
 
 local shim = open(path)
+-- configure comes first: nothing opens a record before it. The state's
+-- encoder is allocated by its first begin, which growth() runs before it
+-- counts, so that one allocation is outside every measurement below.
+shim.configure({ port = 0 })
 local begin, integer, double, string_, boolean =
   shim.begin, shim.integer, shim.double, shim.string, shim.boolean
 local message, end_message, commit = shim.message, shim.end_message, shim.commit

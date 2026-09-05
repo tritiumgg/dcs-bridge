@@ -77,6 +77,13 @@ Settings live in `Config\DCSBridge.lua` in the Saved Games directory. The bridge
 runs with the file absent and uses its defaults. The defaults bind the broker
 to `127.0.0.1:7742`. The full set of keys is not final.
 
+The hook script reads the file and hands the bridge its settings with
+`shim.configure`. Nothing listens until that first call, which binds the
+address and sizes the queues. A later call, on `ReloadConfig`, changes the
+keys marked live, such as the timeouts and the tokens; a change to the
+address, the port, the connection cap or a queue size waits for a DCS
+restart, and the call reports it as pending.
+
 A consumer authenticates with a token: an id, a secret, and the capabilities
 the token grants, from `read`, `command` and `reload`. The `tokens` key holds
 one entry per consumer. Reading it from the file is not yet built; until then
