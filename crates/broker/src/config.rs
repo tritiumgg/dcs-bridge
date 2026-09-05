@@ -366,6 +366,9 @@ impl Config {
     /// A later `configure` over the configuration in force: the live keys
     /// apply, a live key the table leaves out takes its default, and a
     /// changed restart-tier key is reported and left as it is.
+    ///
+    /// `table` names each key once, as a Lua table does; a name given twice
+    /// is counted twice.
     pub fn apply<S, I>(&self, table: I) -> Result<Applied, Error>
     where
         S: AsRef<str>,
@@ -428,8 +431,8 @@ impl Config {
     }
 
     /// The rules that tie one key to another, checked against the values
-    /// that would be in force. Each rule's basis is beside its key in the
-    /// specification's defaults table.
+    /// that would be in force: every pair whose keys are both the broker's
+    /// and whose basis says one bounds the other. ADR 0019.
     fn check_invariants(&self) -> Result<(), Error> {
         if self.max_unauthenticated_connections >= self.max_connections {
             return Err(Error::Invariant(
@@ -462,11 +465,15 @@ impl Config {
 
 /// Whether an address is loopback or private: one the broker binds to
 /// without `allow_public_bind`. The unspecified address is public, because
-/// it binds every interface.
+/// it binds every interface. An IPv6 address carrying an IPv4 one is judged
+/// as the IPv4 one, since that is the interface it names.
 fn is_private(addr: IpAddr) -> bool {
     match addr {
         IpAddr::V4(v4) => v4.is_loopback() || v4.is_private() || v4.is_link_local(),
-        IpAddr::V6(v6) => v6.is_loopback() || v6.is_unique_local() || v6.is_unicast_link_local(),
+        IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
+            Some(v4) => is_private(IpAddr::V4(v4)),
+            None => v6.is_loopback() || v6.is_unique_local() || v6.is_unicast_link_local(),
+        },
     }
 }
 
@@ -773,6 +780,7 @@ mod tests {
             "::1",
             "fd00::1",
             "fe80::1",
+            "::ffff:127.0.0.1",
         ] {
             Config::first([("bind_address", Value::String(private.into()))])
                 .unwrap_or_else(|e| panic!("{private} needs no gate: {e}"));
