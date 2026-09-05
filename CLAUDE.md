@@ -253,13 +253,19 @@ and the pull requests opened. `mise run check` alone is what a Windows host
 can run and what a mid-task commit needs; it is not what a push needs.
 
 **History is linear. Rebase, never merge-commit.** Bring a branch up to date
-with `git rebase origin/main`; the maintainer lands it with `git merge
---ff-only`. If the fast-forward is refused, fix the branch rather than reaching
-for a merge commit. Rebasing re-signs, so the commit signatures survive the
-rewrite.
+with `git rebase origin/main`; a branch lands with `git merge --ff-only`. If
+the fast-forward is refused, fix the branch rather than reaching for a merge
+commit. Rebasing re-signs, so the commit signatures survive the rewrite.
 
-**Work reaches `main` through a pull request the maintainer reviews.** Open it,
-report it as waiting, and stop there.
+**Work reaches `main` through a pull request, and lands when the maintainer
+says so.** Open it, report it as waiting, and stop there. When the maintainer
+asks for a stack to be merged, land it: retarget every stacked pull request at
+`main` so GitHub records each as merged, fast-forward `main` to the top of the
+stack, push `main` once, and delete the branches. Every branch's CI run is
+green first and every reviewer finding on it is fixed; a stack with a red run
+is reported, not landed. The ask covers the stack it names and no later one,
+and the push itself still prompts the maintainer at the keyboard through the
+shell guard, so a merge is confirmed twice: once in words, once at the prompt.
 
 **Every pull request body follows `.github/PULL_REQUEST_TEMPLATE.md`.** `gh pr
 create --body` does not read the template, so write the body to its headings.
@@ -277,19 +283,18 @@ where nothing applies.
 
 Do these without asking: branch, commit, rebase onto `main`, push a topic
 branch, force-with-lease a topic branch that is yours, delete a branch that is
-already merged, and open a pull request with `gh`.
+already merged, and open a pull request with `gh`. Do these when the
+maintainer asks: fast-forward `main` to a stack and push it.
 
 The hooks in `.claude/hooks/` hold the rest of this section: the shell guard
 refuses a merge without `--ff-only` and a force push without a lease, and
-turns a push to `main`, a tag, a release and a pull request merge into a
-prompt for the maintainer. The commit checks run `tools/nospecrefs.sh` and
-`tools/statecheck.sh` before a commit and check the message after. `mise run
-docs` runs `tools/hooktest.sh` against every hook.
+turns a push to `main`, a tag, a release, a pull request merge and a rewrite
+of `main`'s history into a prompt for the maintainer. The commit checks run
+`tools/nospecrefs.sh` and `tools/statecheck.sh` before a commit and check the
+message after. `mise run docs` runs `tools/hooktest.sh` against every hook.
 
-**Ask first before merging a pull request, before pushing `main`, before
-rewriting history that has been pushed, and before tagging.** A small diff and
-a green CI run are not permission, and permission given for one pull request
-does not carry to the next. A tag is not a label here: `release.yml` fires on
-`v*` and publishes to GitHub, so tagging is a release and the maintainer makes
-it.
+**Ask first before rewriting history that has been pushed, and before
+tagging.** Permission to land one stack does not carry to the next. A tag is
+not a label here: `release.yml` fires on `v*` and publishes to GitHub, so
+tagging is a release and the maintainer makes it.
 
