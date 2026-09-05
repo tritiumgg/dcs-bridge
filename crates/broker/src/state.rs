@@ -503,11 +503,18 @@ impl Bridge {
     /// `SERVER_FULL` until the process restarted, which is too large a
     /// blast radius for one misplaced call.
     pub fn disconnected(&self, _session: &Session) {
-        let _ = self
-            .authenticated
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |held| {
-                held.checked_sub(1)
-            });
+        let mut held = self.authenticated.load(Ordering::Relaxed);
+        while held > 0 {
+            match self.authenticated.compare_exchange_weak(
+                held,
+                held - 1,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => break,
+                Err(now) => held = now,
+            }
+        }
     }
 
     /// How many connections are authenticated right now.
