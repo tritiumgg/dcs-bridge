@@ -21,15 +21,16 @@ use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::io;
 use std::net::{SocketAddr, ToSocketAddrs};
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{
     Arc, Mutex, MutexGuard, OnceLock, PoisonError, RwLock, RwLockReadGuard, TryLockError,
 };
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
+use crate::config::{self, Applied, Config, Value};
 use crate::fanout::{Commit, ConnectionId, Writer};
 use crate::handshake;
-use crate::inbound::{Answers, AuthError, Liveness, Session};
+use crate::inbound::{Answers, AuthError, Limits, Liveness, Session};
 use crate::transport::{Listener, Record};
 
 /// A topic: the fully-qualified protobuf type name of a record's payload.
@@ -173,11 +174,24 @@ pub struct Bridge {
     /// the heartbeat, plus one, so that zero means never. Nothing stamps it
     /// yet: `shim.tick` is what will.
     heartbeat: AtomicU64,
-    /// The effective value of the `enabled` key, the kill switch.
-    enabled: AtomicBool,
-    /// The `tokens` key: every consumer credential, replaced whole.
-    tokens: RwLock<Vec<Token>>,
-    /// Connections authenticated right now, held under `MAX_CONNECTIONS`.
+    /// The configuration in force, replaced whole by each `configure` and
+    /// by `SetEnabled`, which moves the `enabled` key inside it. Every
+    /// thread that decides by a live key reads it here, taking the lock for
+    /// the length of one pointer copy. ADR 0019.
+    config: RwLock<Arc<Config>>,
+    /// Held by every writer of `config` from its read of the configuration
+    /// in force to its swap, so two writers cannot each build on the same
+    /// old one and the second lose the first. Holds whether the first
+    /// `configure` has happened, read under the same lock. Before it, every
+    /// value is the specification's default and nothing is allocated from
+    /// one.
+    configuring: Mutex<bool>,
+    /// `config_keys_pending_restart`: restart-tier keys whose file value
+    /// differs from the one in force, as of the last `configure`.
+    pending_restart: AtomicU64,
+    /// Keys the last `configure` carried that the broker does not own.
+    unknown_keys: AtomicU64,
+    /// Connections authenticated right now, held under `max_connections`.
     authenticated: AtomicU64,
     /// `SeqAck` records consumed. Nothing reads the number they carry until
     /// the replay spool exists.
@@ -187,14 +201,6 @@ pub struct Bridge {
     /// exist.
     no_capability: AtomicU64,
 }
-
-/// How old the heartbeat may be for the sim to count as alive.
-///
-/// The specification's default: the largest measured gap while running is
-/// under a third of a second and the largest untelegraphed transition under
-/// two, so this carries a wide margin over both. The first `configure` is
-/// where the configured value arrives.
-pub const DCS_ALIVE_THRESHOLD: Duration = Duration::from_millis(30_000);
 
 /// The outbound path: the writer thread, the logic thread's end of the
 /// commit ring, and the listener whose connections the writer fans out to.
@@ -280,21 +286,7 @@ static BRIDGE: OnceLock<Bridge> = OnceLock::new();
 /// Safe to call from either DCS Lua state and from any thread. Racing callers
 /// agree on one instance, and the loser of the race drops its own.
 pub fn bridge() -> &'static Bridge {
-    BRIDGE.get_or_init(|| Bridge {
-        opens: AtomicU32::new(0),
-        registry: RwLock::new(Registry::default()),
-        outbound: OnceLock::new(),
-        starting: Mutex::new(()),
-        misaddressed: AtomicU64::new(0),
-        instance_id: handshake::instance_id(),
-        started: Instant::now(),
-        heartbeat: AtomicU64::new(0),
-        enabled: AtomicBool::new(true),
-        tokens: RwLock::new(Vec::new()),
-        authenticated: AtomicU64::new(0),
-        seq_acks: AtomicU64::new(0),
-        no_capability: AtomicU64::new(0),
-    })
+    BRIDGE.get_or_init(|| Bridge::new(handshake::instance_id()))
 }
 
 /// The process's bridge, as the reader thread asks it things.
@@ -312,6 +304,10 @@ impl Answers for Global {
 
     fn liveness(&self) -> Liveness {
         bridge().liveness()
+    }
+
+    fn limits(&self) -> Limits {
+        Limits::from(&*bridge().config())
     }
 
     fn authenticate(&self, secret: &[u8]) -> Result<Session, AuthError> {
@@ -353,11 +349,6 @@ pub struct Token {
     pub caps: HashSet<Capability>,
 }
 
-/// How many connections may be authenticated at once. The specification's
-/// default: a bot, a map, a stats collector, and headroom. The first
-/// `configure` is where the configured value arrives.
-pub const MAX_CONNECTIONS: usize = 8;
-
 /// Whether two secrets are the same, in time that depends on the presented
 /// secret's length and on nothing about either secret's content.
 ///
@@ -381,6 +372,99 @@ fn same_secret(presented: &[u8], configured: &[u8]) -> bool {
 }
 
 impl Bridge {
+    /// A bridge with nothing started, nothing registered, and the
+    /// specification's defaults in force.
+    fn new(instance_id: u64) -> Self {
+        Bridge {
+            opens: AtomicU32::new(0),
+            registry: RwLock::new(Registry::default()),
+            outbound: OnceLock::new(),
+            starting: Mutex::new(()),
+            misaddressed: AtomicU64::new(0),
+            instance_id,
+            started: Instant::now(),
+            heartbeat: AtomicU64::new(0),
+            config: RwLock::new(Arc::new(Config::default())),
+            configuring: Mutex::new(false),
+            pending_restart: AtomicU64::new(0),
+            unknown_keys: AtomicU64::new(0),
+            authenticated: AtomicU64::new(0),
+            seq_acks: AtomicU64::new(0),
+            no_capability: AtomicU64::new(0),
+        }
+    }
+
+    /// The configuration in force, as of now.
+    ///
+    /// A pointer copy under the read lock, so a thread deciding by a live
+    /// key holds the lock for no longer than that and sees one whole
+    /// configuration, never half of one and half of the next.
+    pub fn config(&self) -> Arc<Config> {
+        Arc::clone(&self.config.read().unwrap_or_else(PoisonError::into_inner))
+    }
+
+    /// Apply a configuration table as one swap, or refuse it whole and
+    /// change nothing.
+    ///
+    /// The first call applies every key. A later one applies the live keys,
+    /// counts a changed restart-tier key as pending a restart, and leaves
+    /// it as it is. Both count the keys the broker does not own. The kill
+    /// switch takes the table's `enabled`, and the token table is replaced,
+    /// so a connection authenticating after this sees the new one; a
+    /// session opened under a token the table drops is not closed here.
+    ///
+    /// The swap is one pointer store, so a reader sees the old
+    /// configuration or the new one and never a mix. The read lock is held
+    /// by no reader for longer than a pointer copy, so nothing on a reader
+    /// thread waits on the logic thread through it. The two counts are
+    /// stored beside the swap rather than inside it: they are read by
+    /// nothing that decides, only reported.
+    pub fn configure<S, I>(&self, table: I) -> Result<Applied, config::Error>
+    where
+        S: AsRef<str>,
+        I: IntoIterator<Item = (S, Value)>,
+    {
+        let mut configured = self
+            .configuring
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let applied = if *configured {
+            self.config().apply(table)?
+        } else {
+            Config::first(table)?
+        };
+        self.pending_restart
+            .store(applied.pending.len() as u64, Ordering::Relaxed);
+        self.unknown_keys
+            .store(applied.unknown.len() as u64, Ordering::Relaxed);
+        self.swap(applied.config.clone());
+        *configured = true;
+        Ok(applied)
+    }
+
+    /// Put `next` in force. Called with `configuring` held.
+    fn swap(&self, next: Config) {
+        *self.config.write().unwrap_or_else(PoisonError::into_inner) = Arc::new(next);
+    }
+
+    /// Whether the first `configure` has happened.
+    pub fn configured(&self) -> bool {
+        *self
+            .configuring
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// `config_keys_pending_restart`, as of the last `configure`.
+    pub fn pending_restart(&self) -> u64 {
+        self.pending_restart.load(Ordering::Relaxed)
+    }
+
+    /// Keys the last `configure` carried that the broker does not own.
+    pub fn unknown_keys(&self) -> u64 {
+        self.unknown_keys.load(Ordering::Relaxed)
+    }
+
     /// Start the outbound path, or return the address it is already bound
     /// to: the writer thread over a commit ring of `commit_capacity` records,
     /// and a listener on `addr` giving each connection a ring of
@@ -455,23 +539,30 @@ impl Bridge {
             0 => None,
             stamped => Some(now.saturating_sub(stamped - 1)),
         };
-        let threshold = u64::try_from(DCS_ALIVE_THRESHOLD.as_millis()).unwrap_or(u64::MAX);
+        let config = self.config();
         Liveness {
             last_heard_ms,
-            alive: last_heard_ms.is_some_and(|age| age < threshold),
-            enabled: self.enabled.load(Ordering::Relaxed),
+            alive: last_heard_ms.is_some_and(|age| age < config.dcs_alive_threshold_ms),
+            enabled: config.enabled,
         }
     }
 
     /// The effective value of the `enabled` key.
     pub fn enabled(&self) -> bool {
-        self.enabled.load(Ordering::Relaxed)
+        self.config().enabled
     }
 
-    /// Set the kill switch. One atomic store; what a disabled bridge stops
+    /// Set the kill switch: the one key `SetEnabled` moves between two
+    /// `configure`s, swapped in the same way. What a disabled bridge stops
     /// is the hook driver's to stop, and it reads this to know.
     pub fn set_enabled(&self, enabled: bool) {
-        self.enabled.store(enabled, Ordering::Relaxed);
+        let _configuring = self
+            .configuring
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let mut next = (*self.config()).clone();
+        next.enabled = enabled;
+        self.swap(next);
     }
 
     /// A consumer reported `seq` as durably processed. Counted; the number
@@ -497,13 +588,23 @@ impl Bridge {
         self.no_capability.load(Ordering::Relaxed)
     }
 
-    /// Replace the token table whole.
+    /// Replace the token table whole, leaving every other key as it is.
     ///
-    /// Live: a connection authenticates against whatever the table holds
-    /// at that moment. A session authenticated under a token the new table
-    /// drops is not closed here; revocation is a later task's.
+    /// The `tokens` key reaches the broker through `configure`; this is
+    /// how a test hands the shared bridge one credential without touching
+    /// the rest. The swap is the same one a `configure` makes, so a
+    /// connection authenticates against whatever the table holds at that
+    /// moment. It does not count as the first `configure`, so a first
+    /// `configure` after it starts from the defaults and the table's own
+    /// `tokens`, as the file is the whole configuration.
     pub fn set_tokens(&self, tokens: Vec<Token>) {
-        *self.tokens.write().unwrap_or_else(PoisonError::into_inner) = tokens;
+        let _configuring = self
+            .configuring
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let mut next = (*self.config()).clone();
+        next.tokens = tokens;
+        self.swap(next);
     }
 
     /// Match `secret` against every token and open a session on the one
@@ -513,13 +614,13 @@ impl Bridge {
     /// the time taken says nothing about which entry, if any, was right.
     /// A match with an empty capability set is refused: the token can do
     /// nothing, which is a configuration mistake and worth a distinct error.
-    /// A match past `MAX_CONNECTIONS` authenticated sessions is refused as
+    /// A match past `max_connections` authenticated sessions is refused as
     /// full, and the count is taken here so two racing `Auth`s cannot both
     /// take the last slot.
     pub fn authenticate(&self, secret: &[u8]) -> Result<Session, AuthError> {
-        let tokens = self.tokens.read().unwrap_or_else(PoisonError::into_inner);
+        let config = self.config();
         let mut matched = None;
-        for token in tokens.iter() {
+        for token in config.tokens.iter() {
             if same_secret(secret, &token.secret) && matched.is_none() {
                 matched = Some(token);
             }
@@ -529,7 +630,7 @@ impl Bridge {
             return Err(AuthError::EmptyCapabilitySet);
         }
 
-        let limit = MAX_CONNECTIONS as u64;
+        let limit = u64::from(config.max_connections);
         let mut held = self.authenticated.load(Ordering::Relaxed);
         loop {
             if held >= limit {
@@ -796,21 +897,8 @@ mod tests {
     /// wrong.
     #[test]
     fn authentication_matches_a_token_and_holds_the_session_count() {
-        let bridge = Bridge {
-            opens: AtomicU32::new(0),
-            registry: RwLock::new(Registry::default()),
-            outbound: OnceLock::new(),
-            starting: Mutex::new(()),
-            misaddressed: AtomicU64::new(0),
-            instance_id: 1,
-            started: Instant::now(),
-            heartbeat: AtomicU64::new(0),
-            enabled: AtomicBool::new(true),
-            tokens: RwLock::new(Vec::new()),
-            authenticated: AtomicU64::new(0),
-            seq_acks: AtomicU64::new(0),
-            no_capability: AtomicU64::new(0),
-        };
+        let bridge = Bridge::new(1);
+        let max_connections = Config::default().max_connections;
         assert_eq!(bridge.authenticate(b"anything"), Err(AuthError::BadToken));
 
         bridge.set_tokens(vec![
@@ -839,7 +927,7 @@ mod tests {
         );
         assert_eq!(bridge.authenticated(), 0, "a refusal took a slot");
 
-        let sessions: Vec<Session> = (0..MAX_CONNECTIONS)
+        let sessions: Vec<Session> = (0..max_connections)
             .map(|_| {
                 bridge
                     .authenticate(b"correct horse")
@@ -873,6 +961,94 @@ mod tests {
         assert!(same_secret(b"", b""));
         assert!(!same_secret(b"a", b""));
         assert!(!same_secret(b"", b"a"));
+    }
+
+    /// A `configure` is one swap: the token table and the connection cap
+    /// bind on the next `Auth`, the kill switch and the alive threshold on
+    /// the next `Ping`, the reader's limits on its next read. A later call
+    /// applies the live keys, counts a changed restart-tier key and an
+    /// unknown one, and a refused call changes nothing at all.
+    #[test]
+    fn configure_swaps_the_live_keys_and_counts_the_rest() {
+        let bridge = Bridge::new(2);
+        let n = Value::Number;
+        let token = |id: &str, secret: &[u8]| Token {
+            id: id.into(),
+            secret: secret.to_vec(),
+            caps: [Capability::Read].into_iter().collect(),
+        };
+        assert!(!bridge.configured());
+        assert!(bridge.liveness().enabled);
+
+        // The first call: every tier applies, including the cap.
+        let applied = bridge
+            .configure([
+                ("max_connections", n(2.0)),
+                ("max_unauthenticated_connections", n(1.0)),
+                ("handshake_timeout_ms", n(250.0)),
+                ("enabled", Value::Boolean(false)),
+                ("tokens", Value::Tokens(vec![token("a", b"first")])),
+                ("route", Value::String("A".into())),
+            ])
+            .expect("a valid table");
+        assert!(bridge.configured());
+        assert_eq!((applied.live, applied.pending.len()), (4, 0));
+        assert_eq!(bridge.unknown_keys(), 1);
+        assert_eq!(bridge.pending_restart(), 0);
+        assert!(!bridge.liveness().enabled, "enabled did not apply");
+        assert_eq!(
+            Limits::from(&*bridge.config()).handshake_timeout,
+            std::time::Duration::from_millis(250)
+        );
+        let kept = bridge.authenticate(b"first").expect("the new token");
+        bridge.authenticate(b"first").expect("under the cap of two");
+        assert_eq!(bridge.authenticate(b"first"), Err(AuthError::ServerFull));
+
+        // A later call: the token table and the switch move, the cap does
+        // not and is counted, and a live key the table drops reverts.
+        let applied = bridge
+            .configure([
+                ("max_connections", n(8.0)),
+                ("max_unauthenticated_connections", n(1.0)),
+                ("enabled", Value::Boolean(true)),
+                ("tokens", Value::Tokens(vec![token("b", b"second")])),
+            ])
+            .expect("a valid table");
+        assert_eq!(applied.pending[0].key, "max_connections");
+        assert_eq!(bridge.pending_restart(), 1);
+        assert_eq!(bridge.unknown_keys(), 0);
+        assert!(bridge.liveness().enabled);
+        assert_eq!(
+            Limits::from(&*bridge.config()).handshake_timeout,
+            Limits::default().handshake_timeout,
+            "a dropped live key did not revert"
+        );
+        assert_eq!(bridge.authenticate(b"first"), Err(AuthError::BadToken));
+        assert_eq!(
+            bridge.authenticate(b"second"),
+            Err(AuthError::ServerFull),
+            "the cap moved without a restart"
+        );
+        bridge.disconnected(&kept);
+        bridge.authenticate(b"second").expect("the freed slot");
+
+        // A refused call, on a value and on an invariant, leaves the
+        // configuration in force as it was, counts included.
+        let before = bridge.config();
+        assert!(
+            bridge
+                .configure([("enabled", Value::Boolean(false)), ("port", n(-1.0))])
+                .is_err()
+        );
+        assert!(
+            bridge
+                .configure([("max_unauthenticated_connections", n(2.0))])
+                .is_err(),
+            "the effective cap is two"
+        );
+        assert_eq!(*bridge.config(), *before);
+        assert!(bridge.liveness().enabled);
+        assert_eq!(bridge.pending_restart(), 1);
     }
 
     /// Before any registration the acknowledgement is the one addressable

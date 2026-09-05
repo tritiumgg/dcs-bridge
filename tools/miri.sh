@@ -24,4 +24,14 @@ if ! rustup run nightly cargo miri --version >/dev/null 2>&1; then
 fi
 rustup run nightly cargo miri setup
 
+# Miri is here for the unsafe blocks, not the memory order. Its weak memory
+# emulation does not carry the single total order that SeqCst fences give,
+# which is what the writer's park handshake rests on, so under some seeds
+# it parks the writer on a wake the hardware model cannot lose and a test
+# waits out its deadline with a record in the ring. Loom models that order
+# in full and checks the handshake; here the emulation is off, and the
+# ownership argument beside every unsafe block is what is checked.
+MIRIFLAGS="${MIRIFLAGS:-} -Zmiri-disable-weak-memory-emulation"
+export MIRIFLAGS
+
 exec rustup run nightly cargo miri test -p dcsbridge-broker --no-default-features --lib -- ring:: fanout::
