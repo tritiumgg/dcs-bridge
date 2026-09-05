@@ -336,8 +336,8 @@ impl Answers for Global {
         bridge().set_enabled(enabled);
     }
 
-    fn refused_no_capability(&self, _topic: &str) {
-        bridge().no_capability.fetch_add(1, Ordering::Relaxed);
+    fn refused_no_capability(&self, topic: &str) {
+        bridge().refused_no_capability(topic);
     }
 }
 
@@ -483,6 +483,13 @@ impl Bridge {
     /// How many `SeqAck` records have been consumed.
     pub fn seq_acks(&self) -> u64 {
         self.seq_acks.load(Ordering::Relaxed)
+    }
+
+    /// A message on `topic` was refused because the session's token lacks
+    /// the capability it requires. Counted; the `Rejected` that would tell
+    /// the sender is a later task's.
+    pub fn refused_no_capability(&self, _topic: &str) {
+        self.no_capability.fetch_add(1, Ordering::Relaxed);
     }
 
     /// How many messages were refused for a capability the token lacked.

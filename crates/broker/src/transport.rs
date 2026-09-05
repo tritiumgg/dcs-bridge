@@ -893,17 +893,21 @@ mod tests {
         drop(listener);
         drop(writer);
 
+        // The second half starts from its own state rather than what the
+        // first left: the switch is on, so an applied `SetEnabled` would
+        // have to turn it off to show.
+        enabled.store(true, Ordering::SeqCst);
         let (writer, _commit, connections) = Writer::spawn(64);
         let listener = Listener::spawn("127.0.0.1:0", connections, 64, switch(false)).unwrap();
         let mut reader = client(listener.local_addr());
         read_handshake(&mut reader);
         assert!(authenticate(&mut reader, SECRET).1.ok);
-        let on = inbound::SetEnabled { enabled: true }.encode_to_vec();
+        let off = inbound::SetEnabled { enabled: false }.encode_to_vec();
         reader
-            .write_all(&inbound(2, "dcs.bridge.SetEnabled", &on))
+            .write_all(&inbound(2, "dcs.bridge.SetEnabled", &off))
             .expect("the switch is sent");
         assert!(
-            !pong(&mut reader).bridge_enabled,
+            pong(&mut reader).bridge_enabled,
             "a token without reload flipped the switch"
         );
         assert_eq!(refused.load(Ordering::SeqCst), 1);
@@ -1040,6 +1044,12 @@ mod tests {
                 Stub.authenticate(secret)
             }
             fn disconnected(&self, _: &Session) {}
+            fn schema(&self) -> Option<Record> {
+                None
+            }
+            fn seq_ack(&self, _: u64) {}
+            fn set_enabled(&self, _: bool) {}
+            fn refused_no_capability(&self, _: &str) {}
         }
         let (writer, _commit, connections) = Writer::spawn(64);
         let listener = Listener::spawn("127.0.0.1:0", connections, 64, Arc::new(Quick)).unwrap();
@@ -1098,6 +1108,12 @@ mod tests {
             fn disconnected(&self, _: &Session) {
                 self.closed.fetch_add(1, Ordering::SeqCst);
             }
+            fn schema(&self) -> Option<Record> {
+                None
+            }
+            fn seq_ack(&self, _: u64) {}
+            fn set_enabled(&self, _: bool) {}
+            fn refused_no_capability(&self, _: &str) {}
         }
         let opened = Arc::new(AtomicU64::new(0));
         let closed = Arc::new(AtomicU64::new(0));
