@@ -1,6 +1,6 @@
 # Working state
 
-**Last updated:** 2026-09-04
+**Last updated:** 2026-09-05
 
 The handoff between sessions. Read it first; update it before a session ends,
 not only when a task finishes. Stamp the date above each time; it carries a
@@ -18,7 +18,7 @@ is just deleted. Write entries as one or two lines, never paragraphs.
 
 ## In progress
 
-Nothing. 2.9 is closed; 2.15 is next, moved up by the Phase 2 re-cut.
+Nothing. 2.15 is closed; 2.C2 is next.
 
 *One task at most. Say what is done, what is not, and where to resume. Say what
 is committed and what is only in the working tree. Say what is knowingly
@@ -26,29 +26,27 @@ broken. Empty this when the task closes.*
 
 ## Just finished
 
+- **2.15** — `shim.configure`: the broker's keys behind one swap, the first
+  call binding and allocating, `shim.tokens` retired; ADR 0019. PRs #61 to #66; #66 carries the live steps.
 - **2.9** — handshake, auth, and the five broker-answered messages on a reader
   thread per connection, answered through the writer thread; ADR 0018. PRs #50 to #57; #57 carries the live steps.
-- **2.8** — `begin_to` addresses a record to one connection; the acknowledgement
-  is the one addressable topic until 2.16; ADR 0017. PRs #48 and #49; #49 carries the live steps.
 
 *The last three at most, one line each. Git log holds the rest.*
 
 ## Next
 
-**Task 2.15** — `shim.configure`, as the plan's three-branch table cuts it:
-the config model and its validation, the live keys swapped in atomically and
-read by every thread, then the first call allocating and binding. Every
-constant 2.7 and 2.9 left moves behind it; `shim.tokens` retires. Done when
-rings size from config, a later call changes a limit and refuses a ring
-size, and a call before it errors.
+**Task 2.C2** — `dcsb ping`: sends `Ping`, prints the three `Pong` fields,
+exits non-zero when the sim is not alive. One branch, about 250 lines. Done
+when a live `Pong` arrives during a mission load; `dcs_alive` reads in full
+once 2.11 stamps the heartbeat.
 
-**An agent verifies all of it** from unit and loopback tests; **a person
-confirms** the live steps at an install, since the listen address moves.
+**An agent verifies** the loopback half; **a person confirms** the blackout
+half at an install, as 2.9's live steps did through the handshake.
 
 ## After that
 
-- **M2.1** closes with 2.C2 `ping`, 2.10 `shim.schema`, 2.C3 `schema` and
-  2.11 `tick`; the plan's milestone table says what is re-measured then.
+- **M2.1** closes with 2.10 `shim.schema`, 2.C3 `schema` and 2.11 `tick`;
+  the plan's milestone table says what is re-measured then.
 - **M2.2**: 2.16 registration, then 2.12 rings and `poll`, 2.C4, 2.13, 2.14.
 - **Phase 3** opens on `protoc-gen-dcsbridge-lua`, which reads the four message
   options this schema defines and splits its output by `Target`. It reads the
@@ -77,9 +75,11 @@ entries at most: an eleventh means something here is finished, or belongs in
 - **`buf breaking` has no baseline until the next release.** `v0.1.0` predates
   the schema, so `tools/schema-breaking.sh` reports that and passes. It starts
   comparing at the first tag whose tree carries `proto/`. Delete this then.
-- **Ring sizes are provisional until task 9.7.** Tasks 2.15 and 2.18 pick
-  values; PROBE-7 measures them seven phases later, so 2.18's done-when reopens
-  at 9.7. Record the provisional reserve here when chosen.
+- **Ring sizes are provisional until task 9.7.** 2.15 took the
+  specification's defaults, `ring_out_records` 4096 and
+  `ring_out_lifecycle_reserve` 64, and sized the commit ring as one
+  connection's ring, which has no key; 2.18 picks the rest. PROBE-7
+  measures them seven phases later, so 2.18's done-when reopens at 9.7.
 - **SPEC §17's *Any (native module)* rows land with their behaviour.** Task 2.1
   built the carrier, `mise run lua`, and closed on that. Each row is owed by
   the task implementing what it describes: capability at 2.14, late join at
@@ -90,19 +90,18 @@ entries at most: an eleventh means something here is finished, or belongs in
 - **Task 2.2's load banner is owed by 4.1.** SPEC §13 addresses the banner to
   the Lua side and SPEC §15 has `doctor` check it. Nothing makes the DLL write
   one, and SPEC §4 leaves it no `io`. Delete this when 4.1 closes.
-- **What 2.4 to 2.9 left to 2.12, 2.13, 2.15 and 9.7.** Every constant is
-  `configure`'s at 2.15: the listen address, the ring sizes, the record
-  buffer, the timeout, the frame, URL and connection caps, the alive
-  threshold, and the token table, whose provisional `shim.tokens` retires
-  then. An open that cannot bind raises until then. Owed with 2.15's token
-  rotation, SPEC §17 "Broker hardening": `max_unauthenticated_connections`,
-  `auth_failures_per_min`, revocation dropping sessions. `SetEnabled` without
-  `reload` is counted, not answered, until 2.13; an unknown topic after auth
-  closes the connection until 2.12 routes, which also reads the URL cap
-  ahead of the decode. `commit` allocates once per record on the logic
-  thread and a connection drains one frame per socket call, one record in
-  forty at a 20000-record burst on Windows loopback; PROBE-7 at 9.7 prices
-  both, batching a drain pass is 2.18's or 9.7's, and the ring size 2.15
-  picks should count it. ADR 0014.
+- **What 2.4 to 2.15 left to 2.12, 2.13 and 9.7.** Every broker key is in
+  `Config` since 2.15, and nothing reads these yet: the rate limits
+  (`rejected_max_per_sec`, `busy_max_per_sec`, `inbound_records_per_sec`
+  and its total) wait for 2.12's routing, and SPEC §17 "Broker hardening"
+  (`max_unauthenticated_connections`, `auth_failures_per_min`, revocation
+  dropping sessions) has no owner: a later `configure` swaps the token table
+  and leaves a session under a dropped token open. `SetEnabled` without `reload` is counted, not answered,
+  until 2.13; an unknown topic after auth closes the connection until 2.12
+  routes, which also reads the URL cap ahead of the decode. `commit`
+  allocates once per record on the logic thread and a connection drains
+  one frame per socket call, one record in forty at a 20000-record burst on
+  Windows loopback; PROBE-7 at 9.7 prices both, and batching a drain pass
+  is 2.18's or 9.7's. ADR 0014.
 - **Task 7.10 does not exist.** Phase 7 runs 7.1 to 7.9 then 7.11, with no note
   explaining the gap. Retired ID or omission, unresolved.
