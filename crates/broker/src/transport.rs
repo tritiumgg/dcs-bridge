@@ -351,6 +351,7 @@ mod tests {
     use crate::inbound::{AuthError, Session};
     use prost::Message;
     use std::io::Read;
+    use std::sync::RwLock;
     use std::time::{Duration, Instant};
 
     /// `dcs.bridge.Envelope` as a consumer with no record schema reads it:
@@ -960,7 +961,9 @@ mod tests {
         let on_staying = first_frame(&mut commit, &mut staying);
 
         let oversize = {
-            let mut bytes = (inbound::MAX_FRAME_BYTES + 1).to_le_bytes().to_vec();
+            let mut bytes = (inbound::Limits::default().max_frame_bytes + 1)
+                .to_le_bytes()
+                .to_vec();
             bytes.extend([0u8; 64]);
             bytes
         };
@@ -1037,8 +1040,11 @@ mod tests {
             fn liveness(&self) -> inbound::Liveness {
                 Stub.liveness()
             }
-            fn handshake_timeout(&self) -> Duration {
-                Duration::from_millis(300)
+            fn limits(&self) -> inbound::Limits {
+                inbound::Limits {
+                    handshake_timeout: Duration::from_millis(300),
+                    ..inbound::Limits::default()
+                }
             }
             fn authenticate(&self, secret: &[u8]) -> Result<Session, AuthError> {
                 Stub.authenticate(secret)
@@ -1245,8 +1251,11 @@ mod tests {
             fn liveness(&self) -> inbound::Liveness {
                 Stub.liveness()
             }
-            fn handshake_timeout(&self) -> Duration {
-                Duration::from_millis(300)
+            fn limits(&self) -> inbound::Limits {
+                inbound::Limits {
+                    handshake_timeout: Duration::from_millis(300),
+                    ..inbound::Limits::default()
+                }
             }
             fn authenticate(&self, secret: &[u8]) -> Result<Session, AuthError> {
                 Stub.authenticate(secret)
@@ -1283,6 +1292,74 @@ mod tests {
         assert!(
             is_closed(&mut pinging),
             "pinging kept the connection open past the timeout"
+        );
+
+        drop(listener);
+        drop(writer);
+    }
+
+    /// A cap lowered while a connection is open binds on that connection's
+    /// next frame: the reader asks for the limits as each frame arrives,
+    /// not once at accept and not before it waits. A `Ping` that passed
+    /// under the default is refused once the frame cap is under its length,
+    /// and the connection closes at once. The connection is authenticated
+    /// first, so the handshake deadline cannot be what closes it.
+    #[test]
+    fn a_cap_lowered_under_load_binds_on_the_next_frame() {
+        struct Live(Arc<RwLock<inbound::Limits>>);
+        impl Answers for Live {
+            fn handshake(&self) -> Record {
+                Stub.handshake()
+            }
+            fn liveness(&self) -> inbound::Liveness {
+                Stub.liveness()
+            }
+            fn limits(&self) -> inbound::Limits {
+                *self.0.read().unwrap_or_else(PoisonError::into_inner)
+            }
+            fn authenticate(&self, secret: &[u8]) -> Result<Session, AuthError> {
+                Stub.authenticate(secret)
+            }
+            fn disconnected(&self, _: &Session) {}
+            fn schema(&self) -> Option<Record> {
+                None
+            }
+            fn seq_ack(&self, _: u64) {}
+            fn set_enabled(&self, _: bool) {}
+            fn refused_no_capability(&self, _: &str) {}
+        }
+        let limits = Arc::new(RwLock::new(inbound::Limits::default()));
+        let (writer, _commit, connections) = Writer::spawn(64);
+        let listener = Listener::spawn(
+            "127.0.0.1:0",
+            connections,
+            64,
+            Arc::new(Live(Arc::clone(&limits))),
+        )
+        .unwrap();
+        let mut client = client(listener.local_addr());
+        read_handshake(&mut client);
+        assert!(authenticate(&mut client, SECRET).1.ok);
+
+        let ping = inbound(1, "dcs.bridge.Ping", &[]);
+        client.write_all(&ping).expect("the ping is sent");
+        let answered = read_frame(&mut client);
+        assert_eq!(answered.seq, 3, "the first ping was not answered");
+
+        // One swap while the reader waits for the next length prefix; it
+        // asks for the cap once that prefix is in, so this is the cap the
+        // frame meets.
+        limits.write().unwrap().max_frame_bytes = (ping.len() - 4 - 1) as u32;
+        let started = Instant::now();
+        client.write_all(&ping).expect("the ping is sent");
+        assert!(
+            is_closed(&mut client),
+            "a frame over the lowered cap kept the connection"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "the close took {:?}, which is a timeout rather than the cap",
+            started.elapsed()
         );
 
         drop(listener);

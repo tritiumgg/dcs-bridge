@@ -8,9 +8,11 @@
 //!
 //! The parser runs inside the DCS process, before authentication completes,
 //! so it reads as little as it can and bounds every read before it makes it.
-//! The length prefix is checked against [`MAX_FRAME_BYTES`] before a byte of
-//! the frame is allocated for, and the payload's type URL, which is the one
-//! string read out of every frame, is checked against [`MAX_TYPE_URL_BYTES`].
+//! The length prefix is checked against the frame cap before a byte of the
+//! frame is allocated for, and the payload's type URL, which is the one
+//! string read out of every frame, is checked against the URL cap. Both are
+//! configuration, read fresh for every frame through [`Limits`], so a later
+//! `configure` binds from the next frame on.
 //! The envelope decodes through `prost`, the one crate the shipped build
 //! takes: a decoder written beside the encoder would share its misreadings,
 //! and this one is fuzzed and bounds its own recursion. ADR 0016.
@@ -22,8 +24,8 @@
 //! A connection proceeds in a fixed order: handshake, then authentication,
 //! then everything else. Before authentication it may send `Ping` and
 //! `Auth` and nothing else; any other topic closes the connection, and so
-//! does a connection that has not authenticated within
-//! [`HANDSHAKE_TIMEOUT`]. Authentication is one `Auth` carrying the token's
+//! does a connection that has not authenticated within the handshake
+//! timeout. Authentication is one `Auth` carrying the token's
 //! secret and one `AuthResult` back; after a failed one the connection is
 //! closed, once the result has reached the wire. After a successful one the
 //! writer thread is told, and records begin to fan out to the connection.
@@ -43,25 +45,46 @@ use std::time::{Duration, Instant};
 
 use prost::Message;
 
+use crate::config::Config;
 use crate::encode::{Encoder, TYPE_URL_PREFIX};
 use crate::fanout::{ConnectionId, Connections};
 use crate::state::Capability;
 use crate::transport::Record;
 
-/// The most bytes a frame may claim. Read before anything is allocated for
-/// the frame, because the length is the peer's to write.
+/// The live keys the reader thread decides by, as of one moment.
 ///
-/// A single large reply is the largest legitimate frame and this is about
-/// ten times one. The first `configure` is where the configured value
-/// arrives.
-pub const MAX_FRAME_BYTES: u32 = 1 << 20;
+/// Taken from the configuration in force each time the reader is about to
+/// read, so a value swapped in by a later `configure` binds from the next
+/// frame on and the deadline of the next connection.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Limits {
+    /// How long a connection has to authenticate before it is closed. A
+    /// connection that has not done so in this time is not going to.
+    pub handshake_timeout: Duration,
+    /// The most bytes a frame may claim. Read before anything is allocated
+    /// for the frame, because the length is the peer's to write.
+    pub max_frame_bytes: u32,
+    /// The most bytes a payload's type URL may take. A real one is about
+    /// forty.
+    pub max_type_url_bytes: usize,
+}
 
-/// The most bytes a payload's type URL may take. A real one is about forty.
-pub const MAX_TYPE_URL_BYTES: usize = 256;
+impl From<&Config> for Limits {
+    fn from(config: &Config) -> Self {
+        Limits {
+            handshake_timeout: Duration::from_millis(config.handshake_timeout_ms),
+            max_frame_bytes: config.max_frame_bytes,
+            max_type_url_bytes: config.max_type_url_bytes as usize,
+        }
+    }
+}
 
-/// How long a connection has to authenticate before it is closed. A
-/// connection that has not done so in this time is not going to.
-pub const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
+impl Default for Limits {
+    /// The specification's defaults.
+    fn default() -> Self {
+        Limits::from(&Config::default())
+    }
+}
 
 /// The bytes an answer takes at most: a wrapper and a few short fields.
 const ANSWER_BYTES: usize = 128;
@@ -113,10 +136,10 @@ pub trait Answers: Send + Sync + 'static {
     fn handshake(&self) -> Record;
     /// What `Pong` carries, as of now.
     fn liveness(&self) -> Liveness;
-    /// How long a connection has to authenticate. The specification's
-    /// default unless something says otherwise.
-    fn handshake_timeout(&self) -> Duration {
-        HANDSHAKE_TIMEOUT
+    /// The live keys the reader decides by, as of now. The specification's
+    /// defaults unless something says otherwise.
+    fn limits(&self) -> Limits {
+        Limits::default()
     }
     /// Match `secret` against the configured tokens, in constant time, and
     /// open a session on the one that carries it.
@@ -140,17 +163,17 @@ pub trait Answers: Send + Sync + 'static {
 pub enum Close {
     /// The peer closed, or the socket failed.
     Io(io::Error),
-    /// A frame claimed more than [`MAX_FRAME_BYTES`].
+    /// A frame claimed more than the frame cap.
     FrameTooLong(u32),
     /// The frame's envelope did not decode.
     Envelope(prost::DecodeError),
     /// The envelope carried no payload.
     NoPayload,
-    /// The payload's type URL was over [`MAX_TYPE_URL_BYTES`].
+    /// The payload's type URL was over the URL cap.
     TypeUrlTooLong(usize),
     /// A topic that is not `Ping` or `Auth` arrived before authentication.
     Unauthenticated(String),
-    /// [`HANDSHAKE_TIMEOUT`] passed with no authentication.
+    /// The handshake timeout passed with no authentication.
     HandshakeTimeout,
     /// The payload of a message the broker answers itself did not decode.
     Payload(prost::DecodeError),
@@ -168,15 +191,25 @@ impl From<io::Error> for Close {
     }
 }
 
-/// Read one frame: the length, checked, then the body, then the envelope
-/// out of it.
+/// Read one frame: the length, checked against `max_frame_bytes`, then the
+/// body, then the envelope out of it.
 ///
 /// `body` is the reader's one buffer, reused across frames and grown to the
 /// largest frame seen, so a burst of small frames allocates nothing after
-/// the first. It cannot grow past [`MAX_FRAME_BYTES`], because the length is
-/// checked before the buffer is touched. Returns `None` at a clean end of
-/// stream, between frames.
-pub fn read_frame(stream: &mut impl Read, body: &mut Vec<u8>) -> Result<Option<Envelope>, Close> {
+/// the first. It cannot grow past the cap, because the length is checked
+/// before the buffer is touched. Returns `None` at a clean end of stream,
+/// between frames.
+///
+/// `limits` is asked once the length prefix has arrived, not before the
+/// wait for it, so the cap in force when a frame arrives is the one it is
+/// checked against: a cap lowered while the reader waited binds on that
+/// frame. What it answered comes back with the envelope, for the checks
+/// that follow.
+pub fn read_frame(
+    stream: &mut impl Read,
+    body: &mut Vec<u8>,
+    limits: impl FnOnce() -> Limits,
+) -> Result<Option<(Envelope, Limits)>, Close> {
     let mut length = [0u8; 4];
     // The first read tells a clean close between frames from a cut inside
     // one, which `read_exact` cannot; it retries an interrupted read the
@@ -194,25 +227,26 @@ pub fn read_frame(stream: &mut impl Read, body: &mut Vec<u8>) -> Result<Option<E
         n => stream.read_exact(&mut length[n..])?,
     }
     let length = u32::from_le_bytes(length);
-    if length > MAX_FRAME_BYTES {
+    let limits = limits();
+    if length > limits.max_frame_bytes {
         return Err(Close::FrameTooLong(length));
     }
     body.clear();
     body.resize(length as usize, 0);
     stream.read_exact(body)?;
     Envelope::decode(&body[..])
-        .map(Some)
+        .map(|envelope| Some((envelope, limits)))
         .map_err(Close::Envelope)
 }
 
 /// The topic a frame carries: its type URL with the prefix every runtime
-/// writes taken off, checked for length first. A URL without the prefix is
-/// a topic nothing routes, and it comes back whole so the refusal can name
-/// it.
-pub fn topic(envelope: &Envelope) -> Result<&str, Close> {
+/// writes taken off, checked against `max_type_url_bytes` first. A URL
+/// without the prefix is a topic nothing routes, and it comes back whole so
+/// the refusal can name it.
+pub fn topic(envelope: &Envelope, max_type_url_bytes: usize) -> Result<&str, Close> {
     let payload = envelope.payload.as_ref().ok_or(Close::NoPayload)?;
     let url = payload.type_url.as_str();
-    if url.len() > MAX_TYPE_URL_BYTES {
+    if url.len() > max_type_url_bytes {
         return Err(Close::TypeUrlTooLong(url.len()));
     }
     Ok(url
@@ -344,12 +378,14 @@ pub fn serve(
     // time can stay past it. It is lifted once the connection authenticates.
     let mut stream = Deadline {
         stream,
-        until: Some(Instant::now() + answers.handshake_timeout()),
+        until: Some(Instant::now() + answers.limits().handshake_timeout),
     };
 
     loop {
-        let envelope = match read_frame(&mut stream, &mut body) {
-            Ok(Some(envelope)) => envelope,
+        // Asked for as each frame arrives, so a cap a later `configure`
+        // lowered binds on the next frame rather than the next connection.
+        let (envelope, limits) = match read_frame(&mut stream, &mut body, || answers.limits()) {
+            Ok(Some(read)) => read,
             Ok(None) if session.is_some() => return Ok(()),
             Ok(None) => return Err(Close::Closed),
             Err(Close::Io(error))
@@ -364,7 +400,7 @@ pub fn serve(
             Err(close) => return Err(close),
         };
 
-        match (topic(&envelope)?, &*session) {
+        match (topic(&envelope, limits.max_type_url_bytes)?, &*session) {
             ("dcs.bridge.Ping", _) => {
                 connections.answer(id, pong(answers.liveness()));
                 answered += 1;
@@ -519,15 +555,30 @@ mod tests {
     fn a_frame_decodes_to_seq_and_topic() {
         let bytes = frame(7, "type.googleapis.com/dcs.bridge.Ping", &[]);
         let mut body = Vec::new();
-        let envelope = read_frame(&mut &bytes[..], &mut body).unwrap().unwrap();
+        let (envelope, limits) = read_frame(&mut &bytes[..], &mut body, Limits::default)
+            .unwrap()
+            .unwrap();
         assert_eq!(envelope.seq, 7);
-        assert_eq!(topic(&envelope).unwrap(), "dcs.bridge.Ping");
+        assert_eq!(limits, Limits::default(), "the limits asked for come back");
+        assert_eq!(
+            topic(&envelope, limits.max_type_url_bytes).unwrap(),
+            "dcs.bridge.Ping"
+        );
 
         let bytes = frame(8, "dcs.bridge.Ping", &[]);
-        let envelope = read_frame(&mut &bytes[..], &mut body).unwrap().unwrap();
-        assert_eq!(topic(&envelope).unwrap(), "dcs.bridge.Ping");
+        let (envelope, _) = read_frame(&mut &bytes[..], &mut body, Limits::default)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            topic(&envelope, limits.max_type_url_bytes).unwrap(),
+            "dcs.bridge.Ping"
+        );
 
-        assert!(matches!(read_frame(&mut &[][..], &mut body), Ok(None)));
+        // At a clean end of stream the limits are never asked for.
+        assert!(matches!(
+            read_frame(&mut &[][..], &mut body, || unreachable!("no frame arrived")),
+            Ok(None)
+        ));
     }
 
     /// A length over the cap is refused before the body is read, a body
@@ -536,6 +587,11 @@ mod tests {
     #[test]
     fn a_bad_frame_is_refused_with_its_reason() {
         let mut body = Vec::new();
+        let Limits {
+            max_frame_bytes,
+            max_type_url_bytes,
+            ..
+        } = Limits::default();
 
         // A read interrupted by a signal is retried, not taken for a close.
         struct Interrupted<'a>(&'a [u8], bool);
@@ -549,28 +605,43 @@ mod tests {
             }
         }
         let bytes = frame(3, "dcs.bridge.Ping", &[]);
-        let envelope = read_frame(&mut Interrupted(&bytes, false), &mut Vec::new())
-            .expect("an interrupted read is retried")
-            .expect("a frame follows it");
+        let (envelope, _) = read_frame(
+            &mut Interrupted(&bytes, false),
+            &mut Vec::new(),
+            Limits::default,
+        )
+        .expect("an interrupted read is retried")
+        .expect("a frame follows it");
         assert_eq!(envelope.seq, 3);
 
-        let mut bytes = (MAX_FRAME_BYTES + 1).to_le_bytes().to_vec();
+        let mut bytes = (max_frame_bytes + 1).to_le_bytes().to_vec();
         bytes.extend([0u8; 16]);
         assert!(matches!(
-            read_frame(&mut &bytes[..], &mut body),
-            Err(Close::FrameTooLong(n)) if n == MAX_FRAME_BYTES + 1
+            read_frame(&mut &bytes[..], &mut body, Limits::default),
+            Err(Close::FrameTooLong(n)) if n == max_frame_bytes + 1
         ));
         assert!(body.is_empty(), "a refused length grew the buffer");
+        // The cap is whatever is answered once the length is in, so a
+        // lower one refuses a frame the default would have read.
+        let small = frame(1, "dcs.bridge.Ping", &[]);
+        let lowered = || Limits {
+            max_frame_bytes: 4,
+            ..Limits::default()
+        };
+        assert!(matches!(
+            read_frame(&mut &small[..], &mut body, lowered),
+            Err(Close::FrameTooLong(_))
+        ));
 
         let garbage = [3u8, 0, 0, 0, 0xff, 0xff, 0xff];
         assert!(matches!(
-            read_frame(&mut &garbage[..], &mut body),
+            read_frame(&mut &garbage[..], &mut body, Limits::default),
             Err(Close::Envelope(_))
         ));
 
         let short = [8u8, 0, 0, 0, 1, 2];
         assert!(matches!(
-            read_frame(&mut &short[..], &mut body),
+            read_frame(&mut &short[..], &mut body, Limits::default),
             Err(Close::Io(e)) if e.kind() == io::ErrorKind::UnexpectedEof
         ));
 
@@ -578,18 +649,25 @@ mod tests {
             seq: 1,
             payload: None,
         };
-        assert!(matches!(topic(&bare), Err(Close::NoPayload)));
+        assert!(matches!(
+            topic(&bare, max_type_url_bytes),
+            Err(Close::NoPayload)
+        ));
 
         let long = Envelope {
             seq: 1,
             payload: Some(Payload {
-                type_url: "x".repeat(MAX_TYPE_URL_BYTES + 1),
+                type_url: "x".repeat(max_type_url_bytes + 1),
                 value: Vec::new(),
             }),
         };
         assert!(matches!(
-            topic(&long),
-            Err(Close::TypeUrlTooLong(n)) if n == MAX_TYPE_URL_BYTES + 1
+            topic(&long, max_type_url_bytes),
+            Err(Close::TypeUrlTooLong(n)) if n == max_type_url_bytes + 1
+        ));
+        assert!(matches!(
+            topic(&long, max_type_url_bytes + 1),
+            Ok(url) if url.len() == max_type_url_bytes + 1
         ));
     }
 
