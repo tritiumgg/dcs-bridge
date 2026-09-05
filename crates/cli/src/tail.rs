@@ -203,12 +203,19 @@ pub fn run(mut reader: impl Read, mut out: impl Write) -> io::Result<Summary> {
 }
 
 /// The `AuthResult` a frame carries, if it is one.
+///
+/// A result whose bytes do not decode is a refusal: the one frame that
+/// says whether the token was accepted did not say so, and a run that went
+/// on as though it had would exit as a success.
 fn auth_result(envelope: &Envelope) -> Option<AuthResult> {
     let any = envelope.payload.as_ref()?;
     if any.type_url.strip_prefix(TYPE_URL_PREFIX) != Some("dcs.bridge.AuthResult") {
         return None;
     }
-    AuthResult::decode(&any.value[..]).ok()
+    Some(AuthResult::decode(&any.value[..]).unwrap_or(AuthResult {
+        ok: false,
+        error: 0,
+    }))
 }
 
 /// One line per frame: `seq`, the topic and the payload's size, then the
@@ -343,6 +350,27 @@ mod tests {
                 .contains(" ok=false error=BAD_TOKEN"),
             "a refused token did not print its error"
         );
+
+        // A result whose bytes do not decode gave no verdict, which is a
+        // refusal rather than a pass.
+        let garbled = {
+            let envelope = Envelope {
+                seq: 1,
+                epoch: None,
+                mission_time: None,
+                payload: Some(prost_types::Any {
+                    type_url: format!("{TYPE_URL_PREFIX}dcs.bridge.AuthResult"),
+                    value: vec![0xff, 0xff, 0xff],
+                }),
+            };
+            let body = envelope.encode_to_vec();
+            let mut bytes = (body.len() as u32).to_le_bytes().to_vec();
+            bytes.extend(body);
+            bytes
+        };
+        let mut out = Vec::new();
+        let summary = run(&garbled[..], &mut out).unwrap();
+        assert!(summary.refused, "a garbled result passed for a verdict");
 
         let frame = auth_frame("hunter2");
         let envelope = read_frame(&mut &frame[..]).unwrap().unwrap();

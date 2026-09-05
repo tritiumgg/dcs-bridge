@@ -96,21 +96,19 @@ entries at most: an eleventh means something here is finished, or belongs in
   drop decision, so a ring per class reorders nothing that a merge at drain
   cannot restore. What it changes is that a full `LIFECYCLE` ring disconnects
   where one ring would have evicted. Needed before 2.18. ADR 0008 names it.
-- **What 2.4, 2.5 and 2.7 left to 2.15 and 9.7.** The module's first open
-  starts the outbound path on `127.0.0.1:7742` with 4096-record rings, and each
-  Lua state's record buffer is 1 MiB at open; `configure` owns all of it, and
-  an open that cannot bind raises until then. `commit` allocates once per
-  record on the logic thread; PROBE-7 at 9.7 prices it. ADR 0014. A connection
-  drains one frame per socket call, and 2.C1's live check found a 20000-record
-  burst keeping one record in forty on Windows loopback. Batching a drain
-  pass into one call is the rest; 2.18 or 9.7 owns it, and the ring size 2.15
-  picks should count it.
-- **What 2.9 left to 2.12, 2.13 and 2.15.** `shim.tokens` is provisional and
-  retires into `configure`, with the timeout, frame, URL and connection caps
-  from their constants. Owed with 2.15's token rotation, SPEC §17 "Broker
-  hardening": `max_unauthenticated_connections`, `auth_failures_per_min`,
-  revocation dropping sessions. `SetEnabled` without `reload` is counted, not
-  answered, until 2.13; an unknown topic after auth closes the connection
-  until 2.12 routes, which also reads the URL cap ahead of the decode.
+- **What 2.4 to 2.9 left to 2.12, 2.13, 2.15 and 9.7.** Every constant is
+  `configure`'s at 2.15: the listen address, the ring sizes, the record
+  buffer, the timeout, the frame, URL and connection caps, the alive
+  threshold, and the token table, whose provisional `shim.tokens` retires
+  then. An open that cannot bind raises until then. Owed with 2.15's token
+  rotation, SPEC §17 "Broker hardening": `max_unauthenticated_connections`,
+  `auth_failures_per_min`, revocation dropping sessions. `SetEnabled` without
+  `reload` is counted, not answered, until 2.13; an unknown topic after auth
+  closes the connection until 2.12 routes, which also reads the URL cap
+  ahead of the decode. `commit` allocates once per record on the logic
+  thread and a connection drains one frame per socket call, one record in
+  forty at a 20000-record burst on Windows loopback; PROBE-7 at 9.7 prices
+  both, batching a drain pass is 2.18's or 9.7's, and the ring size 2.15
+  picks should count it. ADR 0014.
 - **Task 7.10 does not exist.** Phase 7 runs 7.1 to 7.9 then 7.11, with no note
   explaining the gap. Retired ID or omission, unresolved.

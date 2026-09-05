@@ -58,12 +58,20 @@ fn main() -> ExitCode {
 /// The token's secret: the file's first line, or the environment's value.
 fn token(args: &TailArgs) -> Result<String, String> {
     let secret = match &args.token_file {
-        Some(path) => fs::read_to_string(path)
-            .map_err(|error| format!("cannot read {}: {error}", path.display()))?
-            .lines()
-            .next()
-            .unwrap_or_default()
-            .to_owned(),
+        Some(path) => {
+            let text = fs::read_to_string(path)
+                .map_err(|error| format!("cannot read {}: {error}", path.display()))?;
+            // An editor or a shell on Windows writes a byte order mark and
+            // ends a line with a carriage return, neither of which is part
+            // of a secret; a line ending is whatever the file's is.
+            text.strip_prefix('\u{feff}')
+                .unwrap_or(&text)
+                .lines()
+                .next()
+                .unwrap_or_default()
+                .trim_end_matches('\r')
+                .to_owned()
+        }
         None => env::var(TOKEN_ENV).map_err(|_| {
             format!("no token: set {TOKEN_ENV}, or pass --token-file with a file holding one")
         })?,
@@ -77,11 +85,11 @@ fn token(args: &TailArgs) -> Result<String, String> {
 /// Connect, authenticate, then print frames until the bridge closes the
 /// connection.
 ///
-/// A refused connection, or no token to send, exits 2, because there is
-/// nothing to observe. A token the bridge refuses exits 1, after its
-/// answer has been printed. A stream that ends mid-frame or carries bytes
-/// no envelope decodes from exits 1, after everything readable before it
-/// has been printed.
+/// A refused connection, no token to send, or a token that could not be
+/// sent exits 2, because there is nothing to observe. A token the bridge
+/// refuses exits 1, after its answer has been printed. A stream that ends
+/// mid-frame or carries bytes no envelope decodes from exits 1, after
+/// everything readable before it has been printed.
 fn tail_verb(args: &TailArgs) -> ExitCode {
     let secret = match token(args) {
         Ok(secret) => secret,
@@ -128,5 +136,42 @@ fn tail_verb(args: &TailArgs) -> ExitCode {
             eprintln!("tail: {error}");
             ExitCode::from(1)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The secret is the file's first line with the marks an editor or a
+    /// shell adds taken off: a byte order mark, a carriage return, a
+    /// second line. An empty first line is no token.
+    #[test]
+    fn a_token_file_yields_its_first_line_without_editor_marks() {
+        let dir = std::env::temp_dir().join(format!("dcsb-token-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let read = |name: &str, bytes: &[u8]| {
+            let path = dir.join(name);
+            fs::write(&path, bytes).unwrap();
+            token(&TailArgs {
+                addr: String::new(),
+                token_file: Some(path),
+            })
+        };
+
+        assert_eq!(read("plain", b"correct-horse\n").unwrap(), "correct-horse");
+        assert_eq!(read("crlf", b"correct-horse\r\n").unwrap(), "correct-horse");
+        assert_eq!(read("cr", b"correct-horse\r").unwrap(), "correct-horse");
+        assert_eq!(
+            read("bom", b"\xef\xbb\xbfcorrect-horse\r\n").unwrap(),
+            "correct-horse"
+        );
+        assert_eq!(
+            read("two", b"correct-horse\nsecond line\n").unwrap(),
+            "correct-horse"
+        );
+        assert_eq!(read("empty", b"\n").unwrap_err(), "the token is empty");
+
+        fs::remove_dir_all(&dir).unwrap();
     }
 }
