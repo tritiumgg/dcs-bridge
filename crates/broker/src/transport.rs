@@ -14,9 +14,10 @@
 //! reference and none copies. ADR 0014.
 //!
 //! A connection's first frame is the handshake, at `seq` 1. The listener
-//! thread asks for it at accept and hands it to the writer thread as the
-//! connection's first answer, on the channel that attached the connection,
-//! so nothing fanned out can number ahead of it. The reader thread, and what
+//! thread asks for it at accept and hands it to the writer thread inside
+//! the message that attaches the connection, so the writer numbers it as it
+//! attaches the ring and nothing fanned out can come first. The reader
+//! thread, and what
 //! a connection can say once it has read the handshake, come with the
 //! inbound path.
 
@@ -189,12 +190,10 @@ fn accept_loop(
         };
 
         let waker = Waker::new(flag, handle.thread().clone());
+        // The handshake rides the attach, so the writer thread numbers it 1
+        // as it attaches the ring and nothing fanned out can come first.
         let attached: (ConnectionId, Consumer<Numbered<Record>>) =
-            connections.attach_with(ring_capacity, waker);
-        // Attach, then greet, on one channel the writer thread takes in
-        // order: the handshake is numbered 1 before any record fanned out
-        // to the new ring can be.
-        connections.answer(attached.0, greeting());
+            connections.attach_with(ring_capacity, waker, Some(greeting()));
         open.lock()
             .unwrap_or_else(PoisonError::into_inner)
             .push(Open {

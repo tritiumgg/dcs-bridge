@@ -22,10 +22,12 @@
 //!
 //! The broker's own records to a connection, the handshake and the answers
 //! the reader thread gives it, are addressed too, and they come from threads
-//! that are not the logic thread. They reach the writer thread through
+//! that are not the logic thread. An answer reaches the writer thread through
 //! [`Connections::answer`], the same channel that attaches a connection, so
 //! the connection's ring keeps the writer thread as its one producer and the
-//! answer takes its `seq` in order with everything else. ADR 0018.
+//! answer takes its `seq` in order with everything else. The handshake rides
+//! inside the attach itself, because two messages can be separated by a
+//! commit and the handshake has to be first. ADR 0018.
 //!
 //! The writer thread numbers what it pushes. Each connection has its own
 //! `seq`, rising by one per record from one, assigned before the push and so
@@ -108,8 +110,15 @@ pub struct Numbered<T> {
 /// matters here.
 enum Control<T> {
     /// A connection exists; push every record from here on into this ring,
-    /// and wake the thread draining it if it sleeps.
-    Attach(ConnectionId, Producer<Numbered<T>>, Option<Waker>),
+    /// and wake the thread draining it if it sleeps. The record carried,
+    /// if any, is the connection's first: it rides the attach so nothing
+    /// fanned out between two control messages can be numbered ahead of it.
+    Attach(
+        ConnectionId,
+        Producer<Numbered<T>>,
+        Option<Waker>,
+        Option<T>,
+    ),
     /// A connection is gone; drop its ring's producer.
     Detach(ConnectionId),
     /// The broker answers this connection: push the record into its ring,
@@ -315,28 +324,37 @@ impl<T> Connections<T> {
     ///
     /// If `capacity` is zero, for the reason [`Ring::split`] gives.
     pub fn attach(&self, capacity: usize) -> (ConnectionId, Consumer<Numbered<T>>) {
-        self.attach_inner(capacity, None)
+        self.attach_inner(capacity, None, None)
     }
 
-    /// [`attach`](Self::attach), with a thread to wake: the writer thread
-    /// wakes it through `waker` after each push into the new ring, so the
-    /// thread draining the ring may park on it through the waker's flag.
+    /// [`attach`](Self::attach), with a thread to wake and a first record.
+    ///
+    /// The writer thread wakes the thread through `waker` after each push
+    /// into the new ring, so the thread draining the ring may park on it
+    /// through the waker's flag. `first`, when given, is pushed into the
+    /// ring as the writer attaches it, numbered 1, in the same control
+    /// message: sent as a separate answer it could arrive after the writer
+    /// had already taken the attach, found the channel empty, and fanned a
+    /// record into the new ring ahead of it. The handshake is what rides
+    /// here. ADR 0018.
     pub fn attach_with(
         &self,
         capacity: usize,
         waker: Waker,
+        first: Option<T>,
     ) -> (ConnectionId, Consumer<Numbered<T>>) {
-        self.attach_inner(capacity, Some(waker))
+        self.attach_inner(capacity, Some(waker), first)
     }
 
     fn attach_inner(
         &self,
         capacity: usize,
         waker: Option<Waker>,
+        first: Option<T>,
     ) -> (ConnectionId, Consumer<Numbered<T>>) {
         let (producer, consumer) = Ring::split(capacity);
         let id = ConnectionId(self.last_id.fetch_add(1, Ordering::Relaxed) + 1);
-        self.send(Control::Attach(id, producer, waker));
+        self.send(Control::Attach(id, producer, waker, first));
 
         (id, consumer)
     }
@@ -460,12 +478,18 @@ impl<T: Clone + Send + 'static> Writer<T> {
         loop {
             loop {
                 match inbox.try_recv() {
-                    Ok(Control::Attach(id, producer, waker)) => connections.push(Connection {
-                        id,
-                        producer,
-                        next_seq: 1,
-                        waker,
-                    }),
+                    Ok(Control::Attach(id, producer, waker, first)) => {
+                        let mut connection = Connection {
+                            id,
+                            producer,
+                            next_seq: 1,
+                            waker,
+                        };
+                        if let Some(first) = first {
+                            connection.push(first);
+                        }
+                        connections.push(connection);
+                    }
                     Ok(Control::Detach(id)) => connections.retain(|held| held.id != id),
                     Ok(Control::Answer(id, record)) => {
                         fan_out(
@@ -482,8 +506,14 @@ impl<T: Clone + Send + 'static> Writer<T> {
                 }
             }
 
+            // A bounded drain, so a commit ring fed as fast as it is
+            // emptied cannot keep the control channel from being read: an
+            // attach or an answer waits at most one batch, never a flood.
             let mut fanned = false;
-            while let Some(record) = commit.pop() {
+            for _ in 0..RECORDS_PER_PASS {
+                let Some(record) = commit.pop() else {
+                    break;
+                };
                 fan_out(&mut connections, record, unaddressed);
                 fanned = true;
             }
@@ -510,6 +540,14 @@ impl<T: Clone + Send + 'static> Writer<T> {
         }
     }
 }
+
+/// How many records the writer thread fans out before it looks at the
+/// control channel again.
+///
+/// Large enough that a frame's burst, a few dozen records, is one pass, and
+/// small enough that a connection attaching under a flood waits
+/// microseconds rather than for the flood to end.
+const RECORDS_PER_PASS: usize = 256;
 
 /// How many empty passes a draining thread makes, yielding between them,
 /// before it parks.
@@ -850,6 +888,56 @@ mod tests {
         drop(writer);
     }
 
+    /// A record that rides the attach is the connection's first, numbered
+    /// 1, while the logic thread commits without pause: the writer takes
+    /// the attach and the first record as one message, so no commit can
+    /// land between them. Sent as two messages, two in a hundred attaches
+    /// read a fanned-out record first.
+    ///
+    /// The committer is paced at a heavy load's rate rather than the
+    /// thread's, and the ring is large, so the first record is read before
+    /// the flood behind it can evict it: eviction is the ring's business
+    /// and not what this checks.
+    #[test]
+    fn the_first_record_rides_the_attach_ahead_of_a_continuous_commit() {
+        let attaches: u32 = if cfg!(miri) { 8 } else { 500 };
+        let (writer, mut commit, connections) = Writer::spawn(ROOMY);
+        let stop = Arc::new(AtomicBool::new(false));
+
+        let committing = {
+            let stop = Arc::clone(&stop);
+            thread::spawn(move || {
+                let mut n = 1_000_000u32;
+                while !stop.load(Ordering::Relaxed) {
+                    for _ in 0..16 {
+                        commit.push(n);
+                        n = n.wrapping_add(1);
+                    }
+                    thread::sleep(Duration::from_micros(100));
+                }
+            })
+        };
+
+        for greeting in 0..attaches {
+            let flag = Arc::new(ParkFlag::new());
+            let waker = Waker::new(Arc::clone(&flag), thread::current());
+            let (_, mut consumer) = connections.attach_with(1 << 16, waker, Some(greeting));
+            let first = drain_numbered(&mut consumer, 1);
+            assert_eq!(
+                first,
+                vec![Numbered {
+                    seq: 1,
+                    record: greeting
+                }],
+                "a fanned-out record came before the attach's own"
+            );
+        }
+
+        stop.store(true, Ordering::Relaxed);
+        committing.join().expect("the committer only pushes");
+        drop(writer);
+    }
+
     /// An answer from off the logic thread is numbered in its connection's
     /// stream in order with the records committed around it, reaches no
     /// other connection, and finds the writer thread parked: a `Pong` has to
@@ -1073,7 +1161,7 @@ mod loom_tests {
             });
 
             let waker = Waker::new(flag, drainer.thread().clone());
-            let (_, consumer) = connections.attach_with(2, waker);
+            let (_, consumer) = connections.attach_with(2, waker, None);
             hand.send(consumer).expect("the drainer is waiting");
 
             for value in 0..2u32 {

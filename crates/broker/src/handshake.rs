@@ -17,9 +17,10 @@ use crate::transport::Record;
 /// package, known here by name.
 pub const TOPIC: &[u8] = b"dcs.bridge.Handshake";
 
-/// The bytes the handshake takes at most: the wrapper, four short fields
-/// and a hash.
-const BYTES: usize = 256;
+/// The bytes the handshake takes beyond the broker version string: the
+/// wrapper, three short fields and a hash, with room to spare. The version
+/// string is added at its own length, so no build can outgrow the buffer.
+const BYTES: usize = 128;
 
 /// What the handshake carries. `dcs.bridge.Handshake` in the schema.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -41,11 +42,11 @@ pub struct Handshake {
 impl Handshake {
     /// Encode as an envelope tail, the form the rings carry.
     ///
-    /// The buffer is sized for every field at its largest, so a put here
-    /// cannot fail; one that did would be a change to this message that
-    /// forgot to change the size.
+    /// The buffer is sized for every field at its largest, the version
+    /// string at the length it has, so a put here cannot fail; one that did
+    /// would be a change to this message that forgot to change the size.
     pub fn encode(&self) -> Record {
-        let mut e = Encoder::with_capacity(BYTES);
+        let mut e = Encoder::with_capacity(BYTES + self.broker.len());
         e.begin(TOPIC);
         e.integer(1, i64::from(self.protocol))
             .expect("the handshake fits its buffer");

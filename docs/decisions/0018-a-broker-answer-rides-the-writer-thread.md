@@ -62,11 +62,14 @@ with that connection's next `seq`, and wakes the connection's thread. A
 connection that has gone by then is a record with nowhere to go, dropped
 and counted as unaddressed like a late acknowledgement.
 
-The handshake is the connection's first answer. The listener attaches the
-connection and then sends the handshake, on one channel the writer takes in
-order, so the handshake is numbered 1 and nothing fanned out to the new ring
-can be. It is asked for at each accept, so a field that arrives after the
-listener is up, the schema hash, is in the next connection's handshake.
+The handshake rides inside the message that attaches the connection. The
+writer thread pushes it as it attaches the ring, so it is numbered 1 and
+nothing fanned out to the new ring can be. Sent as a second message after
+the attach it could not be: the writer takes every control message it finds
+and then drains the commit ring, so a record committed between the two
+messages would reach the new ring first. The handshake is asked for at each
+accept, so a field that arrives after the listener is up, the schema hash,
+is in the next connection's handshake.
 
 An answer lives in the same ring as the fanned-out records, so the drop rule
 treats it exactly as it treats a `DURABLE` record, which is what SPEC 5.2
