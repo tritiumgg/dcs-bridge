@@ -86,8 +86,9 @@ impl Default for Limits {
     }
 }
 
-/// The bytes an answer takes at most: a wrapper and a few short fields.
-const ANSWER_BYTES: usize = 128;
+/// The bytes an answer takes at most beyond what it carries: a wrapper and
+/// a few short fields. The `Schema` answer is this plus the set.
+pub(crate) const ANSWER_BYTES: usize = 128;
 
 /// `dcs.bridge.Envelope`, as much of it as the broker reads: `seq` and the
 /// payload's `Any`. `epoch` and `mission_time` are the broker's to write and

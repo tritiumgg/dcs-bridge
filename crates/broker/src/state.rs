@@ -237,21 +237,36 @@ pub enum SchemaError {
     NotConfigured,
     /// The bytes were empty, which is a file that was not read.
     Empty,
+    /// The `Schema` answer would outgrow the frame cap in force, so no
+    /// consumer could be served it.
+    TooLarge {
+        /// The set's length.
+        len: usize,
+        /// `max_frame_bytes` as of the call.
+        max_frame_bytes: u32,
+    },
     /// A schema is held already.
     Held,
 }
 
 impl fmt::Display for SchemaError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(match self {
+        match self {
             SchemaError::NotConfigured => {
-                "configure comes first: the schema is handed over after it"
+                f.write_str("configure comes first: the schema is handed over after it")
             }
-            SchemaError::Empty => "the schema is empty",
+            SchemaError::Empty => f.write_str("the schema is empty"),
+            SchemaError::TooLarge {
+                len,
+                max_frame_bytes,
+            } => write!(
+                f,
+                "the schema is {len} bytes and its answer would not fit max_frame_bytes {max_frame_bytes}"
+            ),
             SchemaError::Held => {
-                "a schema is held already: replacing the served set is a DCS restart"
+                f.write_str("a schema is held already: replacing the served set is a DCS restart")
             }
-        })
+        }
     }
 }
 
@@ -625,9 +640,13 @@ impl Bridge {
     /// start is `configure` then `schema` and a call out of that order is
     /// a hook driver defect. Refused when empty, because `schema.pb` is
     /// never empty and an empty read is a file that was not found. Refused
-    /// once a schema is held: replacing the served set is a DCS restart,
-    /// so the second call changes nothing. The bytes are not parsed; the
-    /// broker holds no schema it understands.
+    /// when the answer would outgrow `max_frame_bytes` as in force at the
+    /// call, because the reader refuses an inbound frame over the cap and a
+    /// consumer built the same way would refuse the answer; a cap lowered
+    /// under the set later is the operator's, and the set stays held.
+    /// Refused once a schema is held: replacing the served set is a DCS
+    /// restart, so the second call changes nothing. The bytes are not
+    /// parsed; the broker holds no schema it understands.
     pub fn hold_schema(&self, bytes: &[u8]) -> Result<[u8; 32], SchemaError> {
         use sha2::{Digest, Sha256};
         if !self.configured() {
@@ -635,6 +654,13 @@ impl Bridge {
         }
         if bytes.is_empty() {
             return Err(SchemaError::Empty);
+        }
+        let max_frame_bytes = self.config().max_frame_bytes;
+        if bytes.len().saturating_add(crate::inbound::ANSWER_BYTES) > max_frame_bytes as usize {
+            return Err(SchemaError::TooLarge {
+                len: bytes.len(),
+                max_frame_bytes,
+            });
         }
         let held = HeldSchema {
             set: Record::from(bytes),
@@ -1208,6 +1234,24 @@ mod tests {
             .expect("a valid table");
         assert_eq!(bridge.hold_schema(b""), Err(SchemaError::Empty));
         assert!(bridge.schema().is_none(), "an empty schema was held");
+
+        // A set whose answer would not fit the frame cap in force is
+        // refused naming both, and the cap is the live key as of the call.
+        bridge
+            .configure([("max_frame_bytes", Value::Number(256.0))])
+            .expect("a valid table");
+        let wide = vec![0x0a; 200];
+        assert_eq!(
+            bridge.hold_schema(&wide),
+            Err(SchemaError::TooLarge {
+                len: 200,
+                max_frame_bytes: 256,
+            })
+        );
+        assert!(bridge.schema().is_none(), "an oversized schema was held");
+        bridge
+            .configure([("max_frame_bytes", Value::Number(1024.0))])
+            .expect("a valid table");
 
         let sha256 = bridge.hold_schema(&set).expect("the first hand-off");
         assert_eq!(sha256, <[u8; 32]>::from(Sha256::digest(&set)));
