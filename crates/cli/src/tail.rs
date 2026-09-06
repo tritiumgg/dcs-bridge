@@ -1,46 +1,19 @@
 //! The `tail` verb: frames off the wire, one line each, and a line for every
 //! gap in their numbering.
 //!
-//! A frame is a little-endian `u32` length and then one `Envelope`. The
-//! broker numbers `seq` per connection, from one, before it decides whether a
-//! record under pressure stays, so a `seq` that skips means records were
-//! dropped and nothing else. That is what this prints, and it is the first
-//! thing a person at a live install can see of the drop policy.
+//! The broker numbers `seq` per connection, from one, before it decides
+//! whether a record under pressure stays, so a `seq` that skips means
+//! records were dropped and nothing else. That is what this prints, and it
+//! is the first thing a person at a live install can see of the drop policy.
 //!
-//! The envelope is decoded through a stock protobuf library and the record
-//! inside it is not decoded at all: with no schema loaded, its type URL is
-//! all `tail` knows of it, and the type URL is the topic.
+//! The record inside a frame is not decoded at all: with no schema loaded,
+//! its type URL is all `tail` knows of it, and the type URL is the topic.
 
 use std::io::{self, Read, Write};
 
 use prost::Message;
 
-/// What protobuf runtimes put in front of a type name in an `Any`. Stripped
-/// from the printed topic, because every record carries it.
-const TYPE_URL_PREFIX: &str = "type.googleapis.com/";
-
-/// The most bytes a frame may claim before the length is read as garbage
-/// rather than obeyed. The bridge's own frame cap is smaller.
-const FRAME_MAX: u32 = 16 << 20;
-
-/// `dcs.bridge.Envelope`, as `proto/dcs/bridge/bridge.proto` numbers it.
-///
-/// The payload is an `Any` whose value stays opaque here.
-#[derive(Clone, PartialEq, Message)]
-pub struct Envelope {
-    /// This connection's number for the frame, from one.
-    #[prost(uint64, tag = "1")]
-    pub seq: u64,
-    /// Absent outside an epoch.
-    #[prost(uint32, optional, tag = "2")]
-    pub epoch: Option<u32>,
-    /// Absent while the sim is not running.
-    #[prost(double, optional, tag = "3")]
-    pub mission_time: Option<f64>,
-    /// The record, behind its type URL.
-    #[prost(message, optional, tag = "4")]
-    pub payload: Option<prost_types::Any>,
-}
+use crate::wire::{self, Envelope, read_frame};
 
 /// What a run saw, for the closing line and for the tests.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -77,22 +50,14 @@ struct AuthResult {
 /// The handshake arrives from the bridge unasked and the result answers
 /// this; both print as frames like any other, and the records follow.
 pub fn auth_frame(secret: &str) -> Vec<u8> {
-    let envelope = Envelope {
-        seq: 1,
-        epoch: None,
-        mission_time: None,
-        payload: Some(prost_types::Any {
-            type_url: format!("{TYPE_URL_PREFIX}dcs.bridge.Auth"),
-            value: Auth {
-                token: secret.to_owned(),
-            }
-            .encode_to_vec(),
-        }),
-    };
-    let body = envelope.encode_to_vec();
-    let mut bytes = (body.len() as u32).to_le_bytes().to_vec();
-    bytes.extend(body);
-    bytes
+    wire::frame(
+        1,
+        "dcs.bridge.Auth",
+        Auth {
+            token: secret.to_owned(),
+        }
+        .encode_to_vec(),
+    )
 }
 
 /// The name the schema gives an `AuthError` number.
@@ -103,60 +68,6 @@ fn auth_error_name(error: i32) -> &'static str {
         3 => "SERVER_FULL",
         _ => "UNSPECIFIED",
     }
-}
-
-/// Read one frame, or `None` at a clean end of stream.
-///
-/// An end of stream inside a frame is an error, because the bridge closes a
-/// connection between frames and a cut mid-frame means bytes were lost.
-pub fn read_frame(reader: &mut impl Read) -> io::Result<Option<Envelope>> {
-    let mut length = [0u8; 4];
-    match fill(reader, &mut length)? {
-        0 => return Ok(None),
-        4 => {}
-        n => {
-            return Err(io::Error::new(
-                io::ErrorKind::UnexpectedEof,
-                format!("the stream ended {n} bytes into a frame's length"),
-            ));
-        }
-    }
-    let length = u32::from_le_bytes(length);
-    if length > FRAME_MAX {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("a frame claims {length} bytes, which is not a frame"),
-        ));
-    }
-
-    let mut body = vec![0u8; length as usize];
-    let got = fill(reader, &mut body)?;
-    if got != body.len() {
-        return Err(io::Error::new(
-            io::ErrorKind::UnexpectedEof,
-            format!("the stream ended {got} bytes into a {length}-byte frame"),
-        ));
-    }
-
-    Envelope::decode(&body[..])
-        .map(Some)
-        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
-}
-
-/// Fill `buf` from `reader`, returning how many bytes arrived before the
-/// stream ended. `read_exact` cannot tell an end of stream at a frame
-/// boundary from one inside a frame, and the two mean different things.
-fn fill(reader: &mut impl Read, buf: &mut [u8]) -> io::Result<usize> {
-    let mut filled = 0;
-    while filled < buf.len() {
-        match reader.read(&mut buf[filled..]) {
-            Ok(0) => break,
-            Ok(n) => filled += n,
-            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
-            Err(error) => return Err(error),
-        }
-    }
-    Ok(filled)
 }
 
 /// Print each frame from `reader` to `out` until the stream ends, with a
@@ -208,10 +119,10 @@ pub fn run(mut reader: impl Read, mut out: impl Write) -> io::Result<Summary> {
 /// says whether the token was accepted did not say so, and a run that went
 /// on as though it had would exit as a success.
 fn auth_result(envelope: &Envelope) -> Option<AuthResult> {
-    let any = envelope.payload.as_ref()?;
-    if any.type_url.strip_prefix(TYPE_URL_PREFIX) != Some("dcs.bridge.AuthResult") {
+    if envelope.topic() != Some("dcs.bridge.AuthResult") {
         return None;
     }
+    let any = envelope.payload.as_ref()?;
     Some(AuthResult::decode(&any.value[..]).unwrap_or(AuthResult {
         ok: false,
         error: 0,
@@ -224,15 +135,11 @@ fn auth_result(envelope: &Envelope) -> Option<AuthResult> {
 /// person watching needs the inside of.
 fn write_frame_line(out: &mut impl Write, envelope: &Envelope) -> io::Result<()> {
     write!(out, "seq={}", envelope.seq)?;
-    match &envelope.payload {
-        Some(any) => {
-            let topic = any
-                .type_url
-                .strip_prefix(TYPE_URL_PREFIX)
-                .unwrap_or(&any.type_url);
+    match (envelope.topic(), &envelope.payload) {
+        (Some(topic), Some(any)) => {
             write!(out, " topic={topic} bytes={}", any.value.len())?;
         }
-        None => write!(out, " topic=- bytes=0")?,
+        _ => write!(out, " topic=- bytes=0")?,
     }
     if let Some(result) = auth_result(envelope) {
         if result.ok {
@@ -262,21 +169,9 @@ mod tests {
 
     const TOPIC: &str = "dcs.builtin.UnitDestroyed";
 
-    /// A frame as a stock encoder writes it, for a stream built by hand.
+    /// A record frame on [`TOPIC`], for a stream built by hand.
     fn frame(seq: u64) -> Vec<u8> {
-        let envelope = Envelope {
-            seq,
-            epoch: None,
-            mission_time: None,
-            payload: Some(prost_types::Any {
-                type_url: format!("{TYPE_URL_PREFIX}{TOPIC}"),
-                value: vec![0x08, 0x2a],
-            }),
-        };
-        let body = envelope.encode_to_vec();
-        let mut bytes = (body.len() as u32).to_le_bytes().to_vec();
-        bytes.extend(body);
-        bytes
+        wire::frame(seq, TOPIC, vec![0x08, 0x2a])
     }
 
     /// The gap line's arithmetic: `seq` 1, 2, 5 is two records missing
@@ -316,19 +211,11 @@ mod tests {
     #[test]
     fn an_auth_result_prints_its_verdict_and_a_refusal_is_reported() {
         let result = |seq: u64, ok: bool, error: i32| {
-            let envelope = Envelope {
+            wire::frame(
                 seq,
-                epoch: None,
-                mission_time: None,
-                payload: Some(prost_types::Any {
-                    type_url: format!("{TYPE_URL_PREFIX}dcs.bridge.AuthResult"),
-                    value: AuthResult { ok, error }.encode_to_vec(),
-                }),
-            };
-            let body = envelope.encode_to_vec();
-            let mut bytes = (body.len() as u32).to_le_bytes().to_vec();
-            bytes.extend(body);
-            bytes
+                "dcs.bridge.AuthResult",
+                AuthResult { ok, error }.encode_to_vec(),
+            )
         };
 
         let mut out = Vec::new();
@@ -353,21 +240,7 @@ mod tests {
 
         // A result whose bytes do not decode gave no verdict, which is a
         // refusal rather than a pass.
-        let garbled = {
-            let envelope = Envelope {
-                seq: 1,
-                epoch: None,
-                mission_time: None,
-                payload: Some(prost_types::Any {
-                    type_url: format!("{TYPE_URL_PREFIX}dcs.bridge.AuthResult"),
-                    value: vec![0xff, 0xff, 0xff],
-                }),
-            };
-            let body = envelope.encode_to_vec();
-            let mut bytes = (body.len() as u32).to_le_bytes().to_vec();
-            bytes.extend(body);
-            bytes
-        };
+        let garbled = wire::frame(1, "dcs.bridge.AuthResult", vec![0xff, 0xff, 0xff]);
         let mut out = Vec::new();
         let summary = run(&garbled[..], &mut out).unwrap();
         assert!(summary.refused, "a garbled result passed for a verdict");
@@ -375,25 +248,9 @@ mod tests {
         let frame = auth_frame("hunter2");
         let envelope = read_frame(&mut &frame[..]).unwrap().unwrap();
         assert_eq!(envelope.seq, 1);
+        assert_eq!(envelope.topic(), Some("dcs.bridge.Auth"));
         let any = envelope.payload.unwrap();
-        assert_eq!(any.type_url, format!("{TYPE_URL_PREFIX}dcs.bridge.Auth"));
         assert_eq!(Auth::decode(&any.value[..]).unwrap().token, "hunter2");
-    }
-
-    /// A stream that ends between frames is a closed connection; one that
-    /// ends inside a frame lost bytes, and says so.
-    #[test]
-    fn an_end_of_stream_is_clean_only_between_frames() {
-        let whole = frame(1);
-        assert!(read_frame(&mut &whole[..]).unwrap().is_some());
-        assert!(read_frame(&mut &whole[..0]).unwrap().is_none());
-
-        let cut = &whole[..whole.len() - 1];
-        let error = read_frame(&mut &cut[..]).unwrap_err();
-        assert_eq!(error.kind(), io::ErrorKind::UnexpectedEof);
-
-        let error = read_frame(&mut &whole[..2]).unwrap_err();
-        assert_eq!(error.kind(), io::ErrorKind::UnexpectedEof);
     }
 
     /// A record on [`TOPIC`] carrying `bytes` of string in field 1.

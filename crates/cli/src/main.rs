@@ -6,6 +6,7 @@
 //! the sequence numbers show that records were dropped.
 
 mod tail;
+mod wire;
 
 use std::io::{self, BufReader, Write};
 use std::net::TcpStream;
