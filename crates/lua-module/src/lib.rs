@@ -170,7 +170,7 @@ mod lua {
 /// The hook driver compares it at its first `configure` and disables itself
 /// on a mismatch, so it moves when a call is added, removed or changes
 /// signature, and for nothing else. It is an opaque equality, not an order.
-pub const INTERFACE_VERSION: &str = "1";
+pub const INTERFACE_VERSION: &str = "2";
 
 /// Open the bridge in `state`, leaving one table on the stack.
 ///
@@ -180,9 +180,9 @@ pub const INTERFACE_VERSION: &str = "1";
 /// ADR 0007.
 ///
 /// The table carries the broker version, the interface version, `opens`, the
-/// number of times the module has been opened in this process, `configure`
-/// and the put calls. The first table reads 1 and the second reads 2, which
-/// is how two tables are shown to sit over one bridge.
+/// number of times the module has been opened in this process, `configure`,
+/// `schema` and the put calls. The first table reads 1 and the second reads
+/// 2, which is how two tables are shown to sit over one bridge.
 ///
 /// An open allocates nothing and listens on nothing. The first
 /// `shim.configure` does both, from the configuration it is handed, so a
@@ -204,7 +204,7 @@ pub unsafe extern "C" fn luaopen_dcsbridge(state: *mut core::ffi::c_void) -> cor
     // value back off. Lua copies the bytes it is given, so nothing this crate
     // allocated is left for DCS's C runtime to free.
     unsafe {
-        lua::lua_createtable(state, 0, 4 + put::CALLS.len() as core::ffi::c_int);
+        lua::lua_createtable(state, 0, 5 + put::CALLS.len() as core::ffi::c_int);
         lua::lua_pushlstring(
             state,
             version.as_ptr().cast::<core::ffi::c_char>(),
@@ -225,6 +225,7 @@ pub unsafe extern "C" fn luaopen_dcsbridge(state: *mut core::ffi::c_void) -> cor
 
         put::install(state);
         configure::install(state);
+        schema::install(state);
     }
 
     1
@@ -635,6 +636,69 @@ mod configure {
             }
             Some(caps)
         }
+    }
+}
+
+/// `shim.schema(bytes)`: the compiled `FileDescriptorSet` the hook driver
+/// read from `Mods\services\DCSBridge\schema.pb`, handed to the broker once.
+///
+/// The broker holds the bytes, hashes them, serves them from `GetSchema` and
+/// puts the hash in every handshake from then on; it parses none of them.
+/// The call answers the hash as lowercase hex, which is what a person
+/// compares against the file. It comes after the first `configure` and
+/// happens once: a second call is refused, because replacing the served set
+/// is a DCS restart.
+#[cfg(any(unix, feature = "dcs-lua"))]
+mod schema {
+    use core::ffi::{c_int, c_void};
+
+    use crate::lua;
+
+    /// Put `schema` on the table at the top of the stack.
+    ///
+    /// # Safety
+    ///
+    /// `state` is live, the table is at -1, and one stack slot is free.
+    pub unsafe fn install(state: *mut c_void) {
+        // SAFETY: the push and the setfield pair, leaving the table on top.
+        unsafe {
+            lua::lua_pushcclosure(state, schema, 0);
+            lua::lua_setfield(state, -2, c"schema".as_ptr());
+        }
+    }
+
+    /// `shim.schema(bytes)`: hand the bytes over, and answer their SHA-256
+    /// in hex. Raises `schema refused: ...` before the first `configure`,
+    /// on empty bytes, and once a schema is held.
+    unsafe extern "C" fn schema(state: *mut c_void) -> c_int {
+        // SAFETY: a Lua call. The argument is checked to be a string, so
+        // the pointer and length name Lua's own bytes for the whole call,
+        // and the broker copies them before anything is pushed. The one
+        // Rust allocation before a raise is the message, which the raise
+        // drops by hand.
+        unsafe {
+            // checklstring alone would take a number as its decimal
+            // string, and a number is a call that meant something else.
+            lua::luaL_checktype(state, 1, lua::TSTRING);
+            let mut len = 0usize;
+            let ptr = lua::luaL_checklstring(state, 1, &mut len);
+            let bytes = core::slice::from_raw_parts(ptr.cast::<u8>(), len);
+            match dcsbridge_broker::bridge().hold_schema(bytes) {
+                Ok(sha256) => {
+                    let hex: String = sha256.iter().map(|byte| format!("{byte:02x}")).collect();
+                    lua::lua_pushlstring(state, hex.as_ptr().cast(), hex.len());
+                    drop(hex);
+                }
+                Err(error) => {
+                    let message = format!("schema refused: {error}");
+                    lua::lua_pushlstring(state, message.as_ptr().cast(), message.len());
+                    drop(message);
+                    lua::lua_error(state);
+                    unreachable!("lua_error does not return")
+                }
+            }
+        }
+        1
     }
 }
 
