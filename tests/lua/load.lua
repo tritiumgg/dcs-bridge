@@ -56,6 +56,7 @@ assert(
 )
 
 assert(shim.opens == 1, 'the first open reads ' .. tostring(shim.opens))
+assert(type(shim.schema) == 'function', 'shim.schema is missing')
 
 -- If both DCS states load the broker, luaopen_* runs twice and each state gets
 -- its own Lua table over one bridge. Two opens here stand in for that, and this
