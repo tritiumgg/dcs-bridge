@@ -3,8 +3,7 @@
 <!--
 One to three sentences: what this changes and why it is needed, written for
 someone who has not read the plan. Do not repeat the title. End with what
-the change is reviewed against: the plan task, the decision record, or for
-a stacked branch the claim this branch alone makes.
+the change is reviewed against: the plan task or the decision record.
 -->
 
 ## Details

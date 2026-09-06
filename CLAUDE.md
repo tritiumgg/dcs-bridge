@@ -50,9 +50,6 @@ is the landing, so write the entry the way the merge will make true rather than
 describing a review in progress. A second pull request to say the first one
 landed is a round trip that records nothing the merge did not.
 
-Where a task lands as a sequence, that commit rides the last branch. An entry
-on the first would claim a completion three reviews early.
-
 That means a "Just finished" entry cites its pull request and not a CI run: a
 run id exists only after the run, and amending the commit to add it starts a
 different run.
@@ -214,42 +211,39 @@ every ledger stamp breaks on a Windows checkout.
 ## Version control
 
 This section overrides the global rules in `~/.config/agents/AGENTS.md`, which
-are stricter. The `git` and `github` skills hold the practice that applies
-everywhere: commit format, staging, worktrees, `gh`, review threads, checks
-and merging. This section holds what is particular to this project.
+are stricter. General git and GitHub practice is settled elsewhere: commit
+format, staging, worktrees, `gh`, review threads, checks and merging. This
+section holds what is particular to this project.
 
 **A branch per plan task**, named `task/<id>-<summary>`, such as
 `task/1.1-cargo-workspace`. Work that belongs to no task takes the `type` it
 would commit under: `fix/`, `docs/`, `build/`.
 
-**A task too large to review at once lands as a sequence.** Past roughly 400
-changed lines, split it into stacked branches — `task/2.1-1-crate-split`, then
-`task/2.1-2-lua-surface` — landing ff-only in order. The plan names them and
-what each is reviewable against, because that is the last moment the boundaries
-are free to move. A preparatory refactor always takes its own, claiming no
-change in behavior: sharing a diff with the feature hides which lines moved
-among the lines that changed.
+**One pull request per task, reviewed commit by commit.** A large task is a
+long series of small commits on one branch rather than several branches.
+Commit each slice as soon as its test passes, so there is always a working
+state to return to. Each commit does one thing and leaves the tree passing
+`mise run check`, because the reviewer reads them in order and each is a
+recovery point. About 100 changed lines is easy to review and revert, about
+300 is fine for one logical change, and 1000 is split before committing,
+with tests counted as code. Formatting and behavior, a refactor and a
+feature, and an unrelated fix found along the way each take a commit of
+their own. A preparatory refactor claims no change in behavior: sharing a
+diff with the feature hides which lines moved among the lines that changed.
+Stage paths by name, never with `git add -A` or `git commit -a`, and read
+the staged diff before writing the message. A milestone is
+something a person sees, and reaching one is when the plan's rows ahead are
+re-measured and re-ordered.
 
-**Estimate before cutting, and cut at the phase, not at the task.** A branch
-is sized before its first line is written: estimate its changed lines with
-tests counted as code, and split any estimate past the 400 above then, since
-a split found by measuring the diff afterwards costs a rewrite of every
-branch above it. An estimate near the line names the seam it would split at.
-The estimates go in the plan's sequence table. A phase's remaining
-rows are cut at the start of the phase and again at each of its milestones,
-which the plan names; a milestone is something a person sees, and reaching
-one is when the rows ahead are re-measured, re-cut and re-ordered.
-
-**Review the stack locally, run `mise run ci`, then push everything once.**
-A push starts a CI run per branch, and a fix found after the push costs a
-rebase and a run for every branch above it. So a task's branches are
-finished on the machine first: one adversarial reviewer per branch, on
-Sonnet, read-only, told the claim the branch makes and asked to break it;
-every finding fixed on the branch that introduced it and the stack rebased
-down its length; then `mise run ci` on the top, which runs what the Linux
-job runs, Miri included. Only then is anything pushed, every branch at once,
-and the pull requests opened. `mise run check` alone is what a Windows host
-can run and what a mid-task commit needs; it is not what a push needs.
+**Review locally, run `mise run ci`, then push.** A fix found after the push
+costs a CI run, so a branch is finished on the machine first: one
+adversarial reviewer, on Sonnet, read-only, told the claim the branch makes
+and asked to break it; every finding fixed in a commit of its own, or
+squashed into the commit that introduced it while nothing is pushed; then
+`mise run ci`, which runs what the Linux job runs, Miri included. Only then
+is the branch pushed and the pull request opened. `mise run check` alone is
+what a Windows host can run and what a mid-task commit needs; it is not what
+a push needs.
 
 **History is linear. Rebase, never merge-commit.** A branch lands with
 `git merge --ff-only`, and a refused fast-forward means the branch is fixed.
@@ -257,13 +251,12 @@ Rebasing re-signs, so the commit signatures survive the rewrite.
 
 **Work reaches `main` through a pull request, and lands when the maintainer
 says so.** Open it, report it as waiting, and stop there. When the maintainer
-asks for a stack to be merged, land it: retarget every stacked pull request at
-`main` so GitHub records each as merged, fast-forward `main` to the top of the
-stack, push `main` once, and delete the branches. Every branch's CI run is
-green first and every reviewer finding on it is fixed; a stack with a red run
-is reported, not landed. The ask covers the stack it names and no later one,
-and the push itself still prompts the maintainer at the keyboard through the
-shell guard, so a merge is confirmed twice: once in words, once at the prompt.
+asks for a pull request to be merged, land it: fast-forward `main` to the
+branch, push `main` once, and delete the branch. Its CI run is green first
+and every reviewer finding on it is fixed; a red run is reported, not landed.
+The ask covers the pull request it names and no later one, and the push
+itself still prompts the maintainer at the keyboard through the shell guard,
+so a merge is confirmed twice: once in words, once at the prompt.
 
 **Every pull request body follows `.github/PULL_REQUEST_TEMPLATE.md`.** Its
 comments say what each section holds. `Summary` and `README` are always
@@ -272,7 +265,7 @@ present, and the shell guard refuses a body without them.
 Do these without asking: branch, commit, rebase onto `main`, push a topic
 branch, force-with-lease a topic branch that is yours, delete a branch that is
 already merged, and open a pull request with `gh`. Do these when the
-maintainer asks: fast-forward `main` to a stack and push it.
+maintainer asks: fast-forward `main` to a branch and push it.
 
 The hooks in `.claude/hooks/` hold the rest of this section: the shell guard
 refuses a merge without `--ff-only` and a force push without a lease, and
@@ -282,7 +275,7 @@ of `main`'s history into a prompt for the maintainer. The commit checks run
 message after. `mise run docs` runs `tools/hooktest.sh` against every hook.
 
 **Ask first before rewriting history that has been pushed, and before
-tagging.** Permission to land one stack does not carry to the next. A tag is
+tagging.** Permission to land one pull request does not carry to the next. A tag is
 not a label here: `release.yml` fires on `v*` and publishes to GitHub, so
 tagging is a release and the maintainer makes it.
 
