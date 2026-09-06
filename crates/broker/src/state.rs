@@ -200,7 +200,62 @@ pub struct Bridge {
     /// they require. `commands_rejected_total` by that reason, once stats
     /// exist.
     no_capability: AtomicU64,
+    /// The schema the hook driver handed over, held for the life of the
+    /// process: replacing the served set is a DCS restart, so a second
+    /// hand-off is refused rather than applied.
+    schema: OnceLock<HeldSchema>,
 }
+
+/// The schema as the broker holds it.
+///
+/// The broker parses none of the bytes; it holds them, hashes them once,
+/// and hands them to the reader thread that answers a `GetSchema`, which
+/// wraps them in the answer. Shared by reference, so a request copies
+/// nothing out of here.
+struct HeldSchema {
+    /// The compiled `FileDescriptorSet`, as handed over.
+    set: Record,
+    /// The SHA-256 of the set, which every handshake carries from now on.
+    sha256: [u8; 32],
+}
+
+impl fmt::Debug for HeldSchema {
+    /// The length and the hash: a panic message that printed the bridge
+    /// would otherwise carry the whole set as a byte list.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("HeldSchema")
+            .field("len", &self.set.len())
+            .field("sha256", &self.sha256)
+            .finish()
+    }
+}
+
+/// Why a schema hand-off was refused, with nothing held.
+#[derive(Debug, Eq, PartialEq)]
+pub enum SchemaError {
+    /// The first `configure` has not happened.
+    NotConfigured,
+    /// The bytes were empty, which is a file that was not read.
+    Empty,
+    /// A schema is held already.
+    Held,
+}
+
+impl fmt::Display for SchemaError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            SchemaError::NotConfigured => {
+                "configure comes first: the schema is handed over after it"
+            }
+            SchemaError::Empty => "the schema is empty",
+            SchemaError::Held => {
+                "a schema is held already: replacing the served set is a DCS restart"
+            }
+        })
+    }
+}
+
+impl std::error::Error for SchemaError {}
 
 /// The outbound path: the writer thread, the logic thread's end of the
 /// commit ring, and the listener whose connections the writer fans out to.
@@ -349,10 +404,8 @@ impl Answers for Global {
         bridge().disconnected(session);
     }
 
-    /// `None`: the hand-off does not exist yet, so there is no schema to
-    /// serve and `GetSchema` is answered with the error.
     fn schema(&self) -> Option<Record> {
-        None
+        bridge().schema()
     }
 
     fn seq_ack(&self, seq: u64) {
@@ -422,6 +475,7 @@ impl Bridge {
             authenticated: AtomicU64::new(0),
             seq_acks: AtomicU64::new(0),
             no_capability: AtomicU64::new(0),
+            schema: OnceLock::new(),
         }
     }
 
@@ -553,14 +607,47 @@ impl Bridge {
     /// What this broker greets a connection with, as of now.
     ///
     /// The schema hash is absent until the hook driver hands the schema
-    /// over, and there is no way to hand it over yet.
+    /// over, and present in every handshake after that.
     pub fn handshake(&self) -> handshake::Handshake {
         handshake::Handshake {
             protocol: crate::PROTOCOL_VERSION,
             broker: crate::BROKER_VERSION,
             instance_id: self.instance_id,
-            schema_sha256: None,
+            schema_sha256: self.schema.get().map(|held| held.sha256),
         }
+    }
+
+    /// Take the schema the hook driver read from its deployment, hash it,
+    /// and serve it from now on: `GetSchema` answers with the bytes and the
+    /// handshake carries the hash. Returns the hash.
+    ///
+    /// Refused before the first `configure`, because the hook driver's
+    /// start is `configure` then `schema` and a call out of that order is
+    /// a hook driver defect. Refused when empty, because `schema.pb` is
+    /// never empty and an empty read is a file that was not found. Refused
+    /// once a schema is held: replacing the served set is a DCS restart,
+    /// so the second call changes nothing. The bytes are not parsed; the
+    /// broker holds no schema it understands.
+    pub fn hold_schema(&self, bytes: &[u8]) -> Result<[u8; 32], SchemaError> {
+        use sha2::{Digest, Sha256};
+        if !self.configured() {
+            return Err(SchemaError::NotConfigured);
+        }
+        if bytes.is_empty() {
+            return Err(SchemaError::Empty);
+        }
+        let held = HeldSchema {
+            set: Record::from(bytes),
+            sha256: Sha256::digest(bytes).into(),
+        };
+        let sha256 = held.sha256;
+        self.schema.set(held).map_err(|_| SchemaError::Held)?;
+        Ok(sha256)
+    }
+
+    /// The schema as handed over, or `None` until the hand-off.
+    pub fn schema(&self) -> Option<Record> {
+        self.schema.get().map(|held| Arc::clone(&held.set))
     }
 
     /// Stamp the heartbeat: the logic thread is running now.
@@ -1096,6 +1183,53 @@ mod tests {
         assert_eq!(*bridge.config(), *before);
         assert!(bridge.liveness().enabled);
         assert_eq!(bridge.pending_restart(), 1);
+    }
+
+    /// The schema is refused before the first `configure` and when empty,
+    /// held once with its hash in every handshake after, handed to the
+    /// reader byte for byte, and refused a second time with the first still
+    /// held.
+    #[test]
+    fn the_schema_is_held_once_after_configure_and_served_back() {
+        use sha2::{Digest, Sha256};
+
+        let bridge = Bridge::new(3);
+        let set = b"\x0a\x05hello".to_vec();
+        assert_eq!(
+            bridge.hold_schema(&set),
+            Err(SchemaError::NotConfigured),
+            "held before configure"
+        );
+        assert!(bridge.schema().is_none());
+        assert_eq!(bridge.handshake().schema_sha256, None);
+
+        bridge
+            .configure([("port", Value::Number(0.0))])
+            .expect("a valid table");
+        assert_eq!(bridge.hold_schema(b""), Err(SchemaError::Empty));
+        assert!(bridge.schema().is_none(), "an empty schema was held");
+
+        let sha256 = bridge.hold_schema(&set).expect("the first hand-off");
+        assert_eq!(sha256, <[u8; 32]>::from(Sha256::digest(&set)));
+        assert_eq!(bridge.handshake().schema_sha256, Some(sha256));
+
+        let held = bridge.schema().expect("a schema to serve");
+        assert_eq!(
+            &held[..],
+            &set[..],
+            "the held set is not the one handed over"
+        );
+
+        assert_eq!(
+            bridge.hold_schema(b"\x0a\x05other"),
+            Err(SchemaError::Held),
+            "a second hand-off was applied"
+        );
+        assert_eq!(bridge.handshake().schema_sha256, Some(sha256));
+        assert!(
+            Arc::ptr_eq(&held, &bridge.schema().unwrap()),
+            "the held set changed"
+        );
     }
 
     /// Before any registration the acknowledgement is the one addressable

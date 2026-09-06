@@ -917,6 +917,114 @@ mod tests {
         drop(writer);
     }
 
+    /// Once a schema is held, the handshake carries its SHA-256 and an
+    /// authenticated `GetSchema` is answered with the bytes handed over,
+    /// byte for byte, while an unauthenticated one still closes the
+    /// connection. A consumer reads the hash with a stock decoder and can
+    /// check the bytes against it.
+    #[test]
+    fn a_held_schema_is_hashed_in_the_handshake_and_served_to_a_session() {
+        use sha2::{Digest, Sha256};
+
+        #[derive(Clone, PartialEq, Message)]
+        struct Handshake {
+            #[prost(bytes = "vec", optional, tag = "4")]
+            schema_sha256: Option<Vec<u8>>,
+        }
+        #[derive(Clone, PartialEq, Message)]
+        struct Schema {
+            #[prost(bytes = "vec", optional, tag = "1")]
+            file_descriptor_set: Option<Vec<u8>>,
+            #[prost(string, optional, tag = "2")]
+            error: Option<String>,
+        }
+
+        /// The stub with a schema held: what the bridge answers after the
+        /// hook driver's hand-off.
+        struct Held {
+            set: Record,
+        }
+        impl Answers for Held {
+            fn handshake(&self) -> Record {
+                crate::handshake::Handshake {
+                    protocol: crate::PROTOCOL_VERSION,
+                    broker: crate::BROKER_VERSION,
+                    instance_id: 42,
+                    schema_sha256: Some(Sha256::digest(&self.set).into()),
+                }
+                .encode()
+            }
+            fn liveness(&self) -> inbound::Liveness {
+                Stub.liveness()
+            }
+            fn authenticate(&self, secret: &[u8]) -> Result<Session, AuthError> {
+                Stub.authenticate(secret)
+            }
+            fn disconnected(&self, _: &Session) {}
+            fn schema(&self) -> Option<Record> {
+                Some(Arc::clone(&self.set))
+            }
+            fn seq_ack(&self, _: u64) {}
+            fn set_enabled(&self, _: bool) {}
+            fn refused_no_capability(&self, _: &str) {}
+        }
+
+        // A compiled set, if the schema task has written one, so the test
+        // reads the deployed bytes where it can; otherwise bytes that look
+        // like one. Neither is parsed by anything here.
+        let set = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../target/schema.pb"
+        ))
+        .unwrap_or_else(|_| (0..4096u32).map(|n| (n % 251) as u8).collect());
+        let held = Held {
+            set: Record::from(&set[..]),
+        };
+
+        let (writer, commit, connections) = Writer::spawn(64);
+        let listener = Listener::spawn("127.0.0.1:0", connections, 64, Arc::new(held)).unwrap();
+
+        let mut scanner = client(listener.local_addr());
+        let greeting = read_handshake(&mut scanner);
+        let decoded =
+            Handshake::decode(&greeting.payload.unwrap().value[..]).expect("the handshake decodes");
+        assert_eq!(
+            decoded.schema_sha256.as_deref(),
+            Some(&Sha256::digest(&set)[..]),
+            "the handshake does not carry the set's hash"
+        );
+        scanner
+            .write_all(&inbound(1, "dcs.bridge.GetSchema", &[]))
+            .expect("the request is sent");
+        assert!(
+            is_closed(&mut scanner),
+            "GetSchema was answered before authentication"
+        );
+
+        let mut consumer = client(listener.local_addr());
+        read_handshake(&mut consumer);
+        assert!(authenticate(&mut consumer, SECRET).1.ok);
+        consumer
+            .write_all(&inbound(2, "dcs.bridge.GetSchema", &[]))
+            .expect("the request is sent");
+        let frame = read_frame(&mut consumer);
+        let any = frame.payload.expect("a payload");
+        assert_eq!(any.type_url, "type.googleapis.com/dcs.bridge.Schema");
+        let schema = Schema::decode(&any.value[..]).expect("the schema decodes");
+        assert_eq!(schema.error, None);
+        let served = schema.file_descriptor_set.expect("the set");
+        assert_eq!(served, set, "the served set is not the one handed over");
+        assert_eq!(
+            &Sha256::digest(&served)[..],
+            decoded.schema_sha256.unwrap(),
+            "the served set does not hash to what the handshake said"
+        );
+
+        assert!(commit.is_empty(), "the answer reached the commit ring");
+        drop(listener);
+        drop(writer);
+    }
+
     /// A `Ping` is answered with a `Pong` while the logic thread commits
     /// nothing and the writer thread is parked, the answer is numbered
     /// after the handshake, and nothing reaches the commit ring: the
