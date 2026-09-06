@@ -1,10 +1,12 @@
 //! `dcsb`, the DCS-Bridge CLI.
 //!
 //! Nine verbs are planned and they arrive one at a time, each with the broker
-//! behaviour it is there to observe. `tail` is the first: it connects to a
-//! running bridge and prints each frame as it arrives, with a line wherever
-//! the sequence numbers show that records were dropped.
+//! behaviour it is there to observe. `tail` connects to a running bridge and
+//! prints each frame as it arrives, with a line wherever the sequence
+//! numbers show that records were dropped. `ping` asks whether the sim is
+//! alive and exits by the answer, so a script can ask too.
 
+mod ping;
 mod tail;
 mod wire;
 
@@ -12,6 +14,7 @@ use std::io::{self, BufReader, Write};
 use std::net::TcpStream;
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::time::Duration;
 use std::{env, fs};
 
 use clap::{Args, Parser, Subcommand};
@@ -28,15 +31,24 @@ struct Cli {
 enum Verb {
     /// Print each frame a bridge sends, and each gap in its numbering.
     Tail(TailArgs),
+    /// Ask a bridge whether the sim is alive, and exit 1 when it is not.
+    Ping(PingArgs),
 }
 
+/// The address the bridge listens on.
 #[derive(Args)]
-struct TailArgs {
+struct Addr {
     /// The address the bridge listens on.
     ///
     /// The default is the module's, until its first `configure` can move it.
     #[arg(long, default_value = "127.0.0.1:7742")]
     addr: String,
+}
+
+#[derive(Args)]
+struct TailArgs {
+    #[command(flatten)]
+    addr: Addr,
 
     /// A file holding the token's secret, on its first line.
     ///
@@ -47,12 +59,77 @@ struct TailArgs {
     token_file: Option<PathBuf>,
 }
 
+#[derive(Args)]
+struct PingArgs {
+    #[command(flatten)]
+    addr: Addr,
+}
+
 /// The environment variable a secret is read from when no file names one.
 const TOKEN_ENV: &str = "DCSB_TOKEN";
+
+/// How long `ping` waits for the answer. Loopback answers in microseconds
+/// and the answer waits for nothing inside the bridge, so a wait this long
+/// is a bridge that is not answering, and a script is told so rather than
+/// held.
+const PONG_WAIT: Duration = Duration::from_secs(5);
 
 fn main() -> ExitCode {
     match Cli::parse().verb {
         Verb::Tail(args) => tail_verb(&args),
+        Verb::Ping(args) => ping_verb(&args),
+    }
+}
+
+/// Connect, send one `Ping`, print the `Pong`, and exit by it.
+///
+/// The sim alive exits 0. The sim not alive exits 1, after the line has
+/// been printed, because a disabled bridge or a sim mid-load is an answer.
+/// A refused connection, a bridge that closes without answering or does
+/// not answer in time, or an answer that does not decode exits 2, because
+/// nothing was learned.
+fn ping_verb(args: &PingArgs) -> ExitCode {
+    let addr = &args.addr.addr;
+    let mut stream = match TcpStream::connect(addr) {
+        Ok(stream) => stream,
+        Err(error) => {
+            eprintln!("cannot connect to {addr}: {error}");
+            return ExitCode::from(2);
+        }
+    };
+    if let Err(error) = stream.write_all(&ping::ping_frame()) {
+        eprintln!("cannot send a ping to {addr}: {error}");
+        return ExitCode::from(2);
+    }
+    // The wait is wall-clock over the whole answer rather than one read:
+    // the frame is complete or the time is up, whichever comes first.
+    let reader = wire::Deadline::new(stream, PONG_WAIT);
+
+    let stdout = io::stdout();
+    let mut out = stdout.lock();
+    match ping::run(reader, &mut out) {
+        Ok(Some(pong)) if pong.dcs_alive => ExitCode::SUCCESS,
+        Ok(Some(_)) => ExitCode::from(1),
+        Ok(None) => {
+            eprintln!("{addr} closed the connection without answering");
+            ExitCode::from(2)
+        }
+        Err(error)
+            if matches!(
+                error.kind(),
+                io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+            ) =>
+        {
+            eprintln!(
+                "no answer from {addr} within {} seconds",
+                PONG_WAIT.as_secs()
+            );
+            ExitCode::from(2)
+        }
+        Err(error) => {
+            eprintln!("ping: {error}");
+            ExitCode::from(2)
+        }
     }
 }
 
@@ -99,15 +176,16 @@ fn tail_verb(args: &TailArgs) -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    let mut stream = match TcpStream::connect(&args.addr) {
+    let addr = &args.addr.addr;
+    let mut stream = match TcpStream::connect(addr) {
         Ok(stream) => stream,
         Err(error) => {
-            eprintln!("cannot connect to {}: {error}", args.addr);
+            eprintln!("cannot connect to {addr}: {error}");
             return ExitCode::from(2);
         }
     };
     if let Err(error) = stream.write_all(&tail::auth_frame(&secret)) {
-        eprintln!("cannot send the token to {}: {error}", args.addr);
+        eprintln!("cannot send the token to {addr}: {error}");
         return ExitCode::from(2);
     }
 
@@ -155,7 +233,9 @@ mod tests {
             let path = dir.join(name);
             fs::write(&path, bytes).unwrap();
             token(&TailArgs {
-                addr: String::new(),
+                addr: Addr {
+                    addr: String::new(),
+                },
                 token_file: Some(path),
             })
         };

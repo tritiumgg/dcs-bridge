@@ -6,6 +6,8 @@
 //! is for decodes the value.
 
 use std::io::{self, Read};
+use std::net::TcpStream;
+use std::time::{Duration, Instant};
 
 use prost::Message;
 
@@ -105,6 +107,38 @@ pub fn read_frame(reader: &mut impl Read) -> io::Result<Option<Envelope>> {
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
 }
 
+/// A socket read against a wall-clock deadline.
+///
+/// A socket's own read timeout bounds one read, so a peer that sends a byte
+/// every few seconds passes it on every read and is never caught by it.
+/// Each read here is armed with what is left of the deadline, and once
+/// nothing is left the read fails as timed out without touching the socket.
+pub struct Deadline {
+    stream: TcpStream,
+    until: Instant,
+}
+
+impl Deadline {
+    /// Read `stream` for at most `wait` from now.
+    pub fn new(stream: TcpStream, wait: Duration) -> Self {
+        Self {
+            stream,
+            until: Instant::now() + wait,
+        }
+    }
+}
+
+impl Read for Deadline {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let left = self.until.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return Err(io::ErrorKind::TimedOut.into());
+        }
+        self.stream.set_read_timeout(Some(left))?;
+        self.stream.read(buf)
+    }
+}
+
 /// Fill `buf` from `reader`, returning how many bytes arrived before the
 /// stream ended. `read_exact` cannot tell an end of stream at a frame
 /// boundary from one inside a frame, and the two mean different things.
@@ -140,5 +174,48 @@ mod tests {
 
         let error = read_frame(&mut &whole[..2]).unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::UnexpectedEof);
+    }
+
+    /// A peer that sends a byte at a time, each inside the socket's own
+    /// timeout, is still caught by the deadline: the frame never completes
+    /// and the read fails as timed out once the wait is spent.
+    #[test]
+    fn a_trickled_frame_does_not_outlive_the_deadline() {
+        use std::io::Write;
+        use std::net::TcpListener;
+        use std::thread;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let trickle = thread::spawn(move || {
+            let (mut peer, _) = listener.accept().unwrap();
+            for _ in 0..40 {
+                if peer.write_all(&[0]).is_err() {
+                    break;
+                }
+                thread::sleep(Duration::from_millis(50));
+            }
+        });
+
+        let wait = Duration::from_millis(400);
+        let mut reader = Deadline::new(TcpStream::connect(addr).unwrap(), wait);
+        let started = Instant::now();
+        let error = read_frame(&mut reader).unwrap_err();
+        let took = started.elapsed();
+        drop(reader);
+        trickle.join().unwrap();
+
+        assert!(
+            matches!(
+                error.kind(),
+                io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+            ),
+            "the read failed for another reason: {error}"
+        );
+        assert!(took >= wait, "the read gave up early, after {took:?}");
+        assert!(
+            took < wait * 4,
+            "the trickle held the read past the deadline, for {took:?}"
+        );
     }
 }
