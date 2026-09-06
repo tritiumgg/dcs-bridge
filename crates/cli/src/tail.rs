@@ -44,6 +44,15 @@ struct AuthResult {
     error: i32,
 }
 
+/// `dcs.bridge.Handshake`, the one field of it `tail` reads: the hash of
+/// the schema the bridge serves, absent until the hook driver hands the
+/// schema over.
+#[derive(Clone, PartialEq, Message)]
+struct Handshake {
+    #[prost(bytes = "vec", optional, tag = "4")]
+    schema_sha256: Option<Vec<u8>>,
+}
+
 /// The one frame `tail` sends: an `Auth` carrying `secret`, as the first
 /// frame on the connection, numbered 1.
 ///
@@ -129,10 +138,22 @@ fn auth_result(envelope: &Envelope) -> Option<AuthResult> {
     }))
 }
 
+/// The schema hash a handshake carries, as hex. `None` for a handshake
+/// carrying none, and for any other frame.
+fn schema_sha256(envelope: &Envelope) -> Option<String> {
+    if envelope.topic() != Some("dcs.bridge.Handshake") {
+        return None;
+    }
+    let any = envelope.payload.as_ref()?;
+    let hash = Handshake::decode(&any.value[..]).ok()?.schema_sha256?;
+    Some(hash.iter().map(|byte| format!("{byte:02x}")).collect())
+}
+
 /// One line per frame: `seq`, the topic and the payload's size, then the
 /// epoch and mission time only when the frame carries them. An `AuthResult`
-/// says whether the token was accepted, because that is the one record a
-/// person watching needs the inside of.
+/// says whether the token was accepted, and the handshake says which schema
+/// the bridge serves, because those are the two records a person watching
+/// needs the inside of.
 fn write_frame_line(out: &mut impl Write, envelope: &Envelope) -> io::Result<()> {
     write!(out, "seq={}", envelope.seq)?;
     match (envelope.topic(), &envelope.payload) {
@@ -140,6 +161,10 @@ fn write_frame_line(out: &mut impl Write, envelope: &Envelope) -> io::Result<()>
             write!(out, " topic={topic} bytes={}", any.value.len())?;
         }
         _ => write!(out, " topic=- bytes=0")?,
+    }
+    if envelope.topic() == Some("dcs.bridge.Handshake") {
+        let hash = schema_sha256(envelope).unwrap_or_else(|| "-".into());
+        write!(out, " schema_sha256={hash}")?;
     }
     if let Some(result) = auth_result(envelope) {
         if result.ok {
@@ -251,6 +276,47 @@ mod tests {
         assert_eq!(envelope.topic(), Some("dcs.bridge.Auth"));
         let any = envelope.payload.unwrap();
         assert_eq!(Auth::decode(&any.value[..]).unwrap().token, "hunter2");
+    }
+
+    /// The handshake line says which schema the bridge serves, as the hash
+    /// in hex, and `-` while the bridge holds none. The frame is the
+    /// broker's own encoding, so every field it carries is read past.
+    #[test]
+    fn the_handshake_prints_the_schema_hash_or_a_dash() {
+        let handshake = |schema_sha256: Option<[u8; 32]>| {
+            let tail = dcsbridge_broker::handshake::Handshake {
+                protocol: 1,
+                broker: "0.0.0-test",
+                instance_id: 7,
+                schema_sha256,
+            }
+            .encode();
+            let mut frame = ((tail.len() + 2) as u32).to_le_bytes().to_vec();
+            frame.extend([0x08, 0x01]);
+            frame.extend_from_slice(&tail);
+            frame
+        };
+
+        let mut out = Vec::new();
+        run(&handshake(None)[..], &mut out).unwrap();
+        let out = String::from_utf8(out).unwrap();
+        assert!(
+            out.contains("topic=dcs.bridge.Handshake bytes=") && out.contains(" schema_sha256=-\n"),
+            "no schema did not print a dash: {out}"
+        );
+
+        let mut hash = [0u8; 32];
+        hash[0] = 0xba;
+        hash[31] = 0x0f;
+        let mut out = Vec::new();
+        run(&handshake(Some(hash))[..], &mut out).unwrap();
+        let out = String::from_utf8(out).unwrap();
+        assert!(
+            out.contains(
+                " schema_sha256=ba0000000000000000000000000000000000000000000000000000000000000f\n"
+            ),
+            "the hash did not print as hex: {out}"
+        );
     }
 
     /// A record on [`TOPIC`] carrying `bytes` of string in field 1.
