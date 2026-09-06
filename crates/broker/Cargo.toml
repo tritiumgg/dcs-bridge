@@ -17,15 +17,22 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 
-# prost and nothing else. The shipped build runs inside DCS's process, so
-# every crate here is code inside the simulator, and the concurrency is
-# written by hand so that Loom and Miri can reach it. prost is the one
-# exception: the reader thread decodes an attacker's bytes through it,
-# because a decoder written beside the encoder would share its misreadings,
-# and this one is fuzzed and bounds its own recursion. The frame-length cap
-# ahead of it stays the broker's own. ADR 0016.
+# prost and sha2, and nothing else. The shipped build runs inside DCS's
+# process, so every crate here is code inside the simulator, and the
+# concurrency is written by hand so that Loom and Miri can reach it. prost
+# is one exception: the reader thread decodes an attacker's bytes through
+# it, because a decoder written beside the encoder would share its
+# misreadings, and this one is fuzzed and bounds its own recursion. The
+# frame-length cap ahead of it stays the broker's own. ADR 0016.
+#
+# sha2 is the other: the schema hash the handshake carries, computed once
+# per process over the hook driver's own file. force-soft pins the portable
+# safe-Rust backend, so no runtime CPU detection and no SIMD intrinsics run
+# inside the sim for it, and the default std feature is nothing a slice
+# hash needs. ADR 0020.
 [dependencies]
 prost = "0.14"
+sha2 = { version = "0.10", default-features = false, features = ["force-soft"] }
 
 # The tests decode the encoder's output through the same library. prost-types
 # carries the library's own `Any`, so the type URL is read the way every
