@@ -189,8 +189,12 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         let trickle = thread::spawn(move || {
             let (mut peer, _) = listener.accept().unwrap();
-            for _ in 0..40 {
-                if peer.write_all(&[0]).is_err() {
+            // A length of 64, then a body a byte at a time that never
+            // reaches 64: four zero bytes would be a whole empty frame.
+            let mut bytes = 64u32.to_le_bytes().to_vec();
+            bytes.resize(40, 0);
+            for byte in bytes {
+                if peer.write_all(&[byte]).is_err() {
                     break;
                 }
                 thread::sleep(Duration::from_millis(50));
