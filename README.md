@@ -84,6 +84,12 @@ keys marked live, such as the timeouts and the tokens; a change to the
 address, the port, the connection cap or a queue size waits for a DCS
 restart, and the call reports it as pending.
 
+After that first call the hook script hands the bridge the bytes of
+`Mods\services\DCSBridge\schema.pb` once, with `shim.schema`. From then on
+every connection's handshake carries the schema's SHA-256, which `dcsb tail`
+prints on its first line; the bytes are served back to an authenticated
+consumer that asks.
+
 A consumer authenticates with a token: an id, a secret, and the capabilities
 the token grants, from `read`, `command` and `reload`. The `tokens` key holds
 one entry per consumer. Reading it from the file is not yet built; until then

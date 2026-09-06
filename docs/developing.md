@@ -132,8 +132,11 @@ mise run schema
 
 The output is a `FileDescriptorSet`. It ships inside the write-directory zip at
 `Mods\services\DCSBridge\schema.pb`, where the hook driver reads it at DCS start
-and hands the bytes to the broker; the broker hashes them and serves them back,
-and a consumer compares that hash against the one its handshake carries.
+and hands the bytes to the broker with `shim.schema`, once, after its first
+`configure`. The broker hashes them with `sha2` on its portable backend (ADR
+0020), serves them back through `GetSchema`, and puts the hash in every
+handshake from then on; `dcsb tail` prints it on the handshake line, and a
+consumer compares it against the set it fetched.
 
 So the bytes are part of the wire contract, and two builds of the same tree have
 to produce the same ones. `mise.toml` pins buf for that reason and CI reads the
