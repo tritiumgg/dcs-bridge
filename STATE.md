@@ -1,6 +1,6 @@
 # Working state
 
-**Last updated:** 2026-09-05
+**Last updated:** 2026-09-06
 
 The handoff between sessions. Read it first; update it before a session ends,
 not only when a task finishes. Stamp the date above each time; it carries a
@@ -18,7 +18,7 @@ is just deleted. Write entries as one or two lines, never paragraphs.
 
 ## In progress
 
-Nothing. 2.15 is closed; 2.C2 is next.
+Nothing. 2.C2 is closed; 2.10 is next.
 
 *One task at most. Say what is done, what is not, and where to resume. Say what
 is committed and what is only in the working tree. Say what is knowingly
@@ -26,27 +26,29 @@ broken. Empty this when the task closes.*
 
 ## Just finished
 
+- **2.C2** — `dcsb ping`: one `Ping` with no token, the three `Pong` fields on
+  one line, exit 1 when the sim is not alive. PR #69, which carries the live steps.
 - **2.15** — `shim.configure`: the broker's keys behind one swap, the first
   call binding and allocating, `shim.tokens` retired; ADR 0019. PRs #61 to #66; #66 carries the live steps.
-- **2.9** — handshake, auth, and the five broker-answered messages on a reader
-  thread per connection, answered through the writer thread; ADR 0018. PRs #50 to #57; #57 carries the live steps.
 
 *The last three at most, one line each. Git log holds the rest.*
 
 ## Next
 
-**Task 2.C2** — `dcsb ping`: sends `Ping`, prints the three `Pong` fields,
-exits non-zero when the sim is not alive. One branch, about 250 lines. Done
-when a live `Pong` arrives during a mission load; `dcs_alive` reads in full
-once 2.11 stamps the heartbeat.
+**Task 2.10** — `shim.schema`: the bytes accepted once after the first
+`configure`, hashed, served by `GetSchema`, refused twice and before the
+hand-off; the handshake carries the hash from then on. Two branches, the
+first with the SHA-256's decision record. Done when `GetSchema` returns bytes
+identical to `schema.pb` and an unauthenticated one is refused.
 
-**An agent verifies** the loopback half; **a person confirms** the blackout
-half at an install, as 2.9's live steps did through the handshake.
+**An agent verifies** both over loopback; **a person confirms** the deployed
+`schema.pb` at an install once 2.C3 can fetch it.
 
 ## After that
 
-- **M2.1** closes with 2.10 `shim.schema`, 2.C3 `schema` and 2.11 `tick`;
-  the plan's milestone table says what is re-measured then.
+- **M2.1** closes with 2.C3 `schema` and 2.11 `tick`, whose heartbeat is
+  what makes `dcsb ping` read alive; the plan's milestone table says what is
+  re-measured then.
 - **M2.2**: 2.16 registration, then 2.12 rings and `poll`, 2.C4, 2.13, 2.14.
 - **Phase 3** opens on `protoc-gen-dcsbridge-lua`, which reads the four message
   options this schema defines and splits its output by `Target`. It reads the

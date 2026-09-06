@@ -54,7 +54,9 @@ beside the pinned one; run it before a push. `mise tasks` lists the rest.
 
 `cargo run -p dcsb -- tail` connects to a running bridge on the module's
 default address, `127.0.0.1:7742`, and prints one line per frame and one line
-per gap in its numbering. `--addr` names another.
+per gap in its numbering. `--addr` names another. `cargo run -p dcsb -- ping`
+sends one `Ping` with no token and exits by the `Pong`: 0 alive, 1 not, 2
+when nothing answered.
 
 Rust is the one tool `mise.toml` does not name a version for. `rust-toolchain.toml`
 does, and mise reads it — `mise ls` shows rust sourced from that file, and

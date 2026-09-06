@@ -211,6 +211,7 @@ machine that runs DCS, or on any machine that can reach the bridge's address.
 dcsb tail                          Print each record the bridge sends.
 dcsb tail --addr 192.0.2.10:7742   Connect to a bridge on another address.
 dcsb tail --token-file token.txt   Read the token from a file instead.
+dcsb ping                          Ask whether the sim is alive.
 dcsb --help                        List the available commands.
 ```
 
@@ -222,8 +223,13 @@ the `DCSB_TOKEN` environment variable, or from the first line of the file
 process on the machine can read it. A refused token prints the bridge's
 answer and exits 1.
 
-`tail` is the only command built so far. These commands are planned:
-`ping`, `schema`, `send`, `doctor`, `stats`, `record`, `replay` and `mock`.
+`ping` needs no token. It prints one line, `dcs_alive=false
+dcs_last_heard_ms=- bridge_enabled=true`, and exits 1 when the sim is not
+alive, so a script can ask too. Until the sim stamps its heartbeat (not built)
+it always reads the sim as never heard from.
+
+`tail` and `ping` are the only commands built so far. The others are planned:
+`schema`, `send`, `doctor`, `stats`, `record`, `replay` and `mock`.
 
 ## Build from source
 
