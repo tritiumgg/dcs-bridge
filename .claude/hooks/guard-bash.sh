@@ -16,8 +16,8 @@
 #   git push --force                 --force-with-lease, on a topic branch
 #   a redirect, tee, cp, mv or rm    the specifications are frozen
 #     aimed at docs/specs/ or .gitattributes
-#   gh pr create without the         every pull request follows the template
-#     template's four headings
+#   gh pr create without a           every pull request follows the template
+#     Summary and a README heading
 #
 # Asked:
 #   git push to main, git tag, gh release, gh pr merge, and a rewrite of
@@ -120,7 +120,9 @@ if has "gh[[:space:]]+pr[[:space:]]+create"; then
         body=$(cat "$file")
     fi
     missing=""
-    for h in Summary Details README Testing; do
+    # The two sections every body carries. The template's other sections are
+    # deleted when empty, so their absence proves nothing.
+    for h in Summary README; do
         # Anywhere, not at line start: the body may arrive on one line with
         # literal \n sequences, or through a heredoc with real newlines.
         printf '%s\n' "$body" | grep -q "## $h" || missing="$missing $h"
@@ -128,8 +130,9 @@ if has "gh[[:space:]]+pr[[:space:]]+create"; then
     if [ -n "$missing" ]; then
         refuse "a pull request body without the template's headings:$missing." \
 "Every pull request body follows .github/PULL_REQUEST_TEMPLATE.md. gh pr
-create --body does not read the template, so write the body to its headings
-and put none under any that does not apply."
+create --body does not read the template, so write the body to its headings.
+Summary and README are always present; delete any other section that is
+empty."
     fi
 fi
 

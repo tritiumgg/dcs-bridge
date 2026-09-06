@@ -214,10 +214,9 @@ every ledger stamp breaks on a Windows checkout.
 ## Version control
 
 This section overrides the global rules in `~/.config/agents/AGENTS.md`, which
-are stricter.
-
-Conventional Commits: `type(scope): summary`, imperative, under 72 characters.
-Add a body when the change needs explaining.
+are stricter. The `git` and `github` skills hold the practice that applies
+everywhere: commit format, staging, worktrees, `gh`, review threads, checks
+and merging. This section holds what is particular to this project.
 
 **A branch per plan task**, named `task/<id>-<summary>`, such as
 `task/1.1-cargo-workspace`. Work that belongs to no task takes the `type` it
@@ -252,10 +251,9 @@ job runs, Miri included. Only then is anything pushed, every branch at once,
 and the pull requests opened. `mise run check` alone is what a Windows host
 can run and what a mid-task commit needs; it is not what a push needs.
 
-**History is linear. Rebase, never merge-commit.** Bring a branch up to date
-with `git rebase origin/main`; a branch lands with `git merge --ff-only`. If
-the fast-forward is refused, fix the branch rather than reaching for a merge
-commit. Rebasing re-signs, so the commit signatures survive the rewrite.
+**History is linear. Rebase, never merge-commit.** A branch lands with
+`git merge --ff-only`, and a refused fast-forward means the branch is fixed.
+Rebasing re-signs, so the commit signatures survive the rewrite.
 
 **Work reaches `main` through a pull request, and lands when the maintainer
 says so.** Open it, report it as waiting, and stop there. When the maintainer
@@ -267,19 +265,9 @@ is reported, not landed. The ask covers the stack it names and no later one,
 and the push itself still prompts the maintainer at the keyboard through the
 shell guard, so a merge is confirmed twice: once in words, once at the prompt.
 
-**Every pull request body follows `.github/PULL_REQUEST_TEMPLATE.md`.** `gh pr
-create --body` does not read the template, so write the body to its headings.
-Summary ends with what the change is reviewed against: the plan task, the
-decision record, or for a stacked branch the claim that branch alone makes.
-Testing says how a reader runs the tests, not that they were run. Its steps
-are numbered, start from a clean checkout, and are grouped by phase (without
-DCS, then with DCS) and by platform (PowerShell on Windows, bash elsewhere).
-Each step is an imperative sentence: an action, or a `Verify ...` naming what
-the tester sees when the steps before it worked. Put a Verify wherever the
-tester needs to know that before going on. The With DCS steps go build,
-install, files to edit, then what to do in DCS. README names the paragraph the
-change updated and any note it took out. Each heading reads `none`
-where nothing applies.
+**Every pull request body follows `.github/PULL_REQUEST_TEMPLATE.md`.** Its
+comments say what each section holds. `Summary` and `README` are always
+present, and the shell guard refuses a body without them.
 
 Do these without asking: branch, commit, rebase onto `main`, push a topic
 branch, force-with-lease a topic branch that is yours, delete a branch that is
