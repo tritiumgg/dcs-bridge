@@ -37,6 +37,21 @@ const MAX_FIELD: u32 = (1 << 29) - 1;
 /// and no schema in this project comes near it.
 pub const MAX_DEPTH: usize = 64;
 
+/// What the envelope carries beside the payload while an epoch is open: the
+/// epoch and the sim's clock, both published by the hook driver and read
+/// by nothing per record from Lua.
+///
+/// A record emitted outside an epoch carries neither, which is what `None`
+/// in its place means: an absent epoch is a record no consumer discards
+/// under the epoch rule, and an absent mission time is a sim not running.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Stamp {
+    /// The epoch the hook driver opened, never zero.
+    pub epoch: u32,
+    /// Mission time in seconds, as the sim's clock last read.
+    pub mission_time: f64,
+}
+
 /// The type URL's prefix as the encoder writes it, byte for byte.
 const TYPE_URL_PREFIX: &[u8] = dcsbridge_topic::TYPE_URL_PREFIX.as_bytes();
 

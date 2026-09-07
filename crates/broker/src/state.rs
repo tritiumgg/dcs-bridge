@@ -28,6 +28,7 @@ use std::sync::{
 use std::time::Instant;
 
 use crate::config::{self, Applied, Config, Value};
+use crate::encode::Stamp;
 use crate::fanout::{Commit, ConnectionId, Writer};
 use crate::handshake;
 use crate::inbound::{Answers, AuthError, Limits, Liveness, Session};
@@ -177,6 +178,9 @@ pub struct Bridge {
     /// Whether a mission load is in progress, which picks the liveness
     /// threshold.
     loading: AtomicBool,
+    /// The epoch `shim.epoch` opened, or zero between epochs. The hook
+    /// driver allocates ids from one, so zero is free to mean none.
+    epoch: AtomicU32,
     /// The configuration in force, replaced whole by each `configure` and
     /// by `SetEnabled`, which moves the `enabled` key inside it. Every
     /// thread that decides by a live key reads it here, taking the lock for
@@ -488,6 +492,7 @@ impl Bridge {
             heartbeat: AtomicU64::new(0),
             mission_time: AtomicU64::new(0),
             loading: AtomicBool::new(false),
+            epoch: AtomicU32::new(0),
             config: RwLock::new(Arc::new(Config::default())),
             configuring: Mutex::new(false),
             pending_restart: AtomicU64::new(0),
@@ -721,6 +726,31 @@ impl Bridge {
     /// first.
     pub fn mission_time(&self) -> f64 {
         f64::from_bits(self.mission_time.load(Ordering::Relaxed))
+    }
+
+    /// `shim.epoch`: open an epoch, or close the one that is open.
+    ///
+    /// The hook driver publishes the id once per boundary, at mission load
+    /// end and at simulation stop, and every record committed between the
+    /// two carries it. One store; the id is never zero, because zero is
+    /// what the field reads as before it is set.
+    pub fn set_epoch(&self, epoch: Option<u32>) {
+        self.epoch.store(epoch.unwrap_or(0), Ordering::Relaxed);
+    }
+
+    /// What `begin` writes into the envelope: the open epoch and the clock,
+    /// or `None` outside an epoch, when a record carries neither.
+    ///
+    /// Read on the logic thread, the same thread that publishes both, so
+    /// the pair is the frame's own.
+    pub fn stamp(&self) -> Option<Stamp> {
+        match self.epoch.load(Ordering::Relaxed) {
+            0 => None,
+            epoch => Some(Stamp {
+                epoch,
+                mission_time: self.mission_time(),
+            }),
+        }
     }
 
     /// Mark a mission load as in progress, or over.
@@ -1593,6 +1623,41 @@ mod tests {
         assert!(
             !bridge.liveness().alive,
             "the load's end kept the loading threshold"
+        );
+    }
+
+    /// Outside an epoch there is no stamp, whatever the clock reads.
+    /// Inside one the stamp is the epoch and the clock as last published,
+    /// and closing the epoch takes the stamp away without touching the
+    /// clock.
+    #[test]
+    fn the_stamp_is_the_open_epoch_and_the_clock_or_nothing() {
+        let bridge = ticking(14, 1000);
+        bridge.tick_at(0, 41.5);
+        assert_eq!(bridge.stamp(), None, "a stamp outside an epoch");
+
+        bridge.set_epoch(Some(3));
+        assert_eq!(
+            bridge.stamp(),
+            Some(Stamp {
+                epoch: 3,
+                mission_time: 41.5
+            })
+        );
+
+        bridge.tick_at(1, 42.0);
+        assert_eq!(
+            bridge.stamp().map(|stamp| stamp.mission_time),
+            Some(42.0),
+            "the stamp did not follow the clock"
+        );
+
+        bridge.set_epoch(None);
+        assert_eq!(bridge.stamp(), None, "a stamp after the epoch closed");
+        assert_eq!(
+            bridge.mission_time(),
+            42.0,
+            "closing the epoch moved the clock"
         );
     }
 }
