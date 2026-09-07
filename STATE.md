@@ -1,6 +1,6 @@
 # Working state
 
-**Last updated:** 2026-09-06
+**Last updated:** 2026-09-07
 
 The handoff between sessions. Read it first; update it before a session ends,
 not only when a task finishes. Stamp the date above each time; it carries a
@@ -26,10 +26,10 @@ broken. Empty this when the task closes.*
 
 ## Just finished
 
+- **Package rename** — five `dcsbridge.*` packages, one per producing
+  component, and the ownership check fences the prefix. ADR 0021. PR #71.
 - **2.10** — `shim.schema`: held once after `configure`, hashed (ADR 0020),
   served by `GetSchema`, the hash in the handshake and on `dcsb tail`. PR #70, with the live steps.
-- **2.C2** — `dcsb ping`: one `Ping` with no token, the three `Pong` fields on
-  one line, exit 1 when the sim is not alive. PR #69, which carries the live steps.
 
 *The last three at most, one line each. Git log holds the rest.*
 
