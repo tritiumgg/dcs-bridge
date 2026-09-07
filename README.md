@@ -88,7 +88,7 @@ After that first call the hook script hands the bridge the bytes of
 `Mods\services\DCSBridge\schema.pb` once, with `shim.schema`. From then on
 every connection's handshake carries the schema's SHA-256, which `dcsb tail`
 prints on its first line; the bytes are served back to an authenticated
-consumer that asks.
+consumer that asks, and `dcsb schema` is one.
 
 A consumer authenticates with a token: an id, a secret, and the capabilities
 the token grants, from `read`, `command` and `reload`. The `tokens` key holds
@@ -218,6 +218,7 @@ dcsb tail                          Print each record the bridge sends.
 dcsb tail --addr 192.0.2.10:7742   Connect to a bridge on another address.
 dcsb tail --token-file token.txt   Read the token from a file instead.
 dcsb ping                          Ask whether the sim is alive.
+dcsb schema fetched.pb             Write the schema the bridge serves to a file.
 dcsb --help                        List the available commands.
 ```
 
@@ -234,8 +235,17 @@ dcs_last_heard_ms=- bridge_enabled=true`, and exits 1 when the sim is not
 alive, so a script can ask too. Until the sim stamps its heartbeat (not built)
 it always reads the sim as never heard from.
 
-`tail` and `ping` are the only commands built so far. The others are planned:
-`schema`, `send`, `doctor`, `stats`, `record`, `replay` and `mock`.
+`schema` authenticates like `tail`, fetches the schema the bridge serves, and
+writes it to the file named on the command line, replacing one that exists.
+It prints one line, `sha256=<hex> bytes=<n> path=<file>`, and the hash is the
+one `Get-FileHash` or `sha256sum` prints for the file, so the fetched schema
+can be compared to the deployed `Mods\services\DCSBridge\schema.pb`. It
+exits 1, writing nothing, when the bridge holds no schema yet, refuses the
+token, or serves bytes that do not hash to what its handshake said. Nothing
+learned exits 2.
+
+`tail`, `ping` and `schema` are built. The others are planned: `send`,
+`doctor`, `stats`, `record`, `replay` and `mock`.
 
 ## Build from source
 

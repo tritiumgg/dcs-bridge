@@ -137,7 +137,9 @@ and hands the bytes to the broker with `shim.schema`, once, after its first
 `configure`. The broker hashes them with `sha2` on its portable backend (ADR
 0020), serves them back through `GetSchema`, and puts the hash in every
 handshake from then on; `dcsb tail` prints it on the handshake line, and a
-consumer compares it against the set it fetched.
+consumer compares it against the set it fetched. `dcsb schema` is that
+consumer: it fetches the set, checks it against the handshake, and writes it
+to a file, which is how the deployed `schema.pb` is checked at an install.
 
 So the bytes are part of the wire contract, and two builds of the same tree have
 to produce the same ones. `mise.toml` pins buf for that reason and CI reads the

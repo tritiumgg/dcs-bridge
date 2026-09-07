@@ -18,7 +18,7 @@ is just deleted. Write entries as one or two lines, never paragraphs.
 
 ## In progress
 
-Nothing. 2.10 is closed; 2.C3 is next.
+Nothing. 2.C3 is closed; 2.11 is next.
 
 *One task at most. Say what is done, what is not, and where to resume. Say what
 is committed and what is only in the working tree. Say what is knowingly
@@ -26,28 +26,30 @@ broken. Empty this when the task closes.*
 
 ## Just finished
 
+- **2.C3** — `dcsb schema`: the token and one `GetSchema`, the set checked
+  against the handshake's hash and written to a file. PR #73, which carries the live steps.
 - **Topic constants** — a `dcsbridge-topic` crate both sides depend on,
   built from the package, every name checked against `broker.proto`. PR #72.
-- **Package rename** — five `dcsbridge.*` packages, one per producing
-  component, and the ownership check fences the prefix. ADR 0021. PR #71.
 
 *The last three at most, one line each. Git log holds the rest.*
 
 ## Next
 
-**Task 2.C3** — `dcsb schema`: authenticate, send `GetSchema`, write the
-bytes to a file or print the error. Done when the bytes are identical to the
-deployed `schema.pb`, which is how 2.10 is checked at an install.
+**Task 2.11** — `shim.tick` and `shim.epoch`: mission time on every call,
+the heartbeat stamped at most once per `heartbeat_interval_ms`, `dcs_alive`
+under both thresholds; then epochs in the envelope tail. Two branches; the
+plan's 2.11 rows say what each holds. Done when `Pong` carries `dcs_alive`
+and `dcs_last_heard_ms`, killing the logic thread flips it and a mission
+load does not, and a record outside an epoch omits `epoch` and `mission_time`.
 
-**An agent verifies** the loopback half against `target/schema.pb`; **a
-person confirms** the deployed file at an install, `dcsb schema` against
-`Get-FileHash`.
+**An agent verifies** the throttle, the thresholds and the tail over
+loopback; **a person confirms** `dcs_alive=true`, the flip and the load at
+an install.
 
 ## After that
 
-- **M2.1** closes with 2.C3 and 2.11 `tick`, whose heartbeat is what makes
-  `dcsb ping` read alive; the plan's milestone table says what is re-measured
-  then.
+- **M2.1** closes with 2.11, and the plan's milestone table says what is
+  re-measured then.
 - **M2.2**: 2.16 registration, then 2.12 rings and `poll`, 2.C4, 2.13, 2.14.
 - **Phase 3** opens on `protoc-gen-dcsbridge-lua`, which reads the four message
   options this schema defines and splits its output by `Target`. It reads the
