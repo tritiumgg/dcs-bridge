@@ -2,7 +2,9 @@
 # no part of the broker: what it knows of the wire it decodes through a stock
 # protobuf library, so a misreading in the encoder cannot be shared by the tool
 # that checks it. The broker is reached only by the tests, which stand a real
-# listener up over loopback.
+# listener up over loopback. The topic names are shared, through
+# dcsbridge-topic, because a name is not encoder logic and a wrong one is
+# caught by that crate's test against the schema.
 
 [package]
 name = "dcsb"
@@ -20,6 +22,7 @@ path = "src/main.rs"
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
+dcsbridge-topic = { path = "../topic" }
 prost = "0.14"
 prost-types = "0.14"
 

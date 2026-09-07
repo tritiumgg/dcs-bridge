@@ -17,7 +17,7 @@ Everything outside the Lua files is Rust. The broker uses no garbage collector
 and no language runtime, because a collector inside the DCS process can stop the
 logic thread and that stops the sim for every player at once.
 
-The workspace holds four Rust crates:
+The workspace holds five Rust crates:
 
 | Crate | Package | Artifact |
 |---|---|---|
@@ -25,6 +25,7 @@ The workspace holds four Rust crates:
 | `crates/lua-module` | `lua-dcsbridge` | `lua_dcsbridge.dll`, renamed to `lua-dcsbridge.dll` |
 | `crates/cli` | `dcsb` | `dcsb.exe` |
 | `crates/generator` | `protoc-gen-dcsbridge-lua` | `protoc-gen-dcsbridge-lua.exe` |
+| `crates/topic` | `dcsbridge-topic` | rlib, the topic names the broker and `dcsb` both spell; ships nowhere |
 
 The broker is split in two. `crates/broker` holds the rings, threads, framing
 and drop policy and names no Lua symbol, so it links into a test binary on any

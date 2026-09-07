@@ -30,7 +30,11 @@ authors.workspace = true
 # safe-Rust backend, so no runtime CPU detection and no SIMD intrinsics run
 # inside the sim for it, and the default std feature is nothing a slice
 # hash needs. ADR 0020.
+#
+# dcsbridge-topic is the project's own: the topic names and the type URL
+# prefix, as constants, so the shipped build takes no code from it.
 [dependencies]
+dcsbridge-topic = { path = "../topic" }
 prost = "0.14"
 sha2 = { version = "0.10", default-features = false, features = ["force-soft"] }
 

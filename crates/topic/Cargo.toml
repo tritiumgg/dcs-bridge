@@ -1,0 +1,20 @@
+# The names both sides of the wire agree on: the bridge's own topics and
+# the prefix every type URL carries. Constants and nothing else, so the
+# broker's shipped build still runs no code outside std (ADR 0016), and
+# dcsb still decodes the wire through a stock protobuf library and shares
+# no encoder logic with the broker.
+
+[package]
+name = "dcsbridge-topic"
+description = "The DCS-Bridge topic names, shared by the broker and dcsb."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+
+[lints]
+workspace = true

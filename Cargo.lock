@@ -169,6 +169,7 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "dcsbridge-broker",
+ "dcsbridge-topic",
  "prost",
  "prost-types",
 ]
@@ -177,11 +178,16 @@ dependencies = [
 name = "dcsbridge-broker"
 version = "0.1.0"
 dependencies = [
+ "dcsbridge-topic",
  "loom",
  "prost",
  "prost-types",
  "sha2",
 ]
+
+[[package]]
+name = "dcsbridge-topic"
+version = "0.1.0"
 
 [[package]]
 name = "digest"

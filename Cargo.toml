@@ -1,4 +1,5 @@
-# Four crates: the broker, its Lua entry point, the CLI and the generator.
+# Five crates: the broker, its Lua entry point, the CLI, the generator, and
+# the topic names the broker and the CLI both spell.
 #
 # The version below is the release version, and it is the only version this
 # file holds. The bridge carries five others — the protocol, the interface, the
@@ -8,7 +9,13 @@
 
 [workspace]
 resolver = "3"
-members = ["crates/broker", "crates/cli", "crates/generator", "crates/lua-module"]
+members = [
+    "crates/broker",
+    "crates/cli",
+    "crates/generator",
+    "crates/lua-module",
+    "crates/topic",
+]
 
 [workspace.package]
 version = "0.1.0"
