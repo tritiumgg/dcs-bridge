@@ -58,7 +58,7 @@ states which hosts build what.
 | 1.4 | Windows cross-build in CI: `x86_64-pc-windows-msvc` through `cargo-xwin`, the only Windows target (ADR 0003). The broker is never built with `panic = "abort"` (SPEC §14.2). | `lua-dcsbridge.dll` and `dcsb.exe` are produced from a Linux runner. |
 | 1.5 | Release workflow: tag-triggered, builds the write-directory zip, attaches the broker, the CLI and the zip, and publishes checksums. A prerelease channel carries development builds. | A tag produces a downloadable build with no manual step. |
 | 1.6 | `.proto` importing `google/protobuf/any.proto` and `google/protobuf/descriptor.proto`: the `Envelope` with its `Any` payload, `RecordClass`, `Target`, `Capability`, `RejectedReason`, the four message options, and one `DURABLE` message. Build `schema.pb` with `buf`. | `buf lint` passes and `schema.pb` exists for Phase 2 to hash and serve. |
-| 1.7 | `buf lint` and `buf breaking` in CI against the previous release, plus the SPEC §8.4 ownership check: only the SPEC §1.2 records may live in `dcs.bridge`. | An incompatible change fails the build. A message added to `dcs.bridge` from outside that set fails it too. |
+| 1.7 | `buf lint` and `buf breaking` in CI against the previous release, plus the SPEC §8.4 ownership check: only the SPEC §1.2 records may live in the bridge's own packages, `dcsbridge.broker`, `dcsbridge.hook` and `dcsbridge.sim` (ADR 0021). | An incompatible change fails the build. A message added to a bridge package from outside that set fails it too, and so does any other package under `dcsbridge`. |
 
 ### Phase 2 — The broker, and the CLI beside it
 
@@ -185,7 +185,7 @@ uses it, and all of it is reviewable before a live install is asked to:
 
 | Branch | What it holds | Reviewable against |
 |---|---|---|
-| `task/2.9-1-answer-path` | An answer from off the logic thread reaches the writer thread through the attach channel and takes its `seq` there; the handshake as every connection's first frame, `dcs.bridge.Handshake` in the schema, `PROTOCOL_VERSION`, the instance id. Fan-out and loopback tests. ADR 0018. | SPEC §5.2 "Handshake and order of operations", ADR 0018 |
+| `task/2.9-1-answer-path` | An answer from off the logic thread reaches the writer thread through the attach channel and takes its `seq` there; the handshake as every connection's first frame, `dcsbridge.broker.Handshake` in the schema, `PROTOCOL_VERSION`, the instance id. Fan-out and loopback tests. ADR 0018. | SPEC §5.2 "Handshake and order of operations", ADR 0018 |
 | `task/2.9-2-inbound-frame` | `prost` inside the broker; the inbound frame: the length cap before any allocation, the envelope header decoded through `prost`, the type URL cap; `Ping` and `Pong` in the schema and `Pong` encoded; what the reader thread asks of the broker, as a trait. Unit tests over bytes. | SPEC §14.2's parser rules, SPEC §5.2's `Pong` table, ADR 0016 |
 | `task/2.9-3-reader-thread` | A reader thread per connection, a fault caught at it; `handshake_timeout_ms`; `Ping` answered with `Pong` from the heartbeat and the `enabled` key; a message before authentication other than `Ping` and `Auth` closes the connection. Loopback tests, one with the logic thread committing nothing. | SPEC §5.2 "`Pong` carries DCS liveness", SPEC §14.3's timeout, ADR 0018 |
 | `task/2.9-4-token-table` | `Auth`, `AuthResult` and `AuthError` in the schema; the token table on the bridge and `Bridge::set_tokens`; `Bridge::authenticate`, comparing every secret in constant time, refusing an empty capability set, and holding the session count under `max_connections`; the session the reader will hold, and what it asks of the broker to open one. Unit tests; nothing on the wire changes. | SPEC §14.4's token rules, SPEC §14.3's connection cap, SPEC §5.2's `AuthResult` errors |
@@ -585,9 +585,9 @@ evidence moves to the rule.
 Three further rules make the split work. Each document assigns its sections by
 **which vocabulary they define**: SPEC §1.2 enumerates the bridge's own records
 and SPEC §9.5 its own commands, and SPEC §8.2 does the same by package name — a
-topic is its payload's fully-qualified type name, so `dcs.bridge`,
-`dcs.builtin` and an adopter's own package partition the space without a
-registry. A section belongs to the document that owns the topics it describes.
+topic is its payload's fully-qualified type name, so the five `dcsbridge`
+packages (ADR 0021) and an adopter's own package partition the space without
+a registry. A section belongs to the document that owns the topics it describes.
 The probe *register* stays with the component whose behaviour each probe
 decides, because the bridge's ring sizes are provisional on PROBE-7 and the
 specification must not depend on the plan. And references gain a document

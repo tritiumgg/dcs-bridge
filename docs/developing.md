@@ -145,8 +145,9 @@ version from there rather than naming its own. buf vendors its own
 the hash on its own; `tools/mkschema.sh` says what else it holds fixed.
 
 `buf lint` runs in CI with one standard rule excepted, because a topic id is its
-payload's fully-qualified type name and the `dcs.bridge` package cannot take a
-version suffix without renaming every topic. ADR 0004 has the argument.
+payload's fully-qualified type name and a `dcsbridge` package cannot take a
+version suffix without renaming every topic. ADR 0004 has the argument, and
+ADR 0021 says which five packages there are and what each holds.
 
 ## Releases
 
