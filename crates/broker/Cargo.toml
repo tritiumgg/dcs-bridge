@@ -32,7 +32,7 @@ authors.workspace = true
 # hash needs. ADR 0020.
 #
 # dcsbridge-topic is the project's own: the topic names and the type URL
-# prefix, as constants, so the shipped build takes no code from it.
+# prefix, as constants, so the shipped build takes no code from it. ADR 0022.
 [dependencies]
 dcsbridge-topic = { path = "../topic" }
 prost = "0.14"
