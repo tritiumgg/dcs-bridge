@@ -204,7 +204,7 @@ pub unsafe extern "C" fn luaopen_dcsbridge(state: *mut core::ffi::c_void) -> cor
     // value back off. Lua copies the bytes it is given, so nothing this crate
     // allocated is left for DCS's C runtime to free.
     unsafe {
-        lua::lua_createtable(state, 0, 5 + put::CALLS.len() as core::ffi::c_int);
+        lua::lua_createtable(state, 0, 6 + put::CALLS.len() as core::ffi::c_int);
         lua::lua_pushlstring(
             state,
             version.as_ptr().cast::<core::ffi::c_char>(),
@@ -226,6 +226,7 @@ pub unsafe extern "C" fn luaopen_dcsbridge(state: *mut core::ffi::c_void) -> cor
         put::install(state);
         configure::install(state);
         schema::install(state);
+        tick::install(state);
     }
 
     1
@@ -699,6 +700,61 @@ mod schema {
             }
         }
         1
+    }
+}
+
+/// `shim.tick(mission_time)`: the sim's clock, from the hook driver's
+/// per-frame callback.
+///
+/// The broker publishes the mission time on every call and stamps the
+/// heartbeat at most once per `heartbeat_interval_ms`; the throttle is the
+/// broker's, so the caller cannot skip the heartbeat without skipping the
+/// clock. The hook driver keeps calling this while the bridge is disabled,
+/// so a disabled bridge reads as disabled and never as a dead sim.
+#[cfg(any(unix, feature = "dcs-lua"))]
+mod tick {
+    use core::ffi::{c_int, c_void};
+
+    use crate::lua;
+
+    /// Put `tick` on the table at the top of the stack.
+    ///
+    /// # Safety
+    ///
+    /// `state` is live, the table is at -1, and one stack slot is free.
+    pub unsafe fn install(state: *mut c_void) {
+        // SAFETY: the push and the setfield pair, leaving the table on top.
+        unsafe {
+            lua::lua_pushcclosure(state, tick, 0);
+            lua::lua_setfield(state, -2, c"tick".as_ptr());
+        }
+    }
+
+    /// `shim.tick(mission_time)`. Raises before the first `configure`, and
+    /// on an argument that is not a finite number: a NaN or an infinity is
+    /// a clock that was never read, and stamping it would tell every
+    /// consumer the sim is alive at no time at all.
+    unsafe extern "C" fn tick(state: *mut c_void) -> c_int {
+        // SAFETY: a Lua call. Every raise happens with nothing on the Rust
+        // stack that needs dropping.
+        unsafe {
+            lua::luaL_checktype(state, 1, lua::TNUMBER);
+            let mission_time = lua::lua_tonumber(state, 1);
+            if !mission_time.is_finite() {
+                lua::luaL_argerror(state, 1, c"not a finite number".as_ptr());
+                unreachable!("luaL_argerror does not return")
+            }
+            let bridge = dcsbridge_broker::bridge();
+            if !bridge.configured() {
+                lua::luaL_error(
+                    state,
+                    c"configure comes first: no tick can be taken before it".as_ptr(),
+                );
+                unreachable!("luaL_error does not return")
+            }
+            bridge.tick(mission_time);
+        }
+        0
     }
 }
 
