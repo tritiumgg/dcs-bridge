@@ -212,6 +212,16 @@ jobs:
       - name: Build
         run: cargo build --workspace --all-targets --no-default-features
 
+      # schema.pb ships inside the write-directory zip, so the staging below
+      # needs it. It comes from the .proto tree rather than from the Windows
+      # build, and nothing about it is platform-specific. It is compiled
+      # before the tests because the loopback tests that serve a schema read
+      # this file when it exists and stand-in bytes when it does not, and the
+      # deployed bytes are what those tests are for.
+      - uses: ./.github/actions/buf
+      - name: Schema
+        run: sh tools/mkschema.sh
+
       - name: Test
         run: cargo test --workspace --no-default-features
 
@@ -272,13 +282,6 @@ jobs:
 
       - name: Import library from the checked-in .def
         run: sh tools/mkimplib.sh
-
-      # schema.pb ships inside the write-directory zip, so the staging below
-      # needs it. It comes from the .proto tree rather than from the Windows
-      # build, and nothing about it is platform-specific.
-      - uses: ./.github/actions/buf
-      - name: Schema
-        run: sh tools/mkschema.sh
 
       # Default features, so the broker's build.rs generates its own copy of
       # the import library and links the DLL against DCS's Lua.
