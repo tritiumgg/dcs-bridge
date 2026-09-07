@@ -21,7 +21,7 @@ use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::io;
 use std::net::{SocketAddr, ToSocketAddrs};
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{
     Arc, Mutex, MutexGuard, OnceLock, PoisonError, RwLock, RwLockReadGuard, TryLockError,
 };
@@ -174,6 +174,9 @@ pub struct Bridge {
     /// `f64`. The sim owns this clock and it pauses with the sim; no wall
     /// clock stands in for it.
     mission_time: AtomicU64,
+    /// Whether a mission load is in progress, which picks the liveness
+    /// threshold.
+    loading: AtomicBool,
     /// The configuration in force, replaced whole by each `configure` and
     /// by `SetEnabled`, which moves the `enabled` key inside it. Every
     /// thread that decides by a live key reads it here, taking the lock for
@@ -484,6 +487,7 @@ impl Bridge {
             started: Instant::now(),
             heartbeat: AtomicU64::new(0),
             mission_time: AtomicU64::new(0),
+            loading: AtomicBool::new(false),
             config: RwLock::new(Arc::new(Config::default())),
             configuring: Mutex::new(false),
             pending_restart: AtomicU64::new(0),
@@ -719,9 +723,21 @@ impl Bridge {
         f64::from_bits(self.mission_time.load(Ordering::Relaxed))
     }
 
+    /// Mark a mission load as in progress, or over.
+    ///
+    /// A load is a frame blackout of tens of seconds, so between the two
+    /// marks `dcs_alive` is judged against `dcs_alive_threshold_loading_ms`
+    /// rather than the running threshold, and a normal load does not read
+    /// as a dead sim. The marks are the hook driver's `MissionLoadBegan` and
+    /// `MissionLoaded`, and nothing sets this until those records exist.
+    pub fn set_loading(&self, loading: bool) {
+        self.loading.store(loading, Ordering::Relaxed);
+    }
+
     /// What a `Pong` carries now: the heartbeat's age, whether that is
-    /// under the threshold, and the kill switch's effective value. Read on
-    /// the reader thread, and it touches nothing the logic thread holds.
+    /// under the threshold in force, and the kill switch's effective value.
+    /// Read on the reader thread, and it touches nothing the logic thread
+    /// holds.
     pub fn liveness(&self) -> Liveness {
         let now = self.now_ms();
         let last_heard_ms = match self.heartbeat.load(Ordering::Relaxed) {
@@ -729,9 +745,14 @@ impl Bridge {
             stamped => Some(now.saturating_sub(stamped - 1)),
         };
         let config = self.config();
+        let threshold = if self.loading.load(Ordering::Relaxed) {
+            config.dcs_alive_threshold_loading_ms
+        } else {
+            config.dcs_alive_threshold_ms
+        };
         Liveness {
             last_heard_ms,
-            alive: last_heard_ms.is_some_and(|age| age < config.dcs_alive_threshold_ms),
+            alive: last_heard_ms.is_some_and(|age| age < threshold),
             enabled: config.enabled,
         }
     }
@@ -1539,5 +1560,39 @@ mod tests {
         assert_eq!(stamped_at(&bridge), Some(100), "the old interval was read");
         bridge.tick_at(600, 0.0);
         assert_eq!(stamped_at(&bridge), Some(600));
+    }
+
+    /// A stamp older than the running threshold reads dead while running
+    /// and alive while a load is in progress, and the load's end puts the
+    /// running threshold back. The stamp is real time here, so the two
+    /// thresholds straddle an age of zero rather than waiting one out.
+    #[test]
+    fn a_load_in_progress_judges_liveness_by_the_loading_threshold() {
+        let bridge = Bridge::new(13);
+        bridge.swap(Config {
+            heartbeat_interval_ms: 0,
+            dcs_alive_threshold_ms: 0,
+            dcs_alive_threshold_loading_ms: 120_000,
+            ..Config::default()
+        });
+        assert!(!bridge.liveness().alive, "never heard from read alive");
+
+        bridge.tick(0.0);
+        assert!(
+            !bridge.liveness().alive,
+            "an age at the running threshold read alive"
+        );
+
+        bridge.set_loading(true);
+        assert!(
+            bridge.liveness().alive,
+            "a load in progress read the running threshold"
+        );
+
+        bridge.set_loading(false);
+        assert!(
+            !bridge.liveness().alive,
+            "the load's end kept the loading threshold"
+        );
     }
 }
