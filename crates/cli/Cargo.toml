@@ -25,6 +25,10 @@ clap = { version = "4", features = ["derive"] }
 dcsbridge-topic = { path = "../topic" }
 prost = "0.14"
 prost-types = "0.14"
+# The schema hash, checked against the one the handshake carries. The
+# broker pins sha2 to its portable backend because it runs inside DCS
+# (ADR 0020); dcsb runs outside it, so the default backend is fine here.
+sha2 = "0.10"
 
 [dev-dependencies]
 dcsbridge-broker = { path = "../broker" }

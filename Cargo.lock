@@ -172,6 +172,7 @@ dependencies = [
  "dcsbridge-topic",
  "prost",
  "prost-types",
+ "sha2",
 ]
 
 [[package]]
