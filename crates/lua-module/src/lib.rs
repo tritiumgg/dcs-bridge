@@ -170,7 +170,7 @@ mod lua {
 /// The hook driver compares it at its first `configure` and disables itself
 /// on a mismatch, so it moves when a call is added, removed or changes
 /// signature, and for nothing else. It is an opaque equality, not an order.
-pub const INTERFACE_VERSION: &str = "2";
+pub const INTERFACE_VERSION: &str = "3";
 
 /// Open the bridge in `state`, leaving one table on the stack.
 ///
@@ -204,7 +204,7 @@ pub unsafe extern "C" fn luaopen_dcsbridge(state: *mut core::ffi::c_void) -> cor
     // value back off. Lua copies the bytes it is given, so nothing this crate
     // allocated is left for DCS's C runtime to free.
     unsafe {
-        lua::lua_createtable(state, 0, 6 + put::CALLS.len() as core::ffi::c_int);
+        lua::lua_createtable(state, 0, 7 + put::CALLS.len() as core::ffi::c_int);
         lua::lua_pushlstring(
             state,
             version.as_ptr().cast::<core::ffi::c_char>(),
@@ -227,6 +227,7 @@ pub unsafe extern "C" fn luaopen_dcsbridge(state: *mut core::ffi::c_void) -> cor
         configure::install(state);
         schema::install(state);
         tick::install(state);
+        epoch::install(state);
     }
 
     1
@@ -753,6 +754,61 @@ mod tick {
                 unreachable!("luaL_error does not return")
             }
             bridge.tick(mission_time);
+        }
+        0
+    }
+}
+
+/// `shim.epoch(id)` and `shim.epoch(nil)`: the epoch's two boundaries, from
+/// the hook driver.
+///
+/// The hook driver allocates the id at mission load end and publishes it
+/// here before it injects the sim driver; at simulation stop it emits
+/// `EpochClosed` and then clears it. Between the two the broker stamps
+/// every committed record with the id and the mission time, and outside
+/// them a record carries neither, which is what a record from a load
+/// window is. The call only stores, so it is not refused before the first
+/// `configure`.
+#[cfg(any(unix, feature = "dcs-lua"))]
+mod epoch {
+    use core::ffi::{c_int, c_void};
+
+    use crate::lua;
+
+    /// Put `epoch` on the table at the top of the stack.
+    ///
+    /// # Safety
+    ///
+    /// `state` is live, the table is at -1, and one stack slot is free.
+    pub unsafe fn install(state: *mut c_void) {
+        // SAFETY: the push and the setfield pair, leaving the table on top.
+        unsafe {
+            lua::lua_pushcclosure(state, epoch, 0);
+            lua::lua_setfield(state, -2, c"epoch".as_ptr());
+        }
+    }
+
+    /// `shim.epoch(id)` opens epoch `id`; `shim.epoch(nil)` and `shim.epoch()`
+    /// close the open one. The id is an integer from 1 to 2^32 - 1: zero is
+    /// what the field reads as between epochs, so an id of zero would open
+    /// an epoch no record could show it was in.
+    unsafe extern "C" fn epoch(state: *mut c_void) -> c_int {
+        // SAFETY: a Lua call. Every raise happens with nothing on the Rust
+        // stack that needs dropping.
+        unsafe {
+            // No argument reads as LUA_TNONE, which is -1, one below nil.
+            let epoch = if lua::lua_type(state, 1) <= lua::TNIL {
+                None
+            } else {
+                lua::luaL_checktype(state, 1, lua::TNUMBER);
+                let id = lua::lua_tonumber(state, 1);
+                if !(1.0..=f64::from(u32::MAX)).contains(&id) || id.fract() != 0.0 {
+                    lua::luaL_argerror(state, 1, c"not an epoch id".as_ptr());
+                    unreachable!("luaL_argerror does not return")
+                }
+                Some(id as u32)
+            };
+            dcsbridge_broker::bridge().set_epoch(epoch);
         }
         0
     }
