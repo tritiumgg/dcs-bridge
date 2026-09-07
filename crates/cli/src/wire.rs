@@ -11,9 +11,8 @@ use std::time::{Duration, Instant};
 
 use prost::Message;
 
-/// What protobuf runtimes put in front of a type name in an `Any`. Stripped
-/// from a printed topic, because every record carries it.
-pub const TYPE_URL_PREFIX: &str = "type.googleapis.com/";
+/// Stripped from a printed topic, because every record carries it.
+pub use dcsbridge_topic::TYPE_URL_PREFIX;
 
 /// The most bytes a frame may claim before the length is read as garbage
 /// rather than obeyed. The bridge's own frame cap is smaller.
@@ -159,16 +158,16 @@ fn fill(reader: &mut impl Read, buf: &mut [u8]) -> io::Result<usize> {
 mod tests {
     use super::*;
 
+    /// A fan-out topic: any record, since the wire reads none of them.
+    const TOPIC: &str = "dcsbridge.builtin.sim.UnitDestroyed";
+
     /// A stream that ends between frames is a closed connection; one that
     /// ends inside a frame lost bytes, and says so.
     #[test]
     fn an_end_of_stream_is_clean_only_between_frames() {
-        let whole = frame(1, "dcsbridge.builtin.sim.UnitDestroyed", vec![0x08, 0x2a]);
+        let whole = frame(1, TOPIC, vec![0x08, 0x2a]);
         let envelope = read_frame(&mut &whole[..]).unwrap().unwrap();
-        assert_eq!(
-            envelope.topic(),
-            Some("dcsbridge.builtin.sim.UnitDestroyed")
-        );
+        assert_eq!(envelope.topic(), Some(TOPIC));
         assert!(read_frame(&mut &whole[..0]).unwrap().is_none());
 
         let cut = &whole[..whole.len() - 1];

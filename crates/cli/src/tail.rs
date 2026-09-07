@@ -14,6 +14,7 @@ use std::io::{self, Read, Write};
 use prost::Message;
 
 use crate::wire::{self, Envelope, read_frame};
+use dcsbridge_topic as topic;
 
 /// What a run saw, for the closing line and for the tests.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -61,7 +62,7 @@ struct Handshake {
 pub fn auth_frame(secret: &str) -> Vec<u8> {
     wire::frame(
         1,
-        "dcsbridge.broker.Auth",
+        topic::AUTH,
         Auth {
             token: secret.to_owned(),
         }
@@ -128,7 +129,7 @@ pub fn run(mut reader: impl Read, mut out: impl Write) -> io::Result<Summary> {
 /// says whether the token was accepted did not say so, and a run that went
 /// on as though it had would exit as a success.
 fn auth_result(envelope: &Envelope) -> Option<AuthResult> {
-    if envelope.topic() != Some("dcsbridge.broker.AuthResult") {
+    if envelope.topic() != Some(topic::AUTH_RESULT) {
         return None;
     }
     let any = envelope.payload.as_ref()?;
@@ -141,7 +142,7 @@ fn auth_result(envelope: &Envelope) -> Option<AuthResult> {
 /// The schema hash a handshake carries, as hex. `None` for a handshake
 /// carrying none, and for any other frame.
 fn schema_sha256(envelope: &Envelope) -> Option<String> {
-    if envelope.topic() != Some("dcsbridge.broker.Handshake") {
+    if envelope.topic() != Some(topic::HANDSHAKE) {
         return None;
     }
     let any = envelope.payload.as_ref()?;
@@ -162,7 +163,7 @@ fn write_frame_line(out: &mut impl Write, envelope: &Envelope) -> io::Result<()>
         }
         _ => write!(out, " topic=- bytes=0")?,
     }
-    if envelope.topic() == Some("dcsbridge.broker.Handshake") {
+    if envelope.topic() == Some(topic::HANDSHAKE) {
         let hash = schema_sha256(envelope).unwrap_or_else(|| "-".into());
         write!(out, " schema_sha256={hash}")?;
     }
@@ -223,10 +224,12 @@ mod tests {
         );
         assert_eq!(
             out,
-            "seq=1 topic=dcsbridge.builtin.sim.UnitDestroyed bytes=2\n\
-             seq=2 topic=dcsbridge.builtin.sim.UnitDestroyed bytes=2\n\
-             gap: 2 records dropped between seq 2 and 5\n\
-             seq=5 topic=dcsbridge.builtin.sim.UnitDestroyed bytes=2\n"
+            format!(
+                "seq=1 topic={TOPIC} bytes=2\n\
+                 seq=2 topic={TOPIC} bytes=2\n\
+                 gap: 2 records dropped between seq 2 and 5\n\
+                 seq=5 topic={TOPIC} bytes=2\n"
+            )
         );
     }
 
@@ -238,7 +241,7 @@ mod tests {
         let result = |seq: u64, ok: bool, error: i32| {
             wire::frame(
                 seq,
-                "dcsbridge.broker.AuthResult",
+                topic::AUTH_RESULT,
                 AuthResult { ok, error }.encode_to_vec(),
             )
         };
@@ -249,7 +252,7 @@ mod tests {
         assert!(
             String::from_utf8(out)
                 .unwrap()
-                .contains("topic=dcsbridge.broker.AuthResult bytes=2 ok=true"),
+                .contains(&format!("topic={} bytes=2 ok=true", topic::AUTH_RESULT)),
             "an accepted token did not print ok=true"
         );
 
@@ -265,7 +268,7 @@ mod tests {
 
         // A result whose bytes do not decode gave no verdict, which is a
         // refusal rather than a pass.
-        let garbled = wire::frame(1, "dcsbridge.broker.AuthResult", vec![0xff, 0xff, 0xff]);
+        let garbled = wire::frame(1, topic::AUTH_RESULT, vec![0xff, 0xff, 0xff]);
         let mut out = Vec::new();
         let summary = run(&garbled[..], &mut out).unwrap();
         assert!(summary.refused, "a garbled result passed for a verdict");
@@ -273,7 +276,7 @@ mod tests {
         let frame = auth_frame("hunter2");
         let envelope = read_frame(&mut &frame[..]).unwrap().unwrap();
         assert_eq!(envelope.seq, 1);
-        assert_eq!(envelope.topic(), Some("dcsbridge.broker.Auth"));
+        assert_eq!(envelope.topic(), Some(topic::AUTH));
         let any = envelope.payload.unwrap();
         assert_eq!(Auth::decode(&any.value[..]).unwrap().token, "hunter2");
     }
@@ -301,7 +304,7 @@ mod tests {
         run(&handshake(None)[..], &mut out).unwrap();
         let out = String::from_utf8(out).unwrap();
         assert!(
-            out.contains("topic=dcsbridge.broker.Handshake bytes=")
+            out.contains(&format!("topic={} bytes=", topic::HANDSHAKE))
                 && out.contains(" schema_sha256=-\n"),
             "no schema did not print a dash: {out}"
         );
