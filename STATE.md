@@ -26,10 +26,10 @@ broken. Empty this when the task closes.*
 
 ## Just finished
 
+- **Topic constants** — a `dcsbridge-topic` crate both sides depend on,
+  built from the package, every name checked against `broker.proto`. PR #72.
 - **Package rename** — five `dcsbridge.*` packages, one per producing
   component, and the ownership check fences the prefix. ADR 0021. PR #71.
-- **2.10** — `shim.schema`: held once after `configure`, hashed (ADR 0020),
-  served by `GetSchema`, the hash in the handshake and on `dcsb tail`. PR #70, with the live steps.
 
 *The last three at most, one line each. Git log holds the rest.*
 
