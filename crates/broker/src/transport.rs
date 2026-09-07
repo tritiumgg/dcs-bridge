@@ -380,7 +380,7 @@ mod tests {
     /// A record on [`TOPIC`] carrying `n` in field 1.
     fn record(n: i64) -> Record {
         let mut e = Encoder::with_capacity(256);
-        e.begin(TOPIC);
+        e.begin(TOPIC, None);
         e.integer(1, n).unwrap();
         Arc::from(e.commit().unwrap())
     }

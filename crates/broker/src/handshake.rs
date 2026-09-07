@@ -45,7 +45,7 @@ impl Handshake {
     /// would be a change to this message that forgot to change the size.
     pub fn encode(&self) -> Record {
         let mut e = Encoder::with_capacity(BYTES + self.broker.len());
-        e.begin(topic::HANDSHAKE.as_bytes());
+        e.begin(topic::HANDSHAKE.as_bytes(), None);
         e.integer(1, i64::from(self.protocol))
             .expect("the handshake fits its buffer");
         e.string(2, self.broker.as_bytes())

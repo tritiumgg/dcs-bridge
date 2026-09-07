@@ -92,8 +92,9 @@ impl Default for Limits {
 pub(crate) const ANSWER_BYTES: usize = 128;
 
 /// `dcsbridge.broker.Envelope`, as much of it as the broker reads: `seq` and the
-/// payload's `Any`. `epoch` and `mission_time` are the broker's to write and
-/// no consumer's to send, so they are skipped as unknown fields.
+/// payload's `Any`. `epoch` and `mission_time` are the broker's to write, at
+/// `begin` on the logic thread, and no consumer's to send, so they are
+/// skipped as unknown fields.
 #[derive(Clone, PartialEq, Message)]
 pub struct Envelope {
     /// The consumer's own numbering, read and echoed and never checked.
@@ -257,7 +258,7 @@ pub fn topic(envelope: &Envelope, max_type_url_bytes: usize) -> Result<&str, Clo
 /// `dcsbridge.broker.Pong` as an envelope tail.
 pub fn pong(liveness: Liveness) -> Record {
     let mut e = Encoder::with_capacity(ANSWER_BYTES);
-    e.begin(topic::PONG.as_bytes());
+    e.begin(topic::PONG.as_bytes(), None);
     e.boolean(1, liveness.alive).expect("the answer fits");
     if let Some(ms) = liveness.last_heard_ms {
         // A uint64 is a varint of the same bits an int64 is.
@@ -320,7 +321,7 @@ pub const NO_SCHEMA: &str = "no schema has been handed to the broker";
 /// `dcsbridge.broker.Schema` as an envelope tail: the set, or why not.
 pub fn schema(set: Option<&[u8]>) -> Record {
     let mut e = Encoder::with_capacity(ANSWER_BYTES + set.map_or(0, <[u8]>::len));
-    e.begin(topic::SCHEMA.as_bytes());
+    e.begin(topic::SCHEMA.as_bytes(), None);
     match set {
         Some(set) => e.string(1, set).expect("the answer fits"),
         None => e.string(2, NO_SCHEMA.as_bytes()).expect("the answer fits"),
@@ -331,7 +332,7 @@ pub fn schema(set: Option<&[u8]>) -> Record {
 /// `dcsbridge.broker.AuthResult` as an envelope tail.
 pub fn auth_result(result: Result<(), AuthError>) -> Record {
     let mut e = Encoder::with_capacity(ANSWER_BYTES);
-    e.begin(topic::AUTH_RESULT.as_bytes());
+    e.begin(topic::AUTH_RESULT.as_bytes(), None);
     e.boolean(1, result.is_ok()).expect("the answer fits");
     if let Err(error) = result {
         e.integer(2, error as i64).expect("the answer fits");

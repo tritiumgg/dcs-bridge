@@ -255,7 +255,7 @@ mod tests {
     /// A record on [`TOPIC`] carrying `bytes` of string in field 1.
     fn record(bytes: usize) -> Record {
         let mut e = Encoder::with_capacity(bytes + 128);
-        e.begin(TOPIC.as_bytes());
+        e.begin(TOPIC.as_bytes(), None);
         e.string(1, &vec![b'x'; bytes]).unwrap();
         Arc::from(e.commit().unwrap())
     }

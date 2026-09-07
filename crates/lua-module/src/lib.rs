@@ -966,7 +966,7 @@ mod put {
                 .encoder
                 .as_mut()
                 .expect("opening set it")
-                .begin(topic);
+                .begin(topic, dcsbridge_broker::bridge().stamp());
         }
         0
     }
@@ -1021,7 +1021,7 @@ mod put {
                 .encoder
                 .as_mut()
                 .expect("opening set it")
-                .begin(topic);
+                .begin(topic, dcsbridge_broker::bridge().stamp());
             pending.to = Some(ConnectionId::from_raw(id as u64));
         }
         0

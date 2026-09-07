@@ -7,10 +7,11 @@
 //!
 //! What `commit` hands back is the tail of an `Envelope`: every field but
 //! `seq`, which differs per connection and is written where the frame is.
-//! Today that tail is one field, the `Any` payload, whose type URL is the
-//! topic `begin` was given and whose value is the record's own fields. The
-//! wrapper is written at `begin`, ahead of the record, so a put appends to a
-//! body that is already in its place and `commit` copies nothing.
+//! The tail is the epoch and the mission time, when a [`Stamp`] is given,
+//! and the `Any` payload, whose type URL is the topic `begin` was given and
+//! whose value is the record's own fields. The wrapper is written at
+//! `begin`, ahead of the record, so a put appends to a body that is already
+//! in its place and `commit` copies nothing.
 //!
 //! Every integer is written as a plain varint, which is the wire form of
 //! `int32`, `int64`, `uint32`, `uint64`, `bool` and every enum. There is no
@@ -55,6 +56,10 @@ pub struct Stamp {
 /// The type URL's prefix as the encoder writes it, byte for byte.
 const TYPE_URL_PREFIX: &[u8] = dcsbridge_topic::TYPE_URL_PREFIX.as_bytes();
 
+/// `Envelope.epoch`, present while an epoch is open.
+const ENVELOPE_EPOCH: u32 = 2;
+/// `Envelope.mission_time`, present beside the epoch.
+const ENVELOPE_MISSION_TIME: u32 = 3;
 /// `Envelope.payload`, the `Any` the record goes in.
 const ENVELOPE_PAYLOAD: u32 = 4;
 /// `Any.type_url`.
@@ -169,11 +174,13 @@ impl Encoder {
     /// did.
     ///
     /// The topic is the record's fully-qualified type name, and it goes into
-    /// the wrapper here: the payload field, the `Any` type URL built from the
-    /// topic, and the `Any` value field the puts then fill. A topic the buffer
-    /// cannot hold poisons the record with [`Error::Full`], so every later
-    /// put reports it and `commit` refuses it.
-    pub fn begin(&mut self, topic: &[u8]) -> bool {
+    /// the wrapper here: the stamp's two fields when there is one, the
+    /// payload field, the `Any` type URL built from the topic, and the `Any`
+    /// value field the puts then fill. The stamp goes ahead of the payload
+    /// so that the payload's length gap covers the record alone. A topic the
+    /// buffer cannot hold poisons the record with [`Error::Full`], so every
+    /// later put reports it and `commit` refuses it.
+    pub fn begin(&mut self, topic: &[u8], stamp: Option<Stamp>) -> bool {
         let abandoned = self.state != State::Idle;
         if abandoned {
             self.discarded += 1;
@@ -184,9 +191,18 @@ impl Encoder {
 
         let width = self.len_width;
         let url_len = TYPE_URL_PREFIX.len() + topic.len();
-        let wrapper = self
-            .put(ENVELOPE_PAYLOAD, WIRE_LENGTH, width, |buf| {
-                buf.resize(buf.len() + width, 0);
+        let wrapper = stamp
+            .map_or(Ok(()), |stamp| {
+                let epoch = u64::from(stamp.epoch);
+                self.put(ENVELOPE_EPOCH, WIRE_VARINT, varint_len(epoch), |buf| {
+                    put_varint(buf, epoch);
+                })
+                .and_then(|()| self.double(ENVELOPE_MISSION_TIME, stamp.mission_time))
+            })
+            .and_then(|()| {
+                self.put(ENVELOPE_PAYLOAD, WIRE_LENGTH, width, |buf| {
+                    buf.resize(buf.len() + width, 0);
+                })
             })
             .and_then(|()| {
                 self.payload_gap = self.buf.len() - width;
@@ -432,6 +448,10 @@ mod tests {
     /// consumer reads it.
     #[derive(Clone, PartialEq, Message)]
     struct Tail {
+        #[prost(uint32, optional, tag = "2")]
+        epoch: Option<u32>,
+        #[prost(double, optional, tag = "3")]
+        mission_time: Option<f64>,
         #[prost(message, optional, tag = "4")]
         payload: Option<prost_types::Any>,
     }
@@ -491,10 +511,44 @@ mod tests {
         Scalars::decode(&body(tail)[..]).expect("a stock decoder reads the body")
     }
 
+    /// A stamp is two fields ahead of the payload, a stock decoder reads
+    /// them as the optional fields they are, and the record inside is the
+    /// same record. With no stamp the two are absent rather than zero: an
+    /// absent epoch is a record no consumer discards, and an absent time is
+    /// a sim not running.
+    #[test]
+    fn the_stamp_is_written_ahead_of_the_payload_or_not_at_all() {
+        let stamp = Stamp {
+            epoch: 3,
+            mission_time: 12.5,
+        };
+        let mut e = Encoder::with_capacity(256);
+        e.begin(TOPIC, Some(stamp));
+        e.integer(1, -7).unwrap();
+        let stamped = e.commit().unwrap().to_vec();
+        let tail = Tail::decode(&stamped[..]).expect("a stock decoder reads the tail");
+        assert_eq!(tail.epoch, Some(3));
+        assert_eq!(tail.mission_time, Some(12.5));
+        assert_eq!(decode(&stamped).n, -7, "the stamp changed the record");
+
+        e.begin(TOPIC, None);
+        e.integer(1, -7).unwrap();
+        let bare = e.commit().unwrap().to_vec();
+        let tail = Tail::decode(&bare[..]).expect("a stock decoder reads the tail");
+        assert_eq!(tail.epoch, None, "no epoch was written as one");
+        assert_eq!(tail.mission_time, None, "no time was written as one");
+        assert_eq!(decode(&bare).n, -7);
+
+        // The two fields and their tags: a one-byte epoch and eight bytes of
+        // time, each behind a one-byte tag.
+        assert_eq!(stamped.len(), bare.len() + 2 + 9);
+        assert_eq!(&stamped[11..], &bare[..], "the payload moved or changed");
+    }
+
     #[test]
     fn every_scalar_decodes() {
         let mut e = Encoder::with_capacity(256);
-        e.begin(TOPIC);
+        e.begin(TOPIC, None);
         e.integer(1, -7).unwrap();
         e.double(2, 2.5).unwrap();
         e.string(3, "über".as_bytes()).unwrap();
@@ -522,7 +576,7 @@ mod tests {
             (i64::MAX, 9),
         ] {
             let mut e = Encoder::with_capacity(256);
-            e.begin(TOPIC);
+            e.begin(TOPIC, None);
             e.integer(1, n).unwrap();
             let tail = e.commit().unwrap();
             assert_eq!(body(tail).len(), 1 + bytes, "{n}");
@@ -540,14 +594,14 @@ mod tests {
             f64::NEG_INFINITY,
         ] {
             let mut e = Encoder::with_capacity(256);
-            e.begin(TOPIC);
+            e.begin(TOPIC, None);
             e.double(2, x).unwrap();
             let got = decode(e.commit().unwrap()).x;
             assert_eq!(got.to_bits(), x.to_bits(), "{x}");
         }
 
         let mut e = Encoder::with_capacity(256);
-        e.begin(TOPIC);
+        e.begin(TOPIC, None);
         e.double(2, f64::NAN).unwrap();
         assert!(decode(e.commit().unwrap()).x.is_nan());
     }
@@ -555,10 +609,10 @@ mod tests {
     #[test]
     fn defaults_decode_whether_written_or_omitted() {
         let mut e = Encoder::with_capacity(256);
-        e.begin(TOPIC);
+        e.begin(TOPIC, None);
         assert!(body(e.commit().unwrap()).is_empty());
 
-        e.begin(TOPIC);
+        e.begin(TOPIC, None);
         e.string(3, b"").unwrap();
         e.boolean(4, false).unwrap();
         let tail = e.commit().unwrap();
@@ -572,7 +626,7 @@ mod tests {
         let mut e = Encoder::with_capacity(256);
         assert_eq!(e.integer(1, 1), Err(Error::NotOpen));
         assert_eq!(e.commit(), Err(Error::NotOpen));
-        e.begin(TOPIC);
+        e.begin(TOPIC, None);
         e.commit().unwrap();
         assert_eq!(e.boolean(1, true), Err(Error::NotOpen));
         assert_eq!(e.discarded(), 0);
@@ -582,7 +636,7 @@ mod tests {
     fn a_bad_field_number_poisons_the_record() {
         for field in [0, MAX_FIELD + 1] {
             let mut e = Encoder::with_capacity(256);
-            e.begin(TOPIC);
+            e.begin(TOPIC, None);
             assert_eq!(e.integer(field, 1), Err(Error::FieldNumber));
             assert_eq!(e.integer(1, 1), Err(Error::FieldNumber));
             assert_eq!(e.commit(), Err(Error::FieldNumber));
@@ -594,30 +648,33 @@ mod tests {
     fn a_record_fills_its_buffer_exactly_and_no_further() {
         // The wrapper counts against the capacity: three bytes are left.
         let mut e = Encoder::with_capacity(SHORT_WRAPPER + 3);
-        e.begin(SHORT);
+        e.begin(SHORT, None);
         e.string(1, b"x").unwrap();
         let tail = e.commit().unwrap();
         assert_eq!(tail.len(), SHORT_WRAPPER + 3);
         assert_eq!(any(tail, SHORT).value, [0x0a, 0x01, b'x']);
 
-        e.begin(SHORT);
+        e.begin(SHORT, None);
         e.string(1, b"xy").unwrap_err();
         assert_eq!(e.string(1, b"xy"), Err(Error::Full));
         assert_eq!(e.boolean(2, true), Err(Error::Full));
         assert_eq!(e.commit(), Err(Error::Full));
         assert_eq!(e.discarded(), 1);
-        assert!(!e.begin(TOPIC), "the refused record was already discarded");
+        assert!(
+            !e.begin(TOPIC, None),
+            "the refused record was already discarded"
+        );
     }
 
     #[test]
     fn begin_discards_an_open_record_and_counts_it() {
         let mut e = Encoder::with_capacity(256);
-        e.begin(TOPIC);
+        e.begin(TOPIC, None);
         e.integer(1, 1).unwrap();
-        assert!(e.begin(TOPIC));
+        assert!(e.begin(TOPIC, None));
         assert_eq!(e.discarded(), 1);
         assert!(body(e.commit().unwrap()).is_empty());
-        assert!(!e.begin(TOPIC));
+        assert!(!e.begin(TOPIC, None));
     }
 
     #[test]
@@ -625,7 +682,7 @@ mod tests {
         let mut e = Encoder::with_capacity(256);
         let before = e.buf.capacity();
         for _ in 0..3 {
-            e.begin(TOPIC);
+            e.begin(TOPIC, None);
             e.integer(1, i64::MIN).unwrap();
             e.string(3, b"0123456789").unwrap();
             e.double(2, 1.0).unwrap();
@@ -651,13 +708,13 @@ mod tests {
     #[test]
     fn distinct_fields_decode_in_any_order() {
         let mut forward = Encoder::with_capacity(256);
-        forward.begin(TOPIC);
+        forward.begin(TOPIC, None);
         forward.integer(1, 4).unwrap();
         forward.string(3, b"x").unwrap();
         let forward = decode(forward.commit().unwrap());
 
         let mut backward = Encoder::with_capacity(256);
-        backward.begin(TOPIC);
+        backward.begin(TOPIC, None);
         backward.string(3, b"x").unwrap();
         backward.integer(1, 4).unwrap();
         assert_eq!(decode(backward.commit().unwrap()), forward);
@@ -666,7 +723,7 @@ mod tests {
     #[test]
     fn a_repeated_field_keeps_put_order() {
         let mut e = Encoder::with_capacity(256);
-        e.begin(TOPIC);
+        e.begin(TOPIC, None);
         for n in [3, 1, 2] {
             e.integer(5, n).unwrap();
         }
@@ -679,7 +736,7 @@ mod tests {
     fn a_nested_length_is_padded_and_decodes() {
         // The product buffer, whose largest length takes three varint bytes.
         let mut e = Encoder::with_capacity(1 << 20);
-        e.begin(TOPIC);
+        e.begin(TOPIC, None);
         e.message(6).unwrap();
         e.string(1, b"a").unwrap();
         e.end_message().unwrap();
@@ -699,7 +756,7 @@ mod tests {
     #[test]
     fn the_wrapper_names_the_topic_behind_two_padded_lengths() {
         let mut e = Encoder::with_capacity(1 << 20);
-        e.begin(SHORT);
+        e.begin(SHORT, None);
         e.integer(1, 1).unwrap();
         let tail = e.commit().unwrap();
 
@@ -720,7 +777,7 @@ mod tests {
     #[test]
     fn a_topic_the_buffer_cannot_hold_poisons_the_record() {
         let mut e = Encoder::with_capacity(8);
-        assert!(!e.begin(TOPIC));
+        assert!(!e.begin(TOPIC, None));
         assert_eq!(e.integer(1, 1), Err(Error::Full));
         assert_eq!(e.commit(), Err(Error::Full));
         assert_eq!(e.discarded(), 1);
@@ -732,7 +789,7 @@ mod tests {
         for len in [0, 127, 128, 200] {
             let s = vec![b'z'; len];
             let mut e = Encoder::with_capacity(4096);
-            e.begin(TOPIC);
+            e.begin(TOPIC, None);
             e.message(6).unwrap();
             if len > 0 {
                 e.string(1, &s).unwrap();
@@ -746,7 +803,7 @@ mod tests {
     #[test]
     fn repeated_messages_keep_put_order() {
         let mut e = Encoder::with_capacity(256);
-        e.begin(TOPIC);
+        e.begin(TOPIC, None);
         for s in ["c", "a", "b"] {
             e.message(7).unwrap();
             e.string(1, s.as_bytes()).unwrap();
@@ -760,7 +817,7 @@ mod tests {
     #[test]
     fn messages_nest_and_puts_land_in_the_innermost() {
         let mut e = Encoder::with_capacity(256);
-        e.begin(TOPIC);
+        e.begin(TOPIC, None);
         e.message(6).unwrap();
         e.string(1, b"outer").unwrap();
         e.message(2).unwrap();
@@ -787,7 +844,7 @@ mod tests {
     fn depth_is_capped_at_construction() {
         let mut e = Encoder::with_capacity(4096);
         let stack = e.open.capacity();
-        e.begin(TOPIC);
+        e.begin(TOPIC, None);
         for _ in 0..MAX_DEPTH {
             e.message(2).unwrap();
         }
@@ -799,21 +856,21 @@ mod tests {
     #[test]
     fn unbalanced_messages_are_refused() {
         let mut e = Encoder::with_capacity(256);
-        e.begin(TOPIC);
+        e.begin(TOPIC, None);
         assert_eq!(e.end_message(), Err(Error::Unbalanced));
         assert_eq!(e.commit(), Err(Error::Unbalanced));
 
-        e.begin(TOPIC);
+        e.begin(TOPIC, None);
         e.message(6).unwrap();
         assert_eq!(e.commit(), Err(Error::Unbalanced));
         assert_eq!(e.discarded(), 2);
-        assert!(!e.begin(TOPIC));
+        assert!(!e.begin(TOPIC, None));
     }
 
     #[test]
     fn a_message_that_does_not_fit_is_refused_whole() {
         let mut e = Encoder::with_capacity(SHORT_WRAPPER + 4);
-        e.begin(SHORT);
+        e.begin(SHORT, None);
         e.string(1, b"xy").unwrap();
         // Nothing is left for a tag and its length gap.
         assert_eq!(e.message(6), Err(Error::Full));
