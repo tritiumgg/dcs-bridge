@@ -4,9 +4,12 @@
 //! behaviour it is there to observe. `tail` connects to a running bridge and
 //! prints each frame as it arrives, with a line wherever the sequence
 //! numbers show that records were dropped. `ping` asks whether the sim is
-//! alive and exits by the answer, so a script can ask too.
+//! alive and exits by the answer, so a script can ask too. `schema` fetches
+//! the set the bridge serves and writes it to a file, so it can be checked
+//! against the deployed one.
 
 mod ping;
+mod schema;
 mod tail;
 mod wire;
 
@@ -33,6 +36,8 @@ enum Verb {
     Tail(TailArgs),
     /// Ask a bridge whether the sim is alive, and exit 1 when it is not.
     Ping(PingArgs),
+    /// Fetch the schema a bridge serves and write it to a file.
+    Schema(SchemaArgs),
 }
 
 /// The address the bridge listens on.
@@ -45,11 +50,9 @@ struct Addr {
     addr: String,
 }
 
+/// Where the token's secret comes from.
 #[derive(Args)]
-struct TailArgs {
-    #[command(flatten)]
-    addr: Addr,
-
+struct TokenFile {
     /// A file holding the token's secret, on its first line.
     ///
     /// Without it the secret is read from `DCSB_TOKEN`. A secret is never
@@ -60,24 +63,134 @@ struct TailArgs {
 }
 
 #[derive(Args)]
+struct TailArgs {
+    #[command(flatten)]
+    addr: Addr,
+
+    #[command(flatten)]
+    token: TokenFile,
+}
+
+#[derive(Args)]
 struct PingArgs {
     #[command(flatten)]
     addr: Addr,
 }
 
+#[derive(Args)]
+struct SchemaArgs {
+    /// The file to write the schema to, replaced if it exists.
+    #[arg(value_name = "PATH")]
+    out: PathBuf,
+
+    #[command(flatten)]
+    addr: Addr,
+
+    #[command(flatten)]
+    token: TokenFile,
+}
+
 /// The environment variable a secret is read from when no file names one.
 const TOKEN_ENV: &str = "DCSB_TOKEN";
 
-/// How long `ping` waits for the answer. Loopback answers in microseconds
-/// and the answer waits for nothing inside the bridge, so a wait this long
-/// is a bridge that is not answering, and a script is told so rather than
-/// held.
-const PONG_WAIT: Duration = Duration::from_secs(5);
+/// How long `ping` and `schema` wait for the answer. Loopback answers in
+/// microseconds and the answer waits for nothing inside the bridge, so a
+/// wait this long is a bridge that is not answering, and a script is told
+/// so rather than held.
+const ANSWER_WAIT: Duration = Duration::from_secs(5);
 
 fn main() -> ExitCode {
     match Cli::parse().verb {
         Verb::Tail(args) => tail_verb(&args),
         Verb::Ping(args) => ping_verb(&args),
+        Verb::Schema(args) => schema_verb(&args),
+    }
+}
+
+/// Connect, authenticate, send one `GetSchema`, and write the set.
+///
+/// The set written exits 0, after one line naming its hash, size and path.
+/// An answer that is not the set exits 1: the bridge holds no schema yet,
+/// the token was refused, or the set does not hash to what the handshake
+/// said and is not written. Nothing learned exits 2, as `ping`, and so does
+/// a file that could not be written, because the set is not on disk.
+fn schema_verb(args: &SchemaArgs) -> ExitCode {
+    let secret = match token(args.token.token_file.as_deref()) {
+        Ok(secret) => secret,
+        Err(error) => {
+            eprintln!("{error}");
+            return ExitCode::from(2);
+        }
+    };
+    let addr = &args.addr.addr;
+    let mut stream = match TcpStream::connect(addr) {
+        Ok(stream) => stream,
+        Err(error) => {
+            eprintln!("cannot connect to {addr}: {error}");
+            return ExitCode::from(2);
+        }
+    };
+    // The token and the request go out together: the bridge reads frames
+    // in order, so the request is answered after the token is, and a
+    // refused token closes the connection before it is read.
+    let mut request = wire::auth_frame(&secret);
+    request.extend(schema::get_schema_frame());
+    if let Err(error) = stream.write_all(&request) {
+        eprintln!("cannot send the request to {addr}: {error}");
+        return ExitCode::from(2);
+    }
+    let reader = wire::Deadline::new(stream, ANSWER_WAIT);
+
+    match schema::run(reader) {
+        Ok(schema::Outcome::Fetched { set, sha256 }) => {
+            let path = &args.out;
+            if let Err(error) = fs::write(path, &set) {
+                eprintln!("cannot write {}: {error}", path.display());
+                return ExitCode::from(2);
+            }
+            println!(
+                "sha256={} bytes={} path={}",
+                schema::hex(&sha256),
+                set.len(),
+                path.display()
+            );
+            ExitCode::SUCCESS
+        }
+        Ok(schema::Outcome::Mismatch) => {
+            eprintln!("the schema does not hash to what the handshake said; nothing written");
+            ExitCode::from(1)
+        }
+        Ok(schema::Outcome::NoSchema(error)) => {
+            eprintln!("the bridge has no schema: {error}");
+            ExitCode::from(1)
+        }
+        Ok(schema::Outcome::Refused(error)) => {
+            eprintln!(
+                "the bridge refused the token: {}",
+                wire::auth_error_name(error)
+            );
+            ExitCode::from(1)
+        }
+        Ok(schema::Outcome::Closed) => {
+            eprintln!("{addr} closed the connection without answering");
+            ExitCode::from(2)
+        }
+        Err(error)
+            if matches!(
+                error.kind(),
+                io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+            ) =>
+        {
+            eprintln!(
+                "no answer from {addr} within {} seconds",
+                ANSWER_WAIT.as_secs()
+            );
+            ExitCode::from(2)
+        }
+        Err(error) => {
+            eprintln!("schema: {error}");
+            ExitCode::from(2)
+        }
     }
 }
 
@@ -103,7 +216,7 @@ fn ping_verb(args: &PingArgs) -> ExitCode {
     }
     // The wait is wall-clock over the whole answer rather than one read:
     // the frame is complete or the time is up, whichever comes first.
-    let reader = wire::Deadline::new(stream, PONG_WAIT);
+    let reader = wire::Deadline::new(stream, ANSWER_WAIT);
 
     let stdout = io::stdout();
     let mut out = stdout.lock();
@@ -122,7 +235,7 @@ fn ping_verb(args: &PingArgs) -> ExitCode {
         {
             eprintln!(
                 "no answer from {addr} within {} seconds",
-                PONG_WAIT.as_secs()
+                ANSWER_WAIT.as_secs()
             );
             ExitCode::from(2)
         }
@@ -169,7 +282,7 @@ fn token(token_file: Option<&Path>) -> Result<String, String> {
 /// mid-frame or carries bytes no envelope decodes from exits 1, after
 /// everything readable before it has been printed.
 fn tail_verb(args: &TailArgs) -> ExitCode {
-    let secret = match token(args.token_file.as_deref()) {
+    let secret = match token(args.token.token_file.as_deref()) {
         Ok(secret) => secret,
         Err(error) => {
             eprintln!("{error}");
