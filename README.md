@@ -230,10 +230,11 @@ the `DCSB_TOKEN` environment variable, or from the first line of the file
 process on the machine can read it. A refused token prints the bridge's
 answer and exits 1.
 
-`ping` needs no token. It prints one line, `dcs_alive=false
-dcs_last_heard_ms=- bridge_enabled=true`, and exits 1 when the sim is not
-alive, so a script can ask too. Until the sim stamps its heartbeat (not built)
-it always reads the sim as never heard from.
+`ping` needs no token. It prints one line, such as `dcs_alive=true
+dcs_last_heard_ms=312 bridge_enabled=true`, and exits 1 when the sim is not
+alive, so a script can ask too. The sim is alive when the hook driver's
+per-frame call reached the bridge within `dcs_alive_threshold_ms`, and a dash
+in place of the age means it never has.
 
 `schema` authenticates like `tail`, fetches the schema the bridge serves, and
 writes it to the file named on the command line, replacing one that exists.

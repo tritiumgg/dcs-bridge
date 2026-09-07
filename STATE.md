@@ -18,7 +18,7 @@ is just deleted. Write entries as one or two lines, never paragraphs.
 
 ## In progress
 
-Nothing. 2.C3 is closed; 2.11 is next.
+Nothing. 2.11 is closed and M2.1 is reached; 2.16 is next.
 
 *One task at most. Say what is done, what is not, and where to resume. Say what
 is committed and what is only in the working tree. Say what is knowingly
@@ -26,31 +26,29 @@ broken. Empty this when the task closes.*
 
 ## Just finished
 
-- **2.C3** — `dcsb schema`: the token and one `GetSchema`, the set checked
-  against the handshake's hash and written to a file. PR #73, which carries the live steps.
-- **Topic constants** — a `dcsbridge-topic` crate both sides depend on,
-  built from the package, every name checked against `broker.proto`. PR #72.
+- **2.11** — `shim.tick` and `shim.epoch`: the throttled heartbeat, the
+  loading flag, the stamp in every record's tail. PR #74 has the live steps.
+- **2.C3** — `dcsb schema`: the set fetched, checked, written. PR #73.
+- **Topic constants** — a `dcsbridge-topic` crate both sides depend on. PR #72.
 
 *The last three at most, one line each. Git log holds the rest.*
 
 ## Next
 
-**Task 2.11** — `shim.tick` and `shim.epoch`: mission time on every call,
-the heartbeat stamped at most once per `heartbeat_interval_ms`, `dcs_alive`
-under both thresholds; then epochs in the envelope tail. Two branches; the
-plan's 2.11 rows say what each holds. Done when `Pong` carries `dcs_alive`
-and `dcs_last_heard_ms`, killing the logic thread flips it and a mission
-load does not, and a record outside an epoch omits `epoch` and `mission_time`.
+**Re-measure M2.2 first**, as the plan's milestone table says: 2.16's
+branch table predates one branch per task, so rewrite it as commit runs.
 
-**An agent verifies** the throttle, the thresholds and the tail over
-loopback; **a person confirms** `dcs_alive=true`, the flip and the load at
-an install.
+**Task 2.16** — `shim.classes`, `shim.routes`, `shim.caps` and the reply
+table: additive over disjoint sets, idempotent on identical rows, refused
+whole on a conflict, a topic missing a class or a capability refused and
+counted. Done when a second registrar merges, a conflicting row is refused
+whole, and an outbound-only topic registers with no route.
+
+**An agent verifies** all of it: table tests, and `mise run lua`.
 
 ## After that
 
-- **M2.1** closes with 2.11, and the plan's milestone table says what is
-  re-measured then.
-- **M2.2**: 2.16 registration, then 2.12 rings and `poll`, 2.C4, 2.13, 2.14.
+- **M2.2**: after 2.16, 2.12 rings and `poll`, then 2.C4, 2.13, 2.14.
 - **Phase 3** opens on `protoc-gen-dcsbridge-lua`, which reads the four message
   options this schema defines and splits its output by `Target`. It reads the
   plugin request through `prost-types`; ADR 0016.
@@ -106,5 +104,9 @@ entries at most: an eleventh means something here is finished, or belongs in
   one frame per socket call, one record in forty at a 20000-record burst on
   Windows loopback; PROBE-7 at 9.7 prices both, and batching a drain pass
   is 2.18's or 9.7's. ADR 0014.
+- **The loading flag has no setter until 6.5.** `Bridge::set_loading` picks
+  `dcs_alive_threshold_loading_ms` and nothing in Lua calls it, so a load
+  over 30 s reads as a dead sim until `MissionLoadBegan` sets it. Delete
+  this when 6.5 closes.
 - **Task 7.10 does not exist.** Phase 7 runs 7.1 to 7.9 then 7.11, with no note
   explaining the gap. Retired ID or omission, unresolved.

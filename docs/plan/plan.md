@@ -260,12 +260,13 @@ decision record that settles whether it is hand-written or the second crate:
 sends `GetSchema`, and writes the bytes or prints the error, which is how 2.10
 is checked against the deployed `schema.pb`.
 
-**Task 2.11 lands as a sequence of two:**
+**Task 2.11 lands as one branch of two runs of commits**, reviewed commit by
+commit inside one pull request:
 
-| Branch | What it holds | Reviewable against |
+| Run | What it holds | Reviewable against |
 |---|---|---|
-| `task/2.11-1-tick` | `shim.tick` publishing mission time on every call and stamping the heartbeat at most once per `heartbeat_interval_ms`, the throttle in the broker; `dcs_alive` under the running and the loading thresholds; `tests/lua/tick.lua`. About 250 lines. | SPEC §5.2 "`Pong` carries DCS liveness", SPEC §9.1's loading threshold |
-| `task/2.11-2-epoch` | `shim.epoch(id)` and `shim.epoch(nil)`; the encoder writes `epoch` and `mission_time` into the tail, absent outside an epoch; `tests/lua/epoch.lua`; the live steps. About 300 lines. | SPEC §5.2's `Envelope`, SPEC §9.4, ADR 0014 |
+| tick | `shim.tick` publishing mission time on every call and stamping the heartbeat at most once per `heartbeat_interval_ms`, the throttle in the broker; `dcs_alive` under the running and the loading thresholds, the loading flag set by nothing until 6.5; `tests/lua/tick.lua`. About 300 lines. | SPEC §5.2 "`Pong` carries DCS liveness", SPEC §9.1's loading threshold |
+| epoch | `shim.epoch(id)` and `shim.epoch(nil)`; the encoder writes `epoch` and `mission_time` into the tail, absent outside an epoch; `tests/lua/epoch.lua`; the live steps. About 400 lines. | SPEC §5.2's `Envelope`, SPEC §9.4, ADR 0014 |
 
 **Task 2.16 lands as a sequence of two:**
 
