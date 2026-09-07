@@ -1363,8 +1363,10 @@ mod tests {
     /// reaches a connection as a frame carrying that connection's `seq`.
     ///
     /// The bridge is the process's, so this shares it with every other test
-    /// in the binary; none of the others starts the outbound path or commits,
-    /// and a second start returns the first's address rather than failing.
+    /// in the binary; none of the others starts the outbound path, commits,
+    /// ticks, opens an epoch or reads the liveness or the stamp, and a
+    /// second start returns the first's address rather than failing. A test
+    /// that needs any of those takes a `Bridge::new` of its own.
     #[test]
     fn the_outbound_path_starts_once_and_commits_reach_a_connection() {
         use std::io::{Read, Write};
@@ -1483,6 +1485,63 @@ mod tests {
             std::thread::yield_now();
         }
         assert_eq!(bridge().outbound().unwrap().unaddressed(), 1);
+
+        // A record opened the way the Lua `begin` opens one, on the stamp
+        // the bridge holds at that moment, reaches the connection carrying
+        // the epoch and the clock while an epoch is open, and neither once
+        // it has closed. Read with a stock decoder, since the fields are the
+        // consumer's to read.
+        use prost::Message;
+        #[derive(Clone, PartialEq, Message)]
+        struct Stamped {
+            #[prost(uint64, tag = "1")]
+            seq: u64,
+            #[prost(uint32, optional, tag = "2")]
+            epoch: Option<u32>,
+            #[prost(double, optional, tag = "3")]
+            mission_time: Option<f64>,
+        }
+        let read_stamped = |client: &mut TcpStream| {
+            let mut length = [0u8; 4];
+            client.read_exact(&mut length).expect("a frame arrives");
+            let mut frame = vec![0u8; u32::from_le_bytes(length) as usize];
+            client
+                .read_exact(&mut frame)
+                .expect("the frame's body arrives");
+            Stamped::decode(&frame[..]).expect("a stock decoder reads the envelope")
+        };
+        let commit_on = |topic: &[u8]| {
+            let mut e = crate::encode::Encoder::with_capacity(256);
+            e.begin(topic, bridge().stamp());
+            e.integer(1, 1).unwrap();
+            bridge()
+                .commit(e.commit().unwrap())
+                .expect("the path is started");
+        };
+
+        bridge().set_epoch(Some(3));
+        bridge().tick(12.5);
+        commit_on(b"dcsbridge.builtin.sim.UnitDestroyed");
+        assert_eq!(
+            read_stamped(&mut client),
+            Stamped {
+                seq: 4,
+                epoch: Some(3),
+                mission_time: Some(12.5),
+            }
+        );
+
+        bridge().set_epoch(None);
+        commit_on(b"dcsbridge.builtin.sim.UnitDestroyed");
+        assert_eq!(
+            read_stamped(&mut client),
+            Stamped {
+                seq: 5,
+                epoch: None,
+                mission_time: None,
+            },
+            "a record outside an epoch carried a stamp"
+        );
     }
 
     /// The number `schema` gives `member`, out of a line reading `NAME = N;`.
