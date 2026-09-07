@@ -11,9 +11,7 @@
 
 use std::io::{self, Read, Write};
 
-use prost::Message;
-
-use crate::wire::{self, Envelope, read_frame};
+use crate::wire::{Envelope, auth_error_name, auth_result, handshake_sha256, read_frame};
 use dcsbridge_topic as topic;
 
 /// What a run saw, for the closing line and for the tests.
@@ -27,57 +25,6 @@ pub struct Summary {
     pub dropped: u64,
     /// The bridge answered the token with an error, and closed after it.
     pub refused: bool,
-}
-
-/// `dcsbridge.broker.Auth`: the token's secret and nothing else.
-#[derive(Clone, PartialEq, Message)]
-struct Auth {
-    #[prost(string, tag = "1")]
-    token: String,
-}
-
-/// `dcsbridge.broker.AuthResult`, as the bridge answers an `Auth`.
-#[derive(Clone, PartialEq, Message)]
-struct AuthResult {
-    #[prost(bool, tag = "1")]
-    ok: bool,
-    #[prost(int32, tag = "2")]
-    error: i32,
-}
-
-/// `dcsbridge.broker.Handshake`, the one field of it `tail` reads: the hash of
-/// the schema the bridge serves, absent until the hook driver hands the
-/// schema over.
-#[derive(Clone, PartialEq, Message)]
-struct Handshake {
-    #[prost(bytes = "vec", optional, tag = "4")]
-    schema_sha256: Option<Vec<u8>>,
-}
-
-/// The one frame `tail` sends: an `Auth` carrying `secret`, as the first
-/// frame on the connection, numbered 1.
-///
-/// The handshake arrives from the bridge unasked and the result answers
-/// this; both print as frames like any other, and the records follow.
-pub fn auth_frame(secret: &str) -> Vec<u8> {
-    wire::frame(
-        1,
-        topic::AUTH,
-        Auth {
-            token: secret.to_owned(),
-        }
-        .encode_to_vec(),
-    )
-}
-
-/// The name the schema gives an `AuthError` number.
-fn auth_error_name(error: i32) -> &'static str {
-    match error {
-        1 => "BAD_TOKEN",
-        2 => "EMPTY_CAPABILITY_SET",
-        3 => "SERVER_FULL",
-        _ => "UNSPECIFIED",
-    }
 }
 
 /// Print each frame from `reader` to `out` until the stream ends, with a
@@ -123,30 +70,10 @@ pub fn run(mut reader: impl Read, mut out: impl Write) -> io::Result<Summary> {
     Ok(summary)
 }
 
-/// The `AuthResult` a frame carries, if it is one.
-///
-/// A result whose bytes do not decode is a refusal: the one frame that
-/// says whether the token was accepted did not say so, and a run that went
-/// on as though it had would exit as a success.
-fn auth_result(envelope: &Envelope) -> Option<AuthResult> {
-    if envelope.topic() != Some(topic::AUTH_RESULT) {
-        return None;
-    }
-    let any = envelope.payload.as_ref()?;
-    Some(AuthResult::decode(&any.value[..]).unwrap_or(AuthResult {
-        ok: false,
-        error: 0,
-    }))
-}
-
 /// The schema hash a handshake carries, as hex. `None` for a handshake
 /// carrying none, and for any other frame.
 fn schema_sha256(envelope: &Envelope) -> Option<String> {
-    if envelope.topic() != Some(topic::HANDSHAKE) {
-        return None;
-    }
-    let any = envelope.payload.as_ref()?;
-    let hash = Handshake::decode(&any.value[..]).ok()?.schema_sha256?;
+    let hash = handshake_sha256(envelope)?;
     Some(hash.iter().map(|byte| format!("{byte:02x}")).collect())
 }
 
@@ -186,9 +113,11 @@ fn write_frame_line(out: &mut impl Write, envelope: &Envelope) -> io::Result<()>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::wire::{self, Auth, AuthResult, auth_frame};
     use dcsbridge_broker::encode::Encoder;
     use dcsbridge_broker::fanout::{Commit, Writer};
     use dcsbridge_broker::transport::{Listener, Record};
+    use prost::Message;
     use std::net::{SocketAddr, TcpStream};
     use std::sync::Arc;
     use std::time::{Duration, Instant};

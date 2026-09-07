@@ -12,7 +12,7 @@ mod wire;
 
 use std::io::{self, BufReader, Write};
 use std::net::TcpStream;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Duration;
 use std::{env, fs};
@@ -134,8 +134,8 @@ fn ping_verb(args: &PingArgs) -> ExitCode {
 }
 
 /// The token's secret: the file's first line, or the environment's value.
-fn token(args: &TailArgs) -> Result<String, String> {
-    let secret = match &args.token_file {
+fn token(token_file: Option<&Path>) -> Result<String, String> {
+    let secret = match token_file {
         Some(path) => {
             let text = fs::read_to_string(path)
                 .map_err(|error| format!("cannot read {}: {error}", path.display()))?;
@@ -169,7 +169,7 @@ fn token(args: &TailArgs) -> Result<String, String> {
 /// mid-frame or carries bytes no envelope decodes from exits 1, after
 /// everything readable before it has been printed.
 fn tail_verb(args: &TailArgs) -> ExitCode {
-    let secret = match token(args) {
+    let secret = match token(args.token_file.as_deref()) {
         Ok(secret) => secret,
         Err(error) => {
             eprintln!("{error}");
@@ -184,7 +184,7 @@ fn tail_verb(args: &TailArgs) -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    if let Err(error) = stream.write_all(&tail::auth_frame(&secret)) {
+    if let Err(error) = stream.write_all(&wire::auth_frame(&secret)) {
         eprintln!("cannot send the token to {addr}: {error}");
         return ExitCode::from(2);
     }
@@ -232,12 +232,7 @@ mod tests {
         let read = |name: &str, bytes: &[u8]| {
             let path = dir.join(name);
             fs::write(&path, bytes).unwrap();
-            token(&TailArgs {
-                addr: Addr {
-                    addr: String::new(),
-                },
-                token_file: Some(path),
-            })
+            token(Some(&path))
         };
 
         assert_eq!(read("plain", b"correct-horse\n").unwrap(), "correct-horse");

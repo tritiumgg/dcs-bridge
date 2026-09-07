@@ -11,6 +11,8 @@ use std::time::{Duration, Instant};
 
 use prost::Message;
 
+use dcsbridge_topic as topic;
+
 /// Stripped from a printed topic, because every record carries it.
 pub use dcsbridge_topic::TYPE_URL_PREFIX;
 
@@ -48,6 +50,83 @@ impl Envelope {
                 .unwrap_or(&any.type_url),
         )
     }
+}
+
+/// `dcsbridge.broker.Auth`: the token's secret and nothing else.
+#[derive(Clone, PartialEq, Message)]
+pub struct Auth {
+    #[prost(string, tag = "1")]
+    pub token: String,
+}
+
+/// `dcsbridge.broker.AuthResult`, as the bridge answers an `Auth`.
+#[derive(Clone, PartialEq, Message)]
+pub struct AuthResult {
+    #[prost(bool, tag = "1")]
+    pub ok: bool,
+    #[prost(int32, tag = "2")]
+    pub error: i32,
+}
+
+/// `dcsbridge.broker.Handshake`, the one field of it a verb reads: the hash
+/// of the schema the bridge serves, absent until the hook driver hands the
+/// schema over.
+#[derive(Clone, PartialEq, Message)]
+pub struct Handshake {
+    #[prost(bytes = "vec", optional, tag = "4")]
+    pub schema_sha256: Option<Vec<u8>>,
+}
+
+/// The first frame an authenticating verb sends: an `Auth` carrying
+/// `secret`, numbered 1.
+///
+/// The handshake arrives from the bridge unasked and the result answers
+/// this.
+pub fn auth_frame(secret: &str) -> Vec<u8> {
+    frame(
+        1,
+        topic::AUTH,
+        Auth {
+            token: secret.to_owned(),
+        }
+        .encode_to_vec(),
+    )
+}
+
+/// The name the schema gives an `AuthError` number.
+pub fn auth_error_name(error: i32) -> &'static str {
+    match error {
+        1 => "BAD_TOKEN",
+        2 => "EMPTY_CAPABILITY_SET",
+        3 => "SERVER_FULL",
+        _ => "UNSPECIFIED",
+    }
+}
+
+/// The `AuthResult` a frame carries, if it is one.
+///
+/// A result whose bytes do not decode is a refusal: the one frame that
+/// says whether the token was accepted did not say so, and a run that went
+/// on as though it had would exit as a success.
+pub fn auth_result(envelope: &Envelope) -> Option<AuthResult> {
+    if envelope.topic() != Some(topic::AUTH_RESULT) {
+        return None;
+    }
+    let any = envelope.payload.as_ref()?;
+    Some(AuthResult::decode(&any.value[..]).unwrap_or(AuthResult {
+        ok: false,
+        error: 0,
+    }))
+}
+
+/// The schema hash a handshake carries. `None` for a handshake carrying
+/// none, and for any other frame.
+pub fn handshake_sha256(envelope: &Envelope) -> Option<Vec<u8>> {
+    if envelope.topic() != Some(topic::HANDSHAKE) {
+        return None;
+    }
+    let any = envelope.payload.as_ref()?;
+    Handshake::decode(&any.value[..]).ok()?.schema_sha256
 }
 
 /// One frame carrying `value` on `topic`, numbered `seq`, with no epoch and
