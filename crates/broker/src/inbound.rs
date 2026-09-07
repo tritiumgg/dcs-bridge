@@ -43,10 +43,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use dcsbridge_topic::{self as topic, TYPE_URL_PREFIX};
 use prost::Message;
 
 use crate::config::Config;
-use crate::encode::{Encoder, TYPE_URL_PREFIX};
+use crate::encode::Encoder;
 use crate::fanout::{ConnectionId, Connections};
 use crate::state::Capability;
 use crate::transport::Record;
@@ -250,15 +251,13 @@ pub fn topic(envelope: &Envelope, max_type_url_bytes: usize) -> Result<&str, Clo
     if url.len() > max_type_url_bytes {
         return Err(Close::TypeUrlTooLong(url.len()));
     }
-    Ok(url
-        .strip_prefix(std::str::from_utf8(TYPE_URL_PREFIX).expect("the prefix is ASCII"))
-        .unwrap_or(url))
+    Ok(url.strip_prefix(TYPE_URL_PREFIX).unwrap_or(url))
 }
 
 /// `dcsbridge.broker.Pong` as an envelope tail.
 pub fn pong(liveness: Liveness) -> Record {
     let mut e = Encoder::with_capacity(ANSWER_BYTES);
-    e.begin(b"dcsbridge.broker.Pong");
+    e.begin(topic::PONG.as_bytes());
     e.boolean(1, liveness.alive).expect("the answer fits");
     if let Some(ms) = liveness.last_heard_ms {
         // A uint64 is a varint of the same bits an int64 is.
@@ -321,7 +320,7 @@ pub const NO_SCHEMA: &str = "no schema has been handed to the broker";
 /// `dcsbridge.broker.Schema` as an envelope tail: the set, or why not.
 pub fn schema(set: Option<&[u8]>) -> Record {
     let mut e = Encoder::with_capacity(ANSWER_BYTES + set.map_or(0, <[u8]>::len));
-    e.begin(b"dcsbridge.broker.Schema");
+    e.begin(topic::SCHEMA.as_bytes());
     match set {
         Some(set) => e.string(1, set).expect("the answer fits"),
         None => e.string(2, NO_SCHEMA.as_bytes()).expect("the answer fits"),
@@ -332,7 +331,7 @@ pub fn schema(set: Option<&[u8]>) -> Record {
 /// `dcsbridge.broker.AuthResult` as an envelope tail.
 pub fn auth_result(result: Result<(), AuthError>) -> Record {
     let mut e = Encoder::with_capacity(ANSWER_BYTES);
-    e.begin(b"dcsbridge.broker.AuthResult");
+    e.begin(topic::AUTH_RESULT.as_bytes());
     e.boolean(1, result.is_ok()).expect("the answer fits");
     if let Err(error) = result {
         e.integer(2, error as i64).expect("the answer fits");
@@ -402,11 +401,11 @@ pub fn serve(
         };
 
         match (topic(&envelope, limits.max_type_url_bytes)?, &*session) {
-            ("dcsbridge.broker.Ping", _) => {
+            (topic::PING, _) => {
                 connections.answer(id, pong(answers.liveness()));
                 answered += 1;
             }
-            ("dcsbridge.broker.Auth", None) => {
+            (topic::AUTH, None) => {
                 let auth = Auth::decode(payload(&envelope)).map_err(Close::Payload)?;
                 match answers.authenticate(auth.token.as_bytes()) {
                     Ok(opened) => {
@@ -429,14 +428,14 @@ pub fn serve(
                 }
             }
             (other, None) => return Err(Close::Unauthenticated(other.to_owned())),
-            ("dcsbridge.broker.GetSchema", Some(_)) => {
+            (topic::GET_SCHEMA, Some(_)) => {
                 connections.answer(id, schema(answers.schema().as_deref()));
             }
-            ("dcsbridge.broker.SeqAck", Some(_)) => {
+            (topic::SEQ_ACK, Some(_)) => {
                 let ack = SeqAck::decode(payload(&envelope)).map_err(Close::Payload)?;
                 answers.seq_ack(ack.seq);
             }
-            (topic @ "dcsbridge.broker.SetEnabled", Some(opened)) => {
+            (refused @ topic::SET_ENABLED, Some(opened)) => {
                 let set = SetEnabled::decode(payload(&envelope)).map_err(Close::Payload)?;
                 // Nothing answers this, and nothing yet refuses it out loud:
                 // the `Rejected` record is a later task's, so a token
@@ -444,7 +443,7 @@ pub fn serve(
                 if opened.caps.contains(&Capability::Reload) {
                     answers.set_enabled(set.enabled);
                 } else {
-                    answers.refused_no_capability(topic);
+                    answers.refused_no_capability(refused);
                 }
             }
             (other, Some(_)) => return Err(Close::Unrouted(other.to_owned())),
@@ -535,6 +534,11 @@ pub fn run(
 mod tests {
     use super::*;
 
+    /// A type URL as a stock encoder writes one.
+    fn type_url(topic: &str) -> String {
+        format!("{TYPE_URL_PREFIX}{topic}")
+    }
+
     /// A frame as a consumer's stock encoder writes it.
     fn frame(seq: u64, type_url: &str, value: &[u8]) -> Vec<u8> {
         let body = Envelope {
@@ -554,7 +558,7 @@ mod tests {
     /// prefix comes back whole.
     #[test]
     fn a_frame_decodes_to_seq_and_topic() {
-        let bytes = frame(7, "type.googleapis.com/dcsbridge.broker.Ping", &[]);
+        let bytes = frame(7, &type_url(topic::PING), &[]);
         let mut body = Vec::new();
         let (envelope, limits) = read_frame(&mut &bytes[..], &mut body, Limits::default)
             .unwrap()
@@ -563,16 +567,16 @@ mod tests {
         assert_eq!(limits, Limits::default(), "the limits asked for come back");
         assert_eq!(
             topic(&envelope, limits.max_type_url_bytes).unwrap(),
-            "dcsbridge.broker.Ping"
+            topic::PING
         );
 
-        let bytes = frame(8, "dcsbridge.broker.Ping", &[]);
+        let bytes = frame(8, topic::PING, &[]);
         let (envelope, _) = read_frame(&mut &bytes[..], &mut body, Limits::default)
             .unwrap()
             .unwrap();
         assert_eq!(
             topic(&envelope, limits.max_type_url_bytes).unwrap(),
-            "dcsbridge.broker.Ping"
+            topic::PING
         );
 
         // At a clean end of stream the limits are never asked for.
@@ -605,7 +609,7 @@ mod tests {
                 self.0.read(buf)
             }
         }
-        let bytes = frame(3, "dcsbridge.broker.Ping", &[]);
+        let bytes = frame(3, topic::PING, &[]);
         let (envelope, _) = read_frame(
             &mut Interrupted(&bytes, false),
             &mut Vec::new(),
@@ -624,7 +628,7 @@ mod tests {
         assert!(body.is_empty(), "a refused length grew the buffer");
         // The cap is whatever is answered once the length is in, so a
         // lower one refuses a frame the default would have read.
-        let small = frame(1, "dcsbridge.broker.Ping", &[]);
+        let small = frame(1, topic::PING, &[]);
         let lowered = || Limits {
             max_frame_bytes: 4,
             ..Limits::default()
@@ -690,10 +694,7 @@ mod tests {
         }
         let decode = |tail: Record| {
             let any = Tail::decode(&tail[..]).unwrap().payload.unwrap();
-            assert_eq!(
-                any.type_url,
-                "type.googleapis.com/dcsbridge.broker.AuthResult"
-            );
+            assert_eq!(any.type_url, type_url(topic::AUTH_RESULT));
             AuthResult::decode(&any.value[..]).unwrap()
         };
 
@@ -740,7 +741,7 @@ mod tests {
         }
         let decode = |tail: Record| {
             let any = Tail::decode(&tail[..]).unwrap().payload.unwrap();
-            assert_eq!(any.type_url, "type.googleapis.com/dcsbridge.broker.Schema");
+            assert_eq!(any.type_url, type_url(topic::SCHEMA));
             Schema::decode(&any.value[..]).unwrap()
         };
 
@@ -786,7 +787,7 @@ mod tests {
         }
         let decode = |tail: Record| {
             let any = Tail::decode(&tail[..]).unwrap().payload.unwrap();
-            assert_eq!(any.type_url, "type.googleapis.com/dcsbridge.broker.Pong");
+            assert_eq!(any.type_url, type_url(topic::PONG));
             Pong::decode(&any.value[..]).unwrap()
         };
 

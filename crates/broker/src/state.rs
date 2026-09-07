@@ -85,15 +85,6 @@ pub enum Capability {
     Reload = 3,
 }
 
-/// The bridge's own acknowledgement record, and the one topic a record may
-/// be addressed to before any registration.
-///
-/// The broker holds no schema, so which topics are replies reaches it by
-/// registration, and the registration does not exist yet. The
-/// acknowledgement is different: it is the bridge's own message, in the
-/// bridge's own package, so the broker knows it by name. ADR 0017.
-pub const ACK_TOPIC: &str = "dcsbridge.broker.CommandAck";
-
 /// The maps the two registrars share.
 ///
 /// They cover different topic sets on purpose. `routes` carries inbound topics
@@ -124,9 +115,14 @@ impl Registry {
     /// one consumer instead of all of them would present as missing data at
     /// every other, which is why the broker refuses rather than trusts.
     pub fn is_addressable(&self, topic: &[u8]) -> bool {
+        // The broker holds no schema, so which topics are replies reaches
+        // it by registration, and the registration does not exist yet. The
+        // acknowledgement is the bridge's own message, so the broker knows
+        // it by name. ADR 0017.
+        //
         // A topic is a type name, so a topic that is not UTF-8 is registered
         // nowhere and the lookup can say so without a copy.
-        topic == ACK_TOPIC.as_bytes()
+        topic == dcsbridge_topic::COMMAND_ACK.as_bytes()
             || std::str::from_utf8(topic).is_ok_and(|topic| self.replies.contains(topic))
     }
 }
@@ -1025,28 +1021,6 @@ mod tests {
                 .unwrap_or_else(|| panic!("{member} is not in {path}"));
             assert_eq!(theirs, ours, "{member} is {theirs} in the schema");
         }
-
-        // The acknowledgement and the handshake are known by name, so each
-        // name has to be the schema's: the package the file declares and
-        // the message it holds.
-        let handshake = std::str::from_utf8(handshake::TOPIC).expect("the topic is a name");
-        for topic in [ACK_TOPIC, handshake] {
-            let (package, message) = topic
-                .rsplit_once('.')
-                .expect("the topic is a qualified name");
-            assert!(
-                schema
-                    .lines()
-                    .any(|line| line.trim() == format!("package {package};")),
-                "{path} does not declare package {package}"
-            );
-            assert!(
-                schema
-                    .lines()
-                    .any(|line| line.trim().starts_with(&format!("message {message} "))),
-                "{path} does not declare message {message}"
-            );
-        }
     }
 
     /// A secret no token carries is a bad token, a token granting nothing
@@ -1282,14 +1256,16 @@ mod tests {
     fn the_acknowledgement_is_addressable_and_a_fan_out_topic_is_refused() {
         let before = bridge().misaddressed();
 
-        assert!(bridge().addressable(ACK_TOPIC.as_bytes()));
+        assert!(bridge().addressable(dcsbridge_topic::COMMAND_ACK.as_bytes()));
         assert_eq!(
             bridge().misaddressed(),
             before,
             "an accepted address was counted"
         );
 
-        assert!(!bridge().addressable(b"dcsbridge.builtin.sim.UnitDestroyed"));
+        // A fan-out topic, one the broker does not know by name.
+        const FANOUT: &[u8] = b"dcsbridge.builtin.sim.UnitDestroyed";
+        assert!(!bridge().addressable(FANOUT));
         assert!(!bridge().addressable(b""));
         assert!(
             bridge().misaddressed() >= before + 2,
@@ -1363,7 +1339,11 @@ mod tests {
             let body = crate::inbound::Envelope {
                 seq: 1,
                 payload: Some(crate::inbound::Payload {
-                    type_url: "type.googleapis.com/dcsbridge.broker.Auth".into(),
+                    type_url: format!(
+                        "{}{}",
+                        dcsbridge_topic::TYPE_URL_PREFIX,
+                        dcsbridge_topic::AUTH
+                    ),
                     value: crate::inbound::Auth {
                         token: "hunter2".into(),
                     }

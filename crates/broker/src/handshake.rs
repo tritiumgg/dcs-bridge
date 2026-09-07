@@ -10,12 +10,10 @@
 //! answer, on the channel that attaches the connection, so it is numbered
 //! before anything fanned out to it. ADR 0018.
 
+use dcsbridge_topic as topic;
+
 use crate::encode::Encoder;
 use crate::transport::Record;
-
-/// The handshake's topic: the bridge's own message, in the bridge's own
-/// package, known here by name.
-pub const TOPIC: &[u8] = b"dcsbridge.broker.Handshake";
 
 /// The bytes the handshake takes beyond the broker version string: the
 /// wrapper, three short fields and a hash, with room to spare. The version
@@ -47,7 +45,7 @@ impl Handshake {
     /// would be a change to this message that forgot to change the size.
     pub fn encode(&self) -> Record {
         let mut e = Encoder::with_capacity(BYTES + self.broker.len());
-        e.begin(TOPIC);
+        e.begin(topic::HANDSHAKE.as_bytes());
         e.integer(1, i64::from(self.protocol))
             .expect("the handshake fits its buffer");
         e.string(2, self.broker.as_bytes())
@@ -78,7 +76,7 @@ pub fn instance_id() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::encode::TYPE_URL_PREFIX;
+    use dcsbridge_topic::TYPE_URL_PREFIX;
     use prost::Message;
 
     /// `dcsbridge.broker.Handshake` as a consumer decodes it.
@@ -121,8 +119,8 @@ mod tests {
             schema_sha256: None,
         };
         let (url, decoded) = decode(&handshake.encode());
-        let mut want = TYPE_URL_PREFIX.to_vec();
-        want.extend_from_slice(TOPIC);
+        let mut want = TYPE_URL_PREFIX.as_bytes().to_vec();
+        want.extend_from_slice(topic::HANDSHAKE.as_bytes());
         assert_eq!(url.as_bytes(), want);
         assert_eq!(decoded.protocol, 7);
         assert_eq!(decoded.broker, "1.2.3-test");

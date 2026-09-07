@@ -37,10 +37,8 @@ const MAX_FIELD: u32 = (1 << 29) - 1;
 /// and no schema in this project comes near it.
 pub const MAX_DEPTH: usize = 64;
 
-/// What protobuf writes in front of a fully-qualified type name to make an
-/// `Any` type URL. The topic is the name, and this is what every runtime
-/// expects to find before it.
-pub const TYPE_URL_PREFIX: &[u8] = b"type.googleapis.com/";
+/// The type URL's prefix as the encoder writes it, byte for byte.
+const TYPE_URL_PREFIX: &[u8] = dcsbridge_topic::TYPE_URL_PREFIX.as_bytes();
 
 /// `Envelope.payload`, the `Any` the record goes in.
 const ENVELOPE_PAYLOAD: u32 = 4;
