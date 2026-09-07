@@ -65,7 +65,7 @@ pub struct Limits {
     /// for the frame, because the length is the peer's to write.
     pub max_frame_bytes: u32,
     /// The most bytes a payload's type URL may take. A real one is about
-    /// forty.
+    /// fifty.
     pub max_type_url_bytes: usize,
 }
 
@@ -90,7 +90,7 @@ impl Default for Limits {
 /// a few short fields. The `Schema` answer is this plus the set.
 pub(crate) const ANSWER_BYTES: usize = 128;
 
-/// `dcs.bridge.Envelope`, as much of it as the broker reads: `seq` and the
+/// `dcsbridge.broker.Envelope`, as much of it as the broker reads: `seq` and the
 /// payload's `Any`. `epoch` and `mission_time` are the broker's to write and
 /// no consumer's to send, so they are skipped as unknown fields.
 #[derive(Clone, PartialEq, Message)]
@@ -255,10 +255,10 @@ pub fn topic(envelope: &Envelope, max_type_url_bytes: usize) -> Result<&str, Clo
         .unwrap_or(url))
 }
 
-/// `dcs.bridge.Pong` as an envelope tail.
+/// `dcsbridge.broker.Pong` as an envelope tail.
 pub fn pong(liveness: Liveness) -> Record {
     let mut e = Encoder::with_capacity(ANSWER_BYTES);
-    e.begin(b"dcs.bridge.Pong");
+    e.begin(b"dcsbridge.broker.Pong");
     e.boolean(1, liveness.alive).expect("the answer fits");
     if let Some(ms) = liveness.last_heard_ms {
         // A uint64 is a varint of the same bits an int64 is.
@@ -279,7 +279,7 @@ pub struct Session {
     pub caps: HashSet<Capability>,
 }
 
-/// Why an `Auth` failed. Mirrors `dcs.bridge.AuthError`.
+/// Why an `Auth` failed. Mirrors `dcsbridge.broker.AuthError`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AuthError {
     /// No configured token carries the secret.
@@ -290,7 +290,7 @@ pub enum AuthError {
     ServerFull = 3,
 }
 
-/// `dcs.bridge.Auth` as the broker reads it: the token's secret and
+/// `dcsbridge.broker.Auth` as the broker reads it: the token's secret and
 /// nothing else.
 #[derive(Clone, PartialEq, Message)]
 pub struct Auth {
@@ -299,7 +299,7 @@ pub struct Auth {
     pub token: String,
 }
 
-/// `dcs.bridge.SeqAck` as the broker reads it.
+/// `dcsbridge.broker.SeqAck` as the broker reads it.
 #[derive(Clone, PartialEq, Message)]
 pub struct SeqAck {
     /// The highest `seq` the consumer has durably processed.
@@ -307,7 +307,7 @@ pub struct SeqAck {
     pub seq: u64,
 }
 
-/// `dcs.bridge.SetEnabled` as the broker reads it.
+/// `dcsbridge.broker.SetEnabled` as the broker reads it.
 #[derive(Clone, PartialEq, Message)]
 pub struct SetEnabled {
     /// The value the `enabled` key takes.
@@ -318,10 +318,10 @@ pub struct SetEnabled {
 /// What `Schema` says while there is no schema to serve.
 pub const NO_SCHEMA: &str = "no schema has been handed to the broker";
 
-/// `dcs.bridge.Schema` as an envelope tail: the set, or why not.
+/// `dcsbridge.broker.Schema` as an envelope tail: the set, or why not.
 pub fn schema(set: Option<&[u8]>) -> Record {
     let mut e = Encoder::with_capacity(ANSWER_BYTES + set.map_or(0, <[u8]>::len));
-    e.begin(b"dcs.bridge.Schema");
+    e.begin(b"dcsbridge.broker.Schema");
     match set {
         Some(set) => e.string(1, set).expect("the answer fits"),
         None => e.string(2, NO_SCHEMA.as_bytes()).expect("the answer fits"),
@@ -329,10 +329,10 @@ pub fn schema(set: Option<&[u8]>) -> Record {
     Record::from(e.commit().expect("the answer fits"))
 }
 
-/// `dcs.bridge.AuthResult` as an envelope tail.
+/// `dcsbridge.broker.AuthResult` as an envelope tail.
 pub fn auth_result(result: Result<(), AuthError>) -> Record {
     let mut e = Encoder::with_capacity(ANSWER_BYTES);
-    e.begin(b"dcs.bridge.AuthResult");
+    e.begin(b"dcsbridge.broker.AuthResult");
     e.boolean(1, result.is_ok()).expect("the answer fits");
     if let Err(error) = result {
         e.integer(2, error as i64).expect("the answer fits");
@@ -402,11 +402,11 @@ pub fn serve(
         };
 
         match (topic(&envelope, limits.max_type_url_bytes)?, &*session) {
-            ("dcs.bridge.Ping", _) => {
+            ("dcsbridge.broker.Ping", _) => {
                 connections.answer(id, pong(answers.liveness()));
                 answered += 1;
             }
-            ("dcs.bridge.Auth", None) => {
+            ("dcsbridge.broker.Auth", None) => {
                 let auth = Auth::decode(payload(&envelope)).map_err(Close::Payload)?;
                 match answers.authenticate(auth.token.as_bytes()) {
                     Ok(opened) => {
@@ -429,14 +429,14 @@ pub fn serve(
                 }
             }
             (other, None) => return Err(Close::Unauthenticated(other.to_owned())),
-            ("dcs.bridge.GetSchema", Some(_)) => {
+            ("dcsbridge.broker.GetSchema", Some(_)) => {
                 connections.answer(id, schema(answers.schema().as_deref()));
             }
-            ("dcs.bridge.SeqAck", Some(_)) => {
+            ("dcsbridge.broker.SeqAck", Some(_)) => {
                 let ack = SeqAck::decode(payload(&envelope)).map_err(Close::Payload)?;
                 answers.seq_ack(ack.seq);
             }
-            (topic @ "dcs.bridge.SetEnabled", Some(opened)) => {
+            (topic @ "dcsbridge.broker.SetEnabled", Some(opened)) => {
                 let set = SetEnabled::decode(payload(&envelope)).map_err(Close::Payload)?;
                 // Nothing answers this, and nothing yet refuses it out loud:
                 // the `Rejected` record is a later task's, so a token
@@ -554,7 +554,7 @@ mod tests {
     /// prefix comes back whole.
     #[test]
     fn a_frame_decodes_to_seq_and_topic() {
-        let bytes = frame(7, "type.googleapis.com/dcs.bridge.Ping", &[]);
+        let bytes = frame(7, "type.googleapis.com/dcsbridge.broker.Ping", &[]);
         let mut body = Vec::new();
         let (envelope, limits) = read_frame(&mut &bytes[..], &mut body, Limits::default)
             .unwrap()
@@ -563,16 +563,16 @@ mod tests {
         assert_eq!(limits, Limits::default(), "the limits asked for come back");
         assert_eq!(
             topic(&envelope, limits.max_type_url_bytes).unwrap(),
-            "dcs.bridge.Ping"
+            "dcsbridge.broker.Ping"
         );
 
-        let bytes = frame(8, "dcs.bridge.Ping", &[]);
+        let bytes = frame(8, "dcsbridge.broker.Ping", &[]);
         let (envelope, _) = read_frame(&mut &bytes[..], &mut body, Limits::default)
             .unwrap()
             .unwrap();
         assert_eq!(
             topic(&envelope, limits.max_type_url_bytes).unwrap(),
-            "dcs.bridge.Ping"
+            "dcsbridge.broker.Ping"
         );
 
         // At a clean end of stream the limits are never asked for.
@@ -605,7 +605,7 @@ mod tests {
                 self.0.read(buf)
             }
         }
-        let bytes = frame(3, "dcs.bridge.Ping", &[]);
+        let bytes = frame(3, "dcsbridge.broker.Ping", &[]);
         let (envelope, _) = read_frame(
             &mut Interrupted(&bytes, false),
             &mut Vec::new(),
@@ -624,7 +624,7 @@ mod tests {
         assert!(body.is_empty(), "a refused length grew the buffer");
         // The cap is whatever is answered once the length is in, so a
         // lower one refuses a frame the default would have read.
-        let small = frame(1, "dcs.bridge.Ping", &[]);
+        let small = frame(1, "dcsbridge.broker.Ping", &[]);
         let lowered = || Limits {
             max_frame_bytes: 4,
             ..Limits::default()
@@ -690,7 +690,10 @@ mod tests {
         }
         let decode = |tail: Record| {
             let any = Tail::decode(&tail[..]).unwrap().payload.unwrap();
-            assert_eq!(any.type_url, "type.googleapis.com/dcs.bridge.AuthResult");
+            assert_eq!(
+                any.type_url,
+                "type.googleapis.com/dcsbridge.broker.AuthResult"
+            );
             AuthResult::decode(&any.value[..]).unwrap()
         };
 
@@ -737,7 +740,7 @@ mod tests {
         }
         let decode = |tail: Record| {
             let any = Tail::decode(&tail[..]).unwrap().payload.unwrap();
-            assert_eq!(any.type_url, "type.googleapis.com/dcs.bridge.Schema");
+            assert_eq!(any.type_url, "type.googleapis.com/dcsbridge.broker.Schema");
             Schema::decode(&any.value[..]).unwrap()
         };
 
@@ -783,7 +786,7 @@ mod tests {
         }
         let decode = |tail: Record| {
             let any = Tail::decode(&tail[..]).unwrap().payload.unwrap();
-            assert_eq!(any.type_url, "type.googleapis.com/dcs.bridge.Pong");
+            assert_eq!(any.type_url, "type.googleapis.com/dcsbridge.broker.Pong");
             Pong::decode(&any.value[..]).unwrap()
         };
 

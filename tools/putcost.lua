@@ -57,7 +57,7 @@ local begin, integer, double, string_, boolean =
 local message, end_message, commit = shim.message, shim.end_message, shim.commit
 local len = string.len
 
-local topic = 'dcs.builtin.UnitDestroyed'
+local topic = 'dcsbridge.builtin.sim.UnitDestroyed'
 local text = 'a string that already exists'
 
 -- A million puts into one record would outgrow its buffer, so each row runs

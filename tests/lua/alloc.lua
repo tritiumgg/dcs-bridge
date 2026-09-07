@@ -38,7 +38,7 @@ local begin, integer, double, string_, boolean =
 local message, end_message, commit = shim.message, shim.end_message, shim.commit
 
 local N = 10000
-local topic = 'dcs.builtin.UnitDestroyed'
+local topic = 'dcsbridge.builtin.sim.UnitDestroyed'
 local text = 'a string that already exists'
 
 -- Kilobytes the heap grew across N runs of f, collector stopped. Each f is run

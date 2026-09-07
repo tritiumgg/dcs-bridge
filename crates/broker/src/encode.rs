@@ -404,7 +404,7 @@ mod tests {
     use prost::Message;
 
     /// The topic every test opens on, unless it is counting bytes.
-    const TOPIC: &[u8] = b"dcs.builtin.UnitDestroyed";
+    const TOPIC: &[u8] = b"dcsbridge.builtin.sim.UnitDestroyed";
 
     /// A one-byte topic, for the tests that count bytes against capacity.
     const SHORT: &[u8] = b"t";
@@ -414,7 +414,7 @@ mod tests {
     /// length and 21 bytes, and the value tag and gap.
     const SHORT_WRAPPER: usize = 2 + 23 + 2;
 
-    /// `dcs.bridge.Envelope` without `seq`, which the connection writes. The
+    /// `dcsbridge.broker.Envelope` without `seq`, which the connection writes. The
     /// `Any` is the library's own, so the type URL is read the way every
     /// consumer reads it.
     #[derive(Clone, PartialEq, Message)]

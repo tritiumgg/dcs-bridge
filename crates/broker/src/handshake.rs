@@ -15,14 +15,14 @@ use crate::transport::Record;
 
 /// The handshake's topic: the bridge's own message, in the bridge's own
 /// package, known here by name.
-pub const TOPIC: &[u8] = b"dcs.bridge.Handshake";
+pub const TOPIC: &[u8] = b"dcsbridge.broker.Handshake";
 
 /// The bytes the handshake takes beyond the broker version string: the
 /// wrapper, three short fields and a hash, with room to spare. The version
 /// string is added at its own length, so no build can outgrow the buffer.
 const BYTES: usize = 128;
 
-/// What the handshake carries. `dcs.bridge.Handshake` in the schema.
+/// What the handshake carries. `dcsbridge.broker.Handshake` in the schema.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Handshake {
     /// The frame format and the handshake's own shape, as a number the
@@ -81,7 +81,7 @@ mod tests {
     use crate::encode::TYPE_URL_PREFIX;
     use prost::Message;
 
-    /// `dcs.bridge.Handshake` as a consumer decodes it.
+    /// `dcsbridge.broker.Handshake` as a consumer decodes it.
     #[derive(Clone, PartialEq, Message)]
     struct Decoded {
         #[prost(uint32, tag = "1")]

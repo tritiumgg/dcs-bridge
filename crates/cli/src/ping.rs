@@ -13,7 +13,7 @@ use prost::Message;
 
 use crate::wire::{self, read_frame};
 
-/// `dcs.bridge.Pong`, as `proto/dcs/bridge/bridge.proto` numbers it.
+/// `dcsbridge.broker.Pong`, as `proto/dcsbridge/broker/broker.proto` numbers it.
 #[derive(Clone, PartialEq, Message)]
 pub struct Pong {
     /// Whether the heartbeat's age is under the threshold.
@@ -31,7 +31,7 @@ pub struct Pong {
 
 /// The one frame `ping` sends: an empty `Ping`, numbered 1.
 pub fn ping_frame() -> Vec<u8> {
-    wire::frame(1, "dcs.bridge.Ping", Vec::new())
+    wire::frame(1, "dcsbridge.broker.Ping", Vec::new())
 }
 
 /// Read frames from `reader` until a `Pong` arrives, print its three fields
@@ -42,7 +42,7 @@ pub fn ping_frame() -> Vec<u8> {
 /// any way at all.
 pub fn run(mut reader: impl Read, mut out: impl Write) -> io::Result<Option<Pong>> {
     while let Some(envelope) = read_frame(&mut reader)? {
-        if envelope.topic() != Some("dcs.bridge.Pong") {
+        if envelope.topic() != Some("dcsbridge.broker.Pong") {
             continue;
         }
         let any = envelope.payload.expect("a topic came from a payload");
@@ -71,14 +71,14 @@ mod tests {
 
     /// A `Pong` frame numbered `seq`, as the bridge answers.
     fn pong(seq: u64, pong: Pong) -> Vec<u8> {
-        wire::frame(seq, "dcs.bridge.Pong", pong.encode_to_vec())
+        wire::frame(seq, "dcsbridge.broker.Pong", pong.encode_to_vec())
     }
 
     /// The line prints the three fields, with `-` for a heartbeat that was
     /// never stamped, and the handshake before the answer prints nothing.
     #[test]
     fn a_pong_prints_its_three_fields_after_the_handshake() {
-        let mut stream = wire::frame(1, "dcs.bridge.Handshake", vec![0x08, 0x01]);
+        let mut stream = wire::frame(1, "dcsbridge.broker.Handshake", vec![0x08, 0x01]);
         stream.extend(pong(
             2,
             Pong {
@@ -117,12 +117,12 @@ mod tests {
     /// `ping` sends is an empty `Ping` numbered 1.
     #[test]
     fn no_pong_is_no_answer_and_a_garbled_one_is_an_error() {
-        let stream = wire::frame(1, "dcs.bridge.Handshake", vec![0x08, 0x01]);
+        let stream = wire::frame(1, "dcsbridge.broker.Handshake", vec![0x08, 0x01]);
         let mut out = Vec::new();
         assert!(run(&stream[..], &mut out).unwrap().is_none());
         assert!(out.is_empty(), "a missing answer printed something");
 
-        let stream = wire::frame(2, "dcs.bridge.Pong", vec![0xff, 0xff, 0xff]);
+        let stream = wire::frame(2, "dcsbridge.broker.Pong", vec![0xff, 0xff, 0xff]);
         let mut out = Vec::new();
         let error = run(&stream[..], &mut out).unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::InvalidData);
@@ -131,7 +131,7 @@ mod tests {
         let frame = ping_frame();
         let envelope = read_frame(&mut &frame[..]).unwrap().unwrap();
         assert_eq!(envelope.seq, 1);
-        assert_eq!(envelope.topic(), Some("dcs.bridge.Ping"));
+        assert_eq!(envelope.topic(), Some("dcsbridge.broker.Ping"));
         assert!(envelope.payload.unwrap().value.is_empty());
     }
 

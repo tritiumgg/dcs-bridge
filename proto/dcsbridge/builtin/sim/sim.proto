@@ -1,0 +1,25 @@
+syntax = "proto3";
+
+package dcsbridge.builtin.sim;
+
+import "dcsbridge/broker/broker.proto";
+
+// The built-in sim set's records. Package names partition the topic space and
+// name the component that produces each record: the bridge's own records live
+// in dcsbridge.broker, dcsbridge.hook and dcsbridge.sim, the built-in sets'
+// here and in dcsbridge.builtin.hook, and an adopter's in a package they own.
+// A topic id is its payload's fully-qualified type name, so the package is
+// the partition. ADR 0021.
+//
+// tools/schema-ownership.sh polices the other side of that line, keeping
+// anything but the bridge's own records out of its three packages and any
+// other package out of dcsbridge.
+
+// A unit left the mission. The first record, and the shape every other one
+// follows.
+message UnitDestroyed {
+  option (dcsbridge.broker.record_class) = RECORD_CLASS_DURABLE;
+
+  string unit_name = 1;
+  int32 coalition = 2;
+}

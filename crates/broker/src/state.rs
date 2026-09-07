@@ -41,7 +41,7 @@ pub type Topic = String;
 
 /// The drop policy the broker applies to a record under pressure.
 ///
-/// Mirrors `dcs.bridge.RecordClass` in `proto/dcs/bridge/bridge.proto`, whose
+/// Mirrors `dcsbridge.broker.RecordClass` in `proto/dcsbridge/broker/broker.proto`, whose
 /// numbers cross the wire. The schema's `UNSPECIFIED` member has no counterpart
 /// here, because a topic with no class is refused rather than defaulted: there
 /// is nothing for the broker to hold in its place.
@@ -59,7 +59,7 @@ pub enum RecordClass {
 
 /// The Lua state a record routes to.
 ///
-/// Mirrors `dcs.bridge.Target`. The schema's `UNSPECIFIED` member is resolved
+/// Mirrors `dcsbridge.broker.Target`. The schema's `UNSPECIFIED` member is resolved
 /// by the generator, which writes an unspecified target into the sim driver
 /// route set, so the broker is never handed one.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -72,7 +72,7 @@ pub enum Target {
 
 /// The permission a connection needs before the broker accepts a message.
 ///
-/// Mirrors `dcs.bridge.Capability`. That enum is extensible and partitions its
+/// Mirrors `dcsbridge.broker.Capability`. That enum is extensible and partitions its
 /// numbers — the bridge takes 1 to 49 — so a built-in set or an adopter adds
 /// members without touching these three.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -92,7 +92,7 @@ pub enum Capability {
 /// registration, and the registration does not exist yet. The
 /// acknowledgement is different: it is the bridge's own message, in the
 /// bridge's own package, so the broker knows it by name. ADR 0017.
-pub const ACK_TOPIC: &str = "dcs.bridge.CommandAck";
+pub const ACK_TOPIC: &str = "dcsbridge.broker.CommandAck";
 
 /// The maps the two registrars share.
 ///
@@ -997,7 +997,7 @@ mod tests {
     fn the_enums_match_the_schema() {
         let path = concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../proto/dcs/bridge/bridge.proto"
+            "/../../proto/dcsbridge/broker/broker.proto"
         );
         let schema =
             std::fs::read_to_string(path).unwrap_or_else(|e| panic!("could not read {path}: {e}"));
@@ -1289,7 +1289,7 @@ mod tests {
             "an accepted address was counted"
         );
 
-        assert!(!bridge().addressable(b"dcs.builtin.UnitDestroyed"));
+        assert!(!bridge().addressable(b"dcsbridge.builtin.sim.UnitDestroyed"));
         assert!(!bridge().addressable(b""));
         assert!(
             bridge().misaddressed() >= before + 2,
@@ -1363,7 +1363,7 @@ mod tests {
             let body = crate::inbound::Envelope {
                 seq: 1,
                 payload: Some(crate::inbound::Payload {
-                    type_url: "type.googleapis.com/dcs.bridge.Auth".into(),
+                    type_url: "type.googleapis.com/dcsbridge.broker.Auth".into(),
                     value: crate::inbound::Auth {
                         token: "hunter2".into(),
                     }

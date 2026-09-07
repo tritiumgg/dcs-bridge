@@ -39,7 +39,7 @@ local function queued(what, result)
 end
 
 -- One of every put, then a commit that queues.
-shim.begin('dcs.builtin.UnitDestroyed')
+shim.begin('dcsbridge.builtin.sim.UnitDestroyed')
 shim.string(1, 'x')
 shim.integer(2, 3)
 shim.double(3, 1.5)

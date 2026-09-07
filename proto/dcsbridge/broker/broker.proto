@@ -1,10 +1,16 @@
 syntax = "proto3";
 
-// This package is bounded: the only messages permitted here are the bridge's
-// own records and the nested types those records carry.
-// A built-in set's record belongs in dcs.builtin and an adopter's in a package
-// they own. tools/schema-ownership.sh holds the list and enforces it.
-package dcs.bridge;
+// A topic id is its payload's fully-qualified type name, so the package names
+// partition the topic space, and each one names the component that produces
+// the record. The bridge's own records live in dcsbridge.broker, dcsbridge.hook
+// and dcsbridge.sim, the built-in sets' in dcsbridge.builtin.hook and
+// dcsbridge.builtin.sim, and an adopter's in a package they own. ADR 0021.
+//
+// This package holds what the broker frames, answers or knows by name,
+// together with the enums and options every other file imports. It is
+// bounded: tools/schema-ownership.sh holds the list and enforces it, and
+// refuses any other package under dcsbridge.
+package dcsbridge.broker;
 
 import "google/protobuf/any.proto";
 import "google/protobuf/descriptor.proto";

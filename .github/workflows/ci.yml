@@ -132,7 +132,7 @@ jobs:
       # The two remaining schema gates. Ownership is a naming check over the
       # sources and needs no buf; the comparison reads the newest release tag's
       # tree out of git.
-      - name: The bridge owns what dcs.bridge holds
+      - name: The bridge owns what its dcsbridge packages hold
         run: sh tools/schema-ownership.sh
       - name: The schema breaks no consumer built against the last release
         run: sh tools/schema-breaking.sh

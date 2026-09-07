@@ -29,8 +29,8 @@ local shim = open(path)
 shim.configure({ port = 0 })
 assert(type(shim.begin_to) == 'function', 'shim.begin_to is missing')
 
-local ack = 'dcs.bridge.CommandAck'
-local fanout = 'dcs.builtin.UnitDestroyed'
+local ack = 'dcsbridge.broker.CommandAck'
+local fanout = 'dcsbridge.builtin.sim.UnitDestroyed'
 
 local function raises(what, f, ...)
   local ok, err = pcall(f, ...)

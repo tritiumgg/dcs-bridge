@@ -19,7 +19,7 @@ pub const TYPE_URL_PREFIX: &str = "type.googleapis.com/";
 /// rather than obeyed. The bridge's own frame cap is smaller.
 const FRAME_MAX: u32 = 16 << 20;
 
-/// `dcs.bridge.Envelope`, as `proto/dcs/bridge/bridge.proto` numbers it.
+/// `dcsbridge.broker.Envelope`, as `proto/dcsbridge/broker/broker.proto` numbers it.
 ///
 /// The payload is an `Any` whose value stays opaque here.
 #[derive(Clone, PartialEq, Message)]
@@ -163,9 +163,12 @@ mod tests {
     /// ends inside a frame lost bytes, and says so.
     #[test]
     fn an_end_of_stream_is_clean_only_between_frames() {
-        let whole = frame(1, "dcs.builtin.UnitDestroyed", vec![0x08, 0x2a]);
+        let whole = frame(1, "dcsbridge.builtin.sim.UnitDestroyed", vec![0x08, 0x2a]);
         let envelope = read_frame(&mut &whole[..]).unwrap().unwrap();
-        assert_eq!(envelope.topic(), Some("dcs.builtin.UnitDestroyed"));
+        assert_eq!(
+            envelope.topic(),
+            Some("dcsbridge.builtin.sim.UnitDestroyed")
+        );
         assert!(read_frame(&mut &whole[..0]).unwrap().is_none());
 
         let cut = &whole[..whole.len() - 1];

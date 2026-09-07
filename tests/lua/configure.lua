@@ -48,7 +48,7 @@ end
 -- begin raises saying so, and a put or a commit says no record is open.
 local early = raises('begin before configure', shim.begin, 't')
 assert(early:find('configure comes first', 1, true), 'the wrong complaint: ' .. early)
-raises('begin_to before configure', shim.begin_to, 1, 'dcs.bridge.CommandAck')
+raises('begin_to before configure', shim.begin_to, 1, 'dcsbridge.broker.CommandAck')
 assert(raises('integer before configure', shim.integer, 1, 1):find('no record is open', 1, true))
 assert(raises('commit before configure', shim.commit):find('no record is open', 1, true))
 
@@ -81,7 +81,7 @@ assert(
 assert(first.listening ~= '127.0.0.1:0', 'the answer carries the port asked for, not the one bound')
 
 -- A record opens once configured, and queues.
-shim.begin('dcs.builtin.UnitDestroyed')
+shim.begin('dcsbridge.builtin.sim.UnitDestroyed')
 assert(shim.commit() == true, 'a record after configure did not queue')
 
 -- A later call: the live keys apply and a changed restart-tier key is
@@ -104,11 +104,11 @@ assert(later.unknown == 0)
 -- and the put raises, and once the cap is back at its default the same
 -- record queues.
 shim.configure({ max_frame_bytes = 64 })
-shim.begin('dcs.builtin.UnitDestroyed')
+shim.begin('dcsbridge.builtin.sim.UnitDestroyed')
 local full = raises('a put over the lowered cap', shim.string, 1, string.rep('x', 200))
 assert(full:find('outgrew its buffer', 1, true), 'the wrong complaint: ' .. full)
 shim.configure({})
-shim.begin('dcs.builtin.UnitDestroyed')
+shim.begin('dcsbridge.builtin.sim.UnitDestroyed')
 shim.string(1, string.rep('x', 200))
 assert(shim.commit() == true, 'the record buffer did not follow the cap back up')
 

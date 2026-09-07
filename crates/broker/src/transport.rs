@@ -354,7 +354,7 @@ mod tests {
     use std::sync::RwLock;
     use std::time::{Duration, Instant};
 
-    /// `dcs.bridge.Envelope` as a consumer with no record schema reads it:
+    /// `dcsbridge.broker.Envelope` as a consumer with no record schema reads it:
     /// `seq` and an `Any` whose type URL is all it knows of the payload.
     #[derive(Clone, PartialEq, Message)]
     struct Envelope {
@@ -364,7 +364,7 @@ mod tests {
         payload: Option<prost_types::Any>,
     }
 
-    const TOPIC: &[u8] = b"dcs.builtin.UnitDestroyed";
+    const TOPIC: &[u8] = b"dcsbridge.builtin.sim.UnitDestroyed";
 
     /// A record on [`TOPIC`] carrying `n` in field 1.
     fn record(n: i64) -> Record {
@@ -500,7 +500,7 @@ mod tests {
         Listener::spawn("127.0.0.1:0", connections, 64, Arc::new(Stub)).unwrap()
     }
 
-    /// `dcs.bridge.AuthResult` as a consumer decodes it.
+    /// `dcsbridge.broker.AuthResult` as a consumer decodes it.
     #[derive(Clone, PartialEq, Message)]
     struct AuthResult {
         #[prost(bool, tag = "1")]
@@ -518,11 +518,14 @@ mod tests {
         }
         .encode_to_vec();
         client
-            .write_all(&inbound(1, "dcs.bridge.Auth", &auth))
+            .write_all(&inbound(1, "dcsbridge.broker.Auth", &auth))
             .expect("the auth is sent");
         let frame = read_frame(client);
         let any = frame.payload.as_ref().expect("a payload");
-        assert_eq!(any.type_url, "type.googleapis.com/dcs.bridge.AuthResult");
+        assert_eq!(
+            any.type_url,
+            "type.googleapis.com/dcsbridge.broker.AuthResult"
+        );
         let result = AuthResult::decode(&any.value[..]).expect("the result decodes");
         (frame, result)
     }
@@ -796,7 +799,7 @@ mod tests {
         }
     }
 
-    /// `dcs.bridge.Pong` as a consumer decodes it.
+    /// `dcsbridge.broker.Pong` as a consumer decodes it.
     #[derive(Clone, PartialEq, Message)]
     struct Pong {
         #[prost(bool, tag = "1")]
@@ -824,7 +827,7 @@ mod tests {
         }
         let pong = |client: &mut TcpStream| -> Pong {
             client
-                .write_all(&inbound(1, "dcs.bridge.Ping", &[]))
+                .write_all(&inbound(1, "dcsbridge.broker.Ping", &[]))
                 .expect("the ping is sent");
             let frame = read_frame(client);
             Pong::decode(&frame.payload.unwrap().value[..]).expect("the pong decodes")
@@ -846,9 +849,9 @@ mod tests {
         let listener = Listener::spawn("127.0.0.1:0", connections, 64, switch(true)).unwrap();
 
         for early in [
-            "dcs.bridge.GetSchema",
-            "dcs.bridge.SeqAck",
-            "dcs.bridge.SetEnabled",
+            "dcsbridge.broker.GetSchema",
+            "dcsbridge.broker.SeqAck",
+            "dcsbridge.broker.SetEnabled",
         ] {
             let mut offender = client(listener.local_addr());
             read_handshake(&mut offender);
@@ -863,11 +866,11 @@ mod tests {
         assert!(authenticate(&mut admin, SECRET).1.ok);
 
         admin
-            .write_all(&inbound(2, "dcs.bridge.GetSchema", &[]))
+            .write_all(&inbound(2, "dcsbridge.broker.GetSchema", &[]))
             .expect("the request is sent");
         let frame = read_frame(&mut admin);
         let any = frame.payload.expect("a payload");
-        assert_eq!(any.type_url, "type.googleapis.com/dcs.bridge.Schema");
+        assert_eq!(any.type_url, "type.googleapis.com/dcsbridge.broker.Schema");
         assert_eq!(
             Schema::decode(&any.value[..]).expect("the schema decodes"),
             Schema {
@@ -878,11 +881,11 @@ mod tests {
 
         let ack = inbound::SeqAck { seq: 41 }.encode_to_vec();
         admin
-            .write_all(&inbound(3, "dcs.bridge.SeqAck", &ack))
+            .write_all(&inbound(3, "dcsbridge.broker.SeqAck", &ack))
             .expect("the ack is sent");
         let off = inbound::SetEnabled { enabled: false }.encode_to_vec();
         admin
-            .write_all(&inbound(4, "dcs.bridge.SetEnabled", &off))
+            .write_all(&inbound(4, "dcsbridge.broker.SetEnabled", &off))
             .expect("the switch is sent");
         // The pong follows both on the reader thread, so its answer
         // shows their effect.
@@ -905,7 +908,7 @@ mod tests {
         assert!(authenticate(&mut reader, SECRET).1.ok);
         let off = inbound::SetEnabled { enabled: false }.encode_to_vec();
         reader
-            .write_all(&inbound(2, "dcs.bridge.SetEnabled", &off))
+            .write_all(&inbound(2, "dcsbridge.broker.SetEnabled", &off))
             .expect("the switch is sent");
         assert!(
             pong(&mut reader).bridge_enabled,
@@ -994,7 +997,7 @@ mod tests {
             "the handshake does not carry the set's hash"
         );
         scanner
-            .write_all(&inbound(1, "dcs.bridge.GetSchema", &[]))
+            .write_all(&inbound(1, "dcsbridge.broker.GetSchema", &[]))
             .expect("the request is sent");
         assert!(
             is_closed(&mut scanner),
@@ -1005,11 +1008,11 @@ mod tests {
         read_handshake(&mut consumer);
         assert!(authenticate(&mut consumer, SECRET).1.ok);
         consumer
-            .write_all(&inbound(2, "dcs.bridge.GetSchema", &[]))
+            .write_all(&inbound(2, "dcsbridge.broker.GetSchema", &[]))
             .expect("the request is sent");
         let frame = read_frame(&mut consumer);
         let any = frame.payload.expect("a payload");
-        assert_eq!(any.type_url, "type.googleapis.com/dcs.bridge.Schema");
+        assert_eq!(any.type_url, "type.googleapis.com/dcsbridge.broker.Schema");
         let schema = Schema::decode(&any.value[..]).expect("the schema decodes");
         assert_eq!(schema.error, None);
         let served = schema.file_descriptor_set.expect("the set");
@@ -1037,12 +1040,12 @@ mod tests {
         read_handshake(&mut client);
 
         client
-            .write_all(&inbound(1, "dcs.bridge.Ping", &[]))
+            .write_all(&inbound(1, "dcsbridge.broker.Ping", &[]))
             .expect("the ping is sent");
         let frame = read_frame(&mut client);
         assert_eq!(frame.seq, 2, "the pong did not follow the handshake");
         let any = frame.payload.as_ref().expect("a payload");
-        assert_eq!(any.type_url, "type.googleapis.com/dcs.bridge.Pong");
+        assert_eq!(any.type_url, "type.googleapis.com/dcsbridge.broker.Pong");
         assert_eq!(
             Pong::decode(&any.value[..]).expect("the pong decodes"),
             Pong {
@@ -1076,7 +1079,7 @@ mod tests {
             bytes
         };
         let garbage = vec![3u8, 0, 0, 0, 0xff, 0xff, 0xff];
-        let early = inbound(1, "dcs.builtin.Resync", &[]);
+        let early = inbound(1, "dcsbridge.sim.Resync", &[]);
 
         for bad in [oversize, garbage, early] {
             let mut offender = client(listener.local_addr());
@@ -1171,7 +1174,7 @@ mod tests {
         read_handshake(&mut trickling);
 
         let started = Instant::now();
-        let frame = inbound(1, "dcs.bridge.Ping", &[]);
+        let frame = inbound(1, "dcsbridge.broker.Ping", &[]);
         let mut sent = 0;
         // One byte every 100 ms would keep a per-read timeout of 300 ms
         // reset forever; the deadline closes the socket at 300 ms anyway.
@@ -1258,7 +1261,7 @@ mod tests {
         read_handshake(&mut refused);
         assert!(authenticate(&mut refused, SECRET).1.ok);
         refused
-            .write_all(&inbound(2, "dcs.builtin.Resync", &[]))
+            .write_all(&inbound(2, "dcsbridge.sim.Resync", &[]))
             .expect("the frame is sent");
         assert!(is_closed(&mut refused));
         wait_closed(1);
@@ -1320,12 +1323,12 @@ mod tests {
         read_handshake(&mut pending);
         commit.push(record(1));
         pending
-            .write_all(&inbound(1, "dcs.bridge.Ping", &[]))
+            .write_all(&inbound(1, "dcsbridge.broker.Ping", &[]))
             .expect("the ping is sent");
         let frame = read_frame(&mut pending);
         assert_eq!(
             frame.payload.unwrap().type_url,
-            "type.googleapis.com/dcs.bridge.Pong",
+            "type.googleapis.com/dcsbridge.broker.Pong",
             "an unauthenticated connection received a record"
         );
         assert_eq!(frame.seq, 2, "the withheld record moved seq");
@@ -1339,7 +1342,7 @@ mod tests {
         assert_eq!(value(&frame), 2);
 
         pending
-            .write_all(&inbound(2, "dcs.bridge.Auth", &[]))
+            .write_all(&inbound(2, "dcsbridge.broker.Auth", &[]))
             .expect("the second auth is sent");
         assert!(is_closed(&mut pending), "a second auth was accepted");
 
@@ -1388,7 +1391,7 @@ mod tests {
         let mut pings = 0;
         while started.elapsed() < Duration::from_millis(200) {
             pinging
-                .write_all(&inbound(pings, "dcs.bridge.Ping", &[]))
+                .write_all(&inbound(pings, "dcsbridge.broker.Ping", &[]))
                 .expect("the ping is sent");
             read_frame(&mut pinging);
             pings += 1;
@@ -1449,7 +1452,7 @@ mod tests {
         read_handshake(&mut client);
         assert!(authenticate(&mut client, SECRET).1.ok);
 
-        let ping = inbound(1, "dcs.bridge.Ping", &[]);
+        let ping = inbound(1, "dcsbridge.broker.Ping", &[]);
         client.write_all(&ping).expect("the ping is sent");
         let answered = read_frame(&mut client);
         assert_eq!(answered.seq, 3, "the first ping was not answered");

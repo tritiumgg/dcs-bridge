@@ -28,14 +28,14 @@ pub struct Summary {
     pub refused: bool,
 }
 
-/// `dcs.bridge.Auth`: the token's secret and nothing else.
+/// `dcsbridge.broker.Auth`: the token's secret and nothing else.
 #[derive(Clone, PartialEq, Message)]
 struct Auth {
     #[prost(string, tag = "1")]
     token: String,
 }
 
-/// `dcs.bridge.AuthResult`, as the bridge answers an `Auth`.
+/// `dcsbridge.broker.AuthResult`, as the bridge answers an `Auth`.
 #[derive(Clone, PartialEq, Message)]
 struct AuthResult {
     #[prost(bool, tag = "1")]
@@ -44,7 +44,7 @@ struct AuthResult {
     error: i32,
 }
 
-/// `dcs.bridge.Handshake`, the one field of it `tail` reads: the hash of
+/// `dcsbridge.broker.Handshake`, the one field of it `tail` reads: the hash of
 /// the schema the bridge serves, absent until the hook driver hands the
 /// schema over.
 #[derive(Clone, PartialEq, Message)]
@@ -61,7 +61,7 @@ struct Handshake {
 pub fn auth_frame(secret: &str) -> Vec<u8> {
     wire::frame(
         1,
-        "dcs.bridge.Auth",
+        "dcsbridge.broker.Auth",
         Auth {
             token: secret.to_owned(),
         }
@@ -128,7 +128,7 @@ pub fn run(mut reader: impl Read, mut out: impl Write) -> io::Result<Summary> {
 /// says whether the token was accepted did not say so, and a run that went
 /// on as though it had would exit as a success.
 fn auth_result(envelope: &Envelope) -> Option<AuthResult> {
-    if envelope.topic() != Some("dcs.bridge.AuthResult") {
+    if envelope.topic() != Some("dcsbridge.broker.AuthResult") {
         return None;
     }
     let any = envelope.payload.as_ref()?;
@@ -141,7 +141,7 @@ fn auth_result(envelope: &Envelope) -> Option<AuthResult> {
 /// The schema hash a handshake carries, as hex. `None` for a handshake
 /// carrying none, and for any other frame.
 fn schema_sha256(envelope: &Envelope) -> Option<String> {
-    if envelope.topic() != Some("dcs.bridge.Handshake") {
+    if envelope.topic() != Some("dcsbridge.broker.Handshake") {
         return None;
     }
     let any = envelope.payload.as_ref()?;
@@ -162,7 +162,7 @@ fn write_frame_line(out: &mut impl Write, envelope: &Envelope) -> io::Result<()>
         }
         _ => write!(out, " topic=- bytes=0")?,
     }
-    if envelope.topic() == Some("dcs.bridge.Handshake") {
+    if envelope.topic() == Some("dcsbridge.broker.Handshake") {
         let hash = schema_sha256(envelope).unwrap_or_else(|| "-".into());
         write!(out, " schema_sha256={hash}")?;
     }
@@ -192,7 +192,7 @@ mod tests {
     use std::sync::Arc;
     use std::time::{Duration, Instant};
 
-    const TOPIC: &str = "dcs.builtin.UnitDestroyed";
+    const TOPIC: &str = "dcsbridge.builtin.sim.UnitDestroyed";
 
     /// A record frame on [`TOPIC`], for a stream built by hand.
     fn frame(seq: u64) -> Vec<u8> {
@@ -223,10 +223,10 @@ mod tests {
         );
         assert_eq!(
             out,
-            "seq=1 topic=dcs.builtin.UnitDestroyed bytes=2\n\
-             seq=2 topic=dcs.builtin.UnitDestroyed bytes=2\n\
+            "seq=1 topic=dcsbridge.builtin.sim.UnitDestroyed bytes=2\n\
+             seq=2 topic=dcsbridge.builtin.sim.UnitDestroyed bytes=2\n\
              gap: 2 records dropped between seq 2 and 5\n\
-             seq=5 topic=dcs.builtin.UnitDestroyed bytes=2\n"
+             seq=5 topic=dcsbridge.builtin.sim.UnitDestroyed bytes=2\n"
         );
     }
 
@@ -238,7 +238,7 @@ mod tests {
         let result = |seq: u64, ok: bool, error: i32| {
             wire::frame(
                 seq,
-                "dcs.bridge.AuthResult",
+                "dcsbridge.broker.AuthResult",
                 AuthResult { ok, error }.encode_to_vec(),
             )
         };
@@ -249,7 +249,7 @@ mod tests {
         assert!(
             String::from_utf8(out)
                 .unwrap()
-                .contains("topic=dcs.bridge.AuthResult bytes=2 ok=true"),
+                .contains("topic=dcsbridge.broker.AuthResult bytes=2 ok=true"),
             "an accepted token did not print ok=true"
         );
 
@@ -265,7 +265,7 @@ mod tests {
 
         // A result whose bytes do not decode gave no verdict, which is a
         // refusal rather than a pass.
-        let garbled = wire::frame(1, "dcs.bridge.AuthResult", vec![0xff, 0xff, 0xff]);
+        let garbled = wire::frame(1, "dcsbridge.broker.AuthResult", vec![0xff, 0xff, 0xff]);
         let mut out = Vec::new();
         let summary = run(&garbled[..], &mut out).unwrap();
         assert!(summary.refused, "a garbled result passed for a verdict");
@@ -273,7 +273,7 @@ mod tests {
         let frame = auth_frame("hunter2");
         let envelope = read_frame(&mut &frame[..]).unwrap().unwrap();
         assert_eq!(envelope.seq, 1);
-        assert_eq!(envelope.topic(), Some("dcs.bridge.Auth"));
+        assert_eq!(envelope.topic(), Some("dcsbridge.broker.Auth"));
         let any = envelope.payload.unwrap();
         assert_eq!(Auth::decode(&any.value[..]).unwrap().token, "hunter2");
     }
@@ -301,7 +301,8 @@ mod tests {
         run(&handshake(None)[..], &mut out).unwrap();
         let out = String::from_utf8(out).unwrap();
         assert!(
-            out.contains("topic=dcs.bridge.Handshake bytes=") && out.contains(" schema_sha256=-\n"),
+            out.contains("topic=dcsbridge.broker.Handshake bytes=")
+                && out.contains(" schema_sha256=-\n"),
             "no schema did not print a dash: {out}"
         );
 
@@ -321,7 +322,7 @@ mod tests {
 
     /// A record on [`TOPIC`] carrying `bytes` of string in field 1.
     fn record(bytes: usize) -> Record {
-        let mut e = Encoder::with_capacity(bytes + 64);
+        let mut e = Encoder::with_capacity(bytes + 128);
         e.begin(TOPIC.as_bytes());
         e.string(1, &vec![b'x'; bytes]).unwrap();
         Arc::from(e.commit().unwrap())
