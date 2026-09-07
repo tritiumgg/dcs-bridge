@@ -167,9 +167,13 @@ pub struct Bridge {
     /// from.
     started: Instant,
     /// Milliseconds after `started` at which the logic thread last stamped
-    /// the heartbeat, plus one, so that zero means never. Nothing stamps it
-    /// yet: `shim.tick` is what will.
+    /// the heartbeat, plus one, so that zero means never. `shim.tick`
+    /// stamps it, at most once per `heartbeat_interval_ms`.
     heartbeat: AtomicU64,
+    /// The mission time `shim.tick` last published, as the bits of an
+    /// `f64`. The sim owns this clock and it pauses with the sim; no wall
+    /// clock stands in for it.
+    mission_time: AtomicU64,
     /// The configuration in force, replaced whole by each `configure` and
     /// by `SetEnabled`, which moves the `enabled` key inside it. Every
     /// thread that decides by a live key reads it here, taking the lock for
@@ -479,6 +483,7 @@ impl Bridge {
             instance_id,
             started: Instant::now(),
             heartbeat: AtomicU64::new(0),
+            mission_time: AtomicU64::new(0),
             config: RwLock::new(Arc::new(Config::default())),
             configuring: Mutex::new(false),
             pending_restart: AtomicU64::new(0),
@@ -672,23 +677,53 @@ impl Bridge {
         self.schema.get().map(|held| Arc::clone(&held.set))
     }
 
-    /// Stamp the heartbeat: the logic thread is running now.
+    /// Milliseconds since the process started.
     ///
-    /// One atomic store, and no throttle here: the caller that exists to
-    /// throttle it, `shim.tick`, does not exist yet, so nothing calls this
-    /// outside a test and every `Pong` reports the sim as never heard from.
-    pub fn heartbeat(&self) {
-        let ms = self.started.elapsed().as_millis();
-        // Saturating at the top of a u64 is 584 million years of uptime.
-        let ms = u64::try_from(ms).unwrap_or(u64::MAX - 1);
-        self.heartbeat.store(ms + 1, Ordering::Relaxed);
+    /// Saturating at the top of a u64 is 584 million years of uptime, and
+    /// one below it leaves room for the heartbeat's bias.
+    fn now_ms(&self) -> u64 {
+        u64::try_from(self.started.elapsed().as_millis()).unwrap_or(u64::MAX - 1)
+    }
+
+    /// `shim.tick`: the logic thread is running now, and this is the sim's
+    /// clock.
+    ///
+    /// Called every frame from the hook state. The mission time is published
+    /// on every call, and the heartbeat is stamped at most once per
+    /// `heartbeat_interval_ms`. The throttle is here rather than at the call
+    /// site so the hook driver cannot skip the call without also skipping
+    /// the mission time. Two atomic loads and at most two stores; the one
+    /// caller is the logic thread, so nothing races the read of the last
+    /// stamp against its write.
+    pub fn tick(&self, mission_time: f64) {
+        self.tick_at(self.now_ms(), mission_time);
+    }
+
+    /// `tick` with the clock supplied, so a test drives the throttle.
+    fn tick_at(&self, now_ms: u64, mission_time: f64) {
+        self.mission_time
+            .store(mission_time.to_bits(), Ordering::Relaxed);
+        let interval = self.config().heartbeat_interval_ms;
+        let due = match self.heartbeat.load(Ordering::Relaxed) {
+            0 => true,
+            stamped => now_ms.saturating_sub(stamped - 1) >= interval,
+        };
+        if due {
+            self.heartbeat.store(now_ms + 1, Ordering::Relaxed);
+        }
+    }
+
+    /// The mission time the last `tick` published, or zero before the
+    /// first.
+    pub fn mission_time(&self) -> f64 {
+        f64::from_bits(self.mission_time.load(Ordering::Relaxed))
     }
 
     /// What a `Pong` carries now: the heartbeat's age, whether that is
     /// under the threshold, and the kill switch's effective value. Read on
     /// the reader thread, and it touches nothing the logic thread holds.
     pub fn liveness(&self) -> Liveness {
-        let now = u64::try_from(self.started.elapsed().as_millis()).unwrap_or(u64::MAX - 1);
+        let now = self.now_ms();
         let last_heard_ms = match self.heartbeat.load(Ordering::Relaxed) {
             0 => None,
             stamped => Some(now.saturating_sub(stamped - 1)),
@@ -1410,5 +1445,99 @@ mod tests {
                 .parse()
                 .ok()
         })
+    }
+
+    /// A bridge with `heartbeat_interval_ms` at `interval` and nothing
+    /// started: the throttle reads the key and nothing else.
+    fn ticking(instance_id: u64, interval: u64) -> Bridge {
+        let bridge = Bridge::new(instance_id);
+        bridge.swap(Config {
+            heartbeat_interval_ms: interval,
+            ..Config::default()
+        });
+        bridge
+    }
+
+    /// The clock reading the heartbeat was last stamped at, without the
+    /// bias that makes zero mean never.
+    fn stamped_at(bridge: &Bridge) -> Option<u64> {
+        match bridge.heartbeat.load(Ordering::Relaxed) {
+            0 => None,
+            stamped => Some(stamped - 1),
+        }
+    }
+
+    /// The first tick stamps whatever the clock reads, and every tick
+    /// publishes its mission time whether or not it stamps.
+    #[test]
+    fn the_first_tick_stamps_and_every_tick_publishes_mission_time() {
+        let bridge = ticking(10, 1000);
+        assert_eq!(stamped_at(&bridge), None);
+        assert_eq!(bridge.liveness().last_heard_ms, None);
+
+        bridge.tick_at(5, 12.5);
+        assert_eq!(stamped_at(&bridge), Some(5));
+        assert_eq!(bridge.mission_time(), 12.5);
+
+        bridge.tick_at(6, 12.75);
+        assert_eq!(
+            stamped_at(&bridge),
+            Some(5),
+            "a tick inside the interval stamped"
+        );
+        assert_eq!(
+            bridge.mission_time(),
+            12.75,
+            "the mission time was throttled"
+        );
+    }
+
+    /// Ticks inside one interval stamp once; the first at or past the
+    /// interval stamps again, and the interval is measured from the last
+    /// stamp rather than the last tick.
+    #[test]
+    fn the_heartbeat_is_stamped_at_most_once_per_interval() {
+        let bridge = ticking(11, 1000);
+
+        bridge.tick_at(100, 0.0);
+        for now in (116..1100).step_by(16) {
+            bridge.tick_at(now, 0.0);
+        }
+        assert_eq!(
+            stamped_at(&bridge),
+            Some(100),
+            "a tick under the interval stamped"
+        );
+
+        bridge.tick_at(1100, 0.0);
+        assert_eq!(
+            stamped_at(&bridge),
+            Some(1100),
+            "the tick at the interval did not stamp"
+        );
+
+        bridge.tick_at(2000, 0.0);
+        assert_eq!(stamped_at(&bridge), Some(1100));
+        bridge.tick_at(2100, 0.0);
+        assert_eq!(stamped_at(&bridge), Some(2100));
+    }
+
+    /// The interval is the key in force, read at each tick.
+    #[test]
+    fn the_throttle_reads_the_interval_in_force() {
+        let bridge = ticking(12, 100);
+
+        bridge.tick_at(0, 0.0);
+        bridge.tick_at(100, 0.0);
+        assert_eq!(stamped_at(&bridge), Some(100));
+
+        bridge.swap(Config {
+            heartbeat_interval_ms: 500,
+            ..Config::default()
+        });
+        bridge.tick_at(200, 0.0);
+        assert_eq!(stamped_at(&bridge), Some(100), "the old interval was read");
+        bridge.tick_at(600, 0.0);
+        assert_eq!(stamped_at(&bridge), Some(600));
     }
 }

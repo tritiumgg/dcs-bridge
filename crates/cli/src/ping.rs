@@ -137,10 +137,10 @@ mod tests {
     }
 
     /// The answer comes from the reader thread while the logic thread does
-    /// nothing: with no heartbeat ever stamped the bridge answers that the
-    /// sim was never heard from, one stamp later the same connection's
-    /// next `Ping` answers alive with a small age, no token was sent, and
-    /// nothing reached the commit ring.
+    /// nothing: with no tick ever made the bridge answers that the sim was
+    /// never heard from, one tick later the same connection's next `Ping`
+    /// answers alive with a small age, no token was sent, and nothing
+    /// reached the commit ring.
     #[test]
     fn a_live_bridge_answers_without_a_token_or_a_heartbeat() {
         let (writer, commit, connections) = Writer::spawn(64);
@@ -163,7 +163,7 @@ mod tests {
         );
         assert_eq!(first.dcs_last_heard_ms, None);
 
-        dcsbridge_broker::bridge().heartbeat();
+        dcsbridge_broker::bridge().tick(0.0);
         client.write_all(&ping_frame()).expect("the ping is sent");
         let mut out = Vec::new();
         let second = run(&mut client, &mut out).unwrap().expect("a pong arrives");
