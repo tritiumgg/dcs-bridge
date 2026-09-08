@@ -20,7 +20,8 @@ docs/
 proto/                 the record schema. buf.yaml configures the lint
 vendor/lua/lua.def     the import definition for DCS's Lua
 tests/lua/             the module opened by a stock Lua 5.1, no DCS present
-tools/                 ledger.sh, luatest.sh, miri.sh, mkimplib.sh, mkschema.sh, readmeopen.sh, statecheck.sh
+tools/                 ledger.sh, luatest.sh, miri.sh, mkimplib.sh, mkschema.sh, raiseshape.sh,
+                       readmeopen.sh, statecheck.sh
 .github/workflows/     CI, release, version bump
 .claude/               hooks: the read guard, the frozen-write guard, the shell guard,
                        the commit checks, the session start, the stop check

@@ -288,6 +288,12 @@ jobs:
       - name: Cross-build the Windows target
         run: cargo xwin build --release --workspace --target x86_64-pc-windows-msvc
 
+      # The product's Lua surface compiles for this target alone, and a
+      # raise out of it survives only from an entry that owns nothing. The
+      # optimizer can undo that shape, so the assembly is read.
+      - name: Every raising Lua entry owns nothing
+        run: sh tools/raiseshape.sh
+
       # The same script the release workflow runs, so a pull request exercises
       # the staging, the write-directory zip, the checksums and the guard that
       # the DLL really imports lua.dll. Nothing but publishing is left for a
