@@ -1251,17 +1251,31 @@ mod put {
 
     /// `shim.begin(topic)`: open a record on the topic for every connection,
     /// discarding and counting one left open. The topic names the record's
-    /// type on the wire. Whether it is a registered one is a check
-    /// registration brings. Raises before the first `configure`.
+    /// type on the wire. Raises before the first `configure`, and on a topic
+    /// with no class or no capability registered, counted, with the record
+    /// in progress left as it was: the broker holds the schema opaque and
+    /// can recover neither value, so a record it could not drop by policy
+    /// or keep from the wrong connection is not opened.
     unsafe extern "C" fn begin(state: *mut c_void) -> c_int {
         // SAFETY: a Lua call over the closure `install` built. The topic is
-        // an argument, so Lua keeps it alive for the whole call, and the
-        // raise in `opening` happens before anything else is held.
+        // an argument, so Lua keeps it alive for the whole call, and Lua
+        // stores a string with a terminating NUL, so the pointer serves the
+        // error's `%s` as well as the slice. Each raise happens before
+        // anything else is held, and the registry check holds no lock by
+        // the time it answers.
         unsafe {
             let mut len = 0;
             let s = lua::luaL_checklstring(state, 1, &mut len);
             let topic = core::slice::from_raw_parts(s.cast::<u8>(), len);
             let pending = opening(state);
+            if !dcsbridge_broker::bridge().registered(topic) {
+                lua::luaL_error(
+                    state,
+                    c"begin refused: %s has no class or no capability registered".as_ptr(),
+                    s,
+                );
+                unreachable!("luaL_error does not return")
+            }
             pending.to = None;
             pending
                 .encoder
@@ -1289,7 +1303,9 @@ mod put {
     /// opened: the generator only addresses what the schema marks, so the
     /// call is hand-written Lua, and an error at the call site is what tells
     /// its author. A record silently reaching one consumer instead of all of
-    /// them would present as missing data at every other. ADR 0017.
+    /// them would present as missing data at every other. ADR 0017. A reply
+    /// with no class or no capability registered is refused the way `begin`
+    /// refuses one; ADR 0023.
     unsafe extern "C" fn begin_to(state: *mut c_void) -> c_int {
         // SAFETY: a Lua call over the closure `install` built. Both
         // arguments are Lua's for the whole call, and the topic is a Lua
@@ -1312,6 +1328,16 @@ mod put {
                 lua::luaL_error(
                     state,
                     c"begin_to refused: %s is neither a reply nor an acknowledgement".as_ptr(),
+                    s,
+                );
+                unreachable!("luaL_error does not return")
+            }
+            // A reply is marked addressable by one table and given its
+            // class and capability by two others, and needs all three.
+            if !dcsbridge_broker::bridge().registered(topic) {
+                lua::luaL_error(
+                    state,
+                    c"begin_to refused: %s has no class or no capability registered".as_ptr(),
                     s,
                 );
                 unreachable!("luaL_error does not return")

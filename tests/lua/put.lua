@@ -28,6 +28,10 @@ local shim = open(path)
 -- configure comes first: nothing opens a record before it. configure.lua
 -- checks the refusal; here the call is what lets the puts run.
 shim.configure({ port = 0 })
+-- A begin needs a class and a capability registered for its topic;
+-- register.lua checks the calls, and here they let the records open.
+shim.classes({ ['dcsbridge.builtin.sim.UnitDestroyed'] = 'durable', t = 'lossy' })
+shim.caps({ ['dcsbridge.builtin.sim.UnitDestroyed'] = 'read', t = 'read' })
 for _, name in ipairs({
   'begin', 'begin_to', 'integer', 'double', 'string', 'boolean', 'message', 'end_message', 'commit',
 }) do
@@ -86,6 +90,19 @@ shim.integer(1, 1)
 shim.begin('t')
 queued('a record begun over another', shim.commit())
 
+-- A begin on a topic with no class or no capability registered is refused
+-- by name and leaves the record in progress as it was. A class alone is
+-- not enough: the capability is the value that must not fail open.
+shim.classes({ half = 'durable' })
+for _, topic in ipairs({ 'unregistered', 'half' }) do
+  shim.begin('t')
+  shim.integer(1, 1)
+  local err = raises('begin on ' .. topic, shim.begin, topic)
+  assert(err:find(topic, 1, true), 'the refusal does not name the topic: ' .. err)
+  assert(err:find('no class or no capability', 1, true), 'the wrong complaint: ' .. err)
+  queued('the record open before a refused begin', shim.commit())
+end
+
 -- Each state has its own record in progress.
 local second = open(path)
 shim.begin('t')
@@ -98,4 +115,5 @@ queued("the first table's record, after the second committed", shim.commit())
 print('ok  the nine put calls are on the table')
 print('ok  a record of every put queues, and so does an empty one')
 print('ok  a defect raises, a refused commit returns false, a begin discards')
+print('ok  a begin on a topic missing a class or a capability is refused by name')
 print('ok  two tables hold two records in progress')

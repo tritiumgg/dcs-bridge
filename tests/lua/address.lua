@@ -31,6 +31,11 @@ assert(type(shim.begin_to) == 'function', 'shim.begin_to is missing')
 
 local ack = 'dcsbridge.broker.CommandAck'
 local fanout = 'dcsbridge.builtin.sim.UnitDestroyed'
+local reply = 'dcsbridge.builtin.sim.FlagValue'
+-- The fan-out topic needs a class and a capability to open a record on;
+-- the acknowledgement is complete by name and needs nothing.
+shim.classes({ [fanout] = 'durable' })
+shim.caps({ [fanout] = 'read' })
 
 local function raises(what, f, ...)
   local ok, err = pcall(f, ...)
@@ -82,7 +87,20 @@ queued('a second acknowledgement', shim.commit())
 shim.begin(fanout)
 queued('a fan-out record after an addressed one', shim.commit())
 
+-- A registered reply is addressable, and still needs its class and its
+-- capability: marked alone it is refused for those, by name, and commits
+-- once both are registered.
+shim.replies({ reply })
+local partial = raises('begin_to on a reply with no class', shim.begin_to, 1, reply)
+assert(partial:find(reply, 1, true), 'the refusal does not name the topic: ' .. partial)
+assert(partial:find('no class or no capability', 1, true), 'the wrong complaint: ' .. partial)
+shim.classes({ [reply] = 'durable' })
+shim.caps({ [reply] = 'read' })
+shim.begin_to(1, reply)
+queued('a typed reply', shim.commit())
+
 print('ok  begin_to is on the table and the acknowledgement commits')
 print('ok  a fan-out topic is refused by name, with no record left open')
 print('ok  an id that the broker could not have handed out is an argument error')
 print('ok  an address does not outlive its record')
+print('ok  a registered reply commits once it has a class and a capability')

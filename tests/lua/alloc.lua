@@ -33,6 +33,8 @@ local shim = open(path)
 -- encoder is allocated by its first begin, which growth() runs before it
 -- counts, so that one allocation is outside every measurement below.
 shim.configure({ port = 0 })
+shim.classes({ ['dcsbridge.builtin.sim.UnitDestroyed'] = 'durable' })
+shim.caps({ ['dcsbridge.builtin.sim.UnitDestroyed'] = 'read' })
 local begin, integer, double, string_, boolean =
   shim.begin, shim.integer, shim.double, shim.string, shim.boolean
 local message, end_message, commit = shim.message, shim.end_message, shim.commit

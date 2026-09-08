@@ -80,7 +80,9 @@ assert(
 )
 assert(first.listening ~= '127.0.0.1:0', 'the answer carries the port asked for, not the one bound')
 
--- A record opens once configured, and queues.
+-- A record opens once configured and registered, and queues.
+shim.classes({ ['dcsbridge.builtin.sim.UnitDestroyed'] = 'durable' })
+shim.caps({ ['dcsbridge.builtin.sim.UnitDestroyed'] = 'read' })
 shim.begin('dcsbridge.builtin.sim.UnitDestroyed')
 assert(shim.commit() == true, 'a record after configure did not queue')
 
