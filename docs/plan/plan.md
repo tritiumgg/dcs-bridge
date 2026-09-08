@@ -268,30 +268,34 @@ commit inside one pull request:
 | tick | `shim.tick` publishing mission time on every call and stamping the heartbeat at most once per `heartbeat_interval_ms`, the throttle in the broker; `dcs_alive` under the running and the loading thresholds, the loading flag set by nothing until 6.5; `tests/lua/tick.lua`. About 300 lines. | SPEC §5.2 "`Pong` carries DCS liveness", SPEC §9.1's loading threshold |
 | epoch | `shim.epoch(id)` and `shim.epoch(nil)`; the encoder writes `epoch` and `mission_time` into the tail, absent outside an epoch; `tests/lua/epoch.lua`; the live steps. About 400 lines. | SPEC §5.2's `Envelope`, SPEC §9.4, ADR 0014 |
 
-**Task 2.16 lands as a sequence of two:**
+**Task 2.16 lands as one branch of two runs of commits.** The reply table
+registers through a call of its own, `shim.replies`, so the interface
+version moves; ADR 0023. A `begin` or `begin_to` on a topic missing a class
+or a capability is refused from this task on, so every harness script that
+opens a record registers its topic first:
 
-| Branch | What it holds | Reviewable against |
+| Run | What it holds | Reviewable against |
 |---|---|---|
-| `task/2.16-1-merge` | The registry's merge: additive over disjoint sets, idempotent on identical rows, refused whole on a conflict, a topic missing a class or a capability refused and counted in `partial_registration_total`. Unit tests over tables. About 300 lines. | SPEC §5.1 "`classes`, `routes` and `caps` are additive over disjoint topic sets" |
-| `task/2.16-2-shim-register` | The Lua `classes`, `routes`, `caps`, and the reply table beside them, as the call or the argument ADR 0017 left to this task, with the interface version moved if it is a call; `tests/lua/register.lua`; the live steps. About 350 lines. | SPEC §5.1's three calls, ADR 0017, and the done-when |
+| merge | The registry's merge, one table at a time: additive over disjoint sets, idempotent on identical rows, refused whole on a conflict naming the topic and both values; the reply set under the same rules; a topic missing a class or a capability refused at `begin` and counted in `partial_registration_total`, the acknowledgement complete by name. Unit tests over tables. About 350 lines. | SPEC §5.1 "`classes`, `routes` and `caps` are additive over disjoint topic sets" and "A topic missing a class or a capability is refused, not defaulted", ADR 0017 |
+| register | The Lua `classes`, `routes`, `caps` and `replies`, each answering the rows it added; the interface version at `4`; `begin` and `begin_to` refusing an unregistered topic by name; `tests/lua/register.lua` and the registrations the other scripts need; the live steps. About 400 lines. | SPEC §5.1's three calls, ADR 0017, ADR 0023, and the done-when |
 
-**Task 2.12 lands as a sequence of two:**
+**Task 2.12 lands as one branch of two runs of commits:**
 
-| Branch | What it holds | Reviewable against |
+| Run | What it holds | Reviewable against |
 |---|---|---|
-| `task/2.12-1-inbound-rings` | Two inbound rings, drop-newest, sized from configuration; the reader pushes to the one the route map names; the URL read ahead of the decode under its cap. Loopback tests. About 350 lines. | SPEC §5.2's route-map paragraph, SPEC §14.2 "Parse as little as possible" |
-| `task/2.12-2-poll` | The Lua `poll(target)` returning the connection id, the topic and the bytes; an unrouted topic dropped and counted; `tests/lua/poll.lua`; the live steps. About 300 lines. | SPEC §5.1's `poll`, and the done-when |
+| rings | Two inbound rings, drop-newest, sized from configuration; the reader pushes to the one the route map names; the URL read ahead of the decode under its cap. Loopback tests. About 350 lines. | SPEC §5.2's route-map paragraph, SPEC §14.2 "Parse as little as possible" |
+| poll | The Lua `poll(target)` returning the connection id, the topic and the bytes; an unrouted topic dropped and counted; `tests/lua/poll.lua`; the live steps. About 300 lines. | SPEC §5.1's `poll`, and the done-when |
 
 **Task 2.C4 lands as one branch**, about 250 lines: `send` authenticates,
 reads a record from a file or the command line, and sends it, which is how
 2.12 is checked.
 
-**Task 2.13 lands as a sequence of two:**
+**Task 2.13 lands as one branch of two runs of commits:**
 
-| Branch | What it holds | Reviewable against |
+| Run | What it holds | Reviewable against |
 |---|---|---|
-| `task/2.13-1-rejected` | The `Rejected` record answered from the reader with the four reasons, echoing the inbound `seq` and the topic; a header that does not parse drops the connection. Loopback tests. About 300 lines. | SPEC §5.2 "`Rejected` is the broker's refusal record" |
-| `task/2.13-2-rate-caps` | `inbound_records_per_sec` per connection and in total, `rejected_max_per_sec` and `busy_max_per_sec`, `rejections_suppressed_total`. Loopback tests that flood. About 300 lines. | SPEC §14.5, SPEC §13.1's three rate rows |
+| rejected | The `Rejected` record answered from the reader with the four reasons, echoing the inbound `seq` and the topic; a header that does not parse drops the connection. Loopback tests. About 300 lines. | SPEC §5.2 "`Rejected` is the broker's refusal record" |
+| rate caps | `inbound_records_per_sec` per connection and in total, `rejected_max_per_sec` and `busy_max_per_sec`, `rejections_suppressed_total`. Loopback tests that flood. About 300 lines. | SPEC §14.5, SPEC §13.1's three rate rows |
 
 **Task 2.14 lands as one branch**, about 300 lines: the writer thread holds
 each connection's capability set from its `Authenticated` control and passes a
