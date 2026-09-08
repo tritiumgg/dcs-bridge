@@ -264,7 +264,8 @@ mod tests {
     /// is what lets the fanned-out burst reach this socket. The handshake
     /// and the auth result are the first two frames it reads.
     fn client(addr: SocketAddr) -> TcpStream {
-        use dcsbridge_broker::state::{Capability, Token};
+        use dcsbridge_broker::registry::Capability;
+        use dcsbridge_broker::state::Token;
 
         dcsbridge_broker::bridge().set_tokens(vec![Token {
             id: "tail".into(),

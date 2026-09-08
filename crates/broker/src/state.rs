@@ -6,8 +6,8 @@
 //! from different states, and a per-state map would leave each registrar blind
 //! to what the other had done.
 //!
-//! `Bridge` is where everything process-global lives. The three maps are here,
-//! and the outbound path, the writer thread over the commit ring and the
+//! `Bridge` is where everything process-global lives. The registration maps
+//! of [`crate::registry`] are here, and the outbound path, the writer thread over the commit ring and the
 //! listener that fans it out, joins them once [`Bridge::start_outbound`] is
 //! called. The inbound rings and the reader thread arrive as they are built.
 //! ADR 0007.
@@ -17,7 +17,7 @@
 //! waited on: `try_lock`, with contention refused and counted, because a
 //! second thread committing is a defect rather than a case. ADR 0014.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::fmt;
 use std::io;
 use std::net::{SocketAddr, ToSocketAddrs};
@@ -32,118 +32,8 @@ use crate::encode::Stamp;
 use crate::fanout::{Commit, ConnectionId, Writer};
 use crate::handshake;
 use crate::inbound::{Answers, AuthError, Limits, Liveness, Session};
+use crate::registry::{Capability, Registry};
 use crate::transport::{Listener, Record};
-
-/// A topic: the fully-qualified protobuf type name of a record's payload.
-///
-/// Package names partition the topic space, so the name is the identity and
-/// the broker needs no registry to tell two adopters apart.
-pub type Topic = String;
-
-/// The drop policy the broker applies to a record under pressure.
-///
-/// Mirrors `dcsbridge.broker.RecordClass` in `proto/dcsbridge/broker/broker.proto`, whose
-/// numbers cross the wire. The schema's `UNSPECIFIED` member has no counterpart
-/// here, because a topic with no class is refused rather than defaulted: there
-/// is nothing for the broker to hold in its place.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub enum RecordClass {
-    /// Survives pressure until the ring is full of it.
-    Durable = 1,
-    /// The first evicted when the ring runs out of room.
-    Lossy = 2,
-    /// Inbound, carrying something the receiving state is asked to do.
-    Command = 3,
-    /// Retained and replayed, and never evicted to make room.
-    Lifecycle = 4,
-}
-
-/// The Lua state a record routes to.
-///
-/// Mirrors `dcsbridge.broker.Target`. The schema's `UNSPECIFIED` member is resolved
-/// by the generator, which writes an unspecified target into the sim driver
-/// route set, so the broker is never handed one.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub enum Target {
-    /// Injected into the `"server"` state, and reloaded with the mission.
-    SimDriver = 1,
-    /// Loaded once at DCS start, and outlives every mission.
-    HookDriver = 2,
-}
-
-/// The permission a connection needs before the broker accepts a message.
-///
-/// Mirrors `dcsbridge.broker.Capability`. That enum is extensible and partitions its
-/// numbers — the bridge takes 1 to 49 — so a built-in set or an adopter adds
-/// members without touching these three.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub enum Capability {
-    /// Receive records.
-    Read = 1,
-    /// Send a command.
-    Command = 2,
-    /// Reload configuration.
-    Reload = 3,
-}
-
-/// The maps the two registrars share.
-///
-/// They cover different topic sets on purpose. `routes` carries inbound topics
-/// only, because routing is what an inbound record needs, while `classes` and
-/// `caps` carry every topic that crosses in either direction. So an
-/// outbound-only topic has a class and a capability and no route, and that is
-/// complete rather than missing something. `replies` is the topics a record
-/// may be addressed to one connection on: the typed replies the schema names
-/// in a request's `reply_to`, which the acknowledgement joins by name. ADR
-/// 0017.
-///
-/// Empty until a registrar fills it, and there is no way to fill it yet: the
-/// merge arrives with `shim.classes`, `shim.routes`, `shim.caps` and the
-/// reply table beside them.
-#[derive(Debug, Default)]
-pub struct Registry {
-    classes: HashMap<Topic, RecordClass>,
-    routes: HashMap<Topic, Target>,
-    caps: HashMap<Topic, Capability>,
-    replies: HashSet<Topic>,
-}
-
-impl Registry {
-    /// Whether a record on `topic` may be addressed to one connection.
-    ///
-    /// True for the acknowledgement and for a registered typed reply, and
-    /// for nothing else: everything else fans out, and a record that reached
-    /// one consumer instead of all of them would present as missing data at
-    /// every other, which is why the broker refuses rather than trusts.
-    pub fn is_addressable(&self, topic: &[u8]) -> bool {
-        // The broker holds no schema, so which topics are replies reaches
-        // it by registration, and the registration does not exist yet. The
-        // acknowledgement is the bridge's own message, so the broker knows
-        // it by name. ADR 0017.
-        //
-        // A topic is a type name, so a topic that is not UTF-8 is registered
-        // nowhere and the lookup can say so without a copy.
-        topic == dcsbridge_topic::COMMAND_ACK.as_bytes()
-            || std::str::from_utf8(topic).is_ok_and(|topic| self.replies.contains(topic))
-    }
-}
-
-impl Registry {
-    /// Every registered topic's drop policy, inbound and outbound.
-    pub fn classes(&self) -> &HashMap<Topic, RecordClass> {
-        &self.classes
-    }
-
-    /// Every registered inbound topic's destination state.
-    pub fn routes(&self) -> &HashMap<Topic, Target> {
-        &self.routes
-    }
-
-    /// Every registered topic's required capability, inbound and outbound.
-    pub fn caps(&self) -> &HashMap<Topic, Capability> {
-        &self.caps
-    }
-}
 
 /// What the DCS process shares between its two Lua states.
 ///
@@ -1003,6 +893,7 @@ impl Bridge {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::registry::{RecordClass, Target};
 
     /// The whole point of the process-global rule: two registrars in two Lua
     /// states have to see each other's entries, which they only can through one

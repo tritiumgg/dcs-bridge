@@ -435,9 +435,9 @@ mod tests {
                 Ok(Session {
                     token_id: "stub".into(),
                     caps: [
-                        crate::state::Capability::Read,
-                        crate::state::Capability::Command,
-                        crate::state::Capability::Reload,
+                        crate::registry::Capability::Read,
+                        crate::registry::Capability::Command,
+                        crate::registry::Capability::Reload,
                     ]
                     .into_iter()
                     .collect(),
@@ -487,7 +487,7 @@ mod tests {
                 session
             } else {
                 Session {
-                    caps: [crate::state::Capability::Read].into_iter().collect(),
+                    caps: [crate::registry::Capability::Read].into_iter().collect(),
                     ..session
                 }
             })

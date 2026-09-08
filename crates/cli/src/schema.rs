@@ -259,7 +259,7 @@ mod tests {
                 if secret == b"schema-secret" {
                     Ok(Session {
                         token_id: "schema".into(),
-                        caps: [dcsbridge_broker::state::Capability::Read]
+                        caps: [dcsbridge_broker::registry::Capability::Read]
                             .into_iter()
                             .collect(),
                     })

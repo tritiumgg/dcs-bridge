@@ -247,7 +247,8 @@ mod configure {
     use std::collections::HashSet;
 
     use dcsbridge_broker::config::{Applied, Value};
-    use dcsbridge_broker::state::{Capability, Token};
+    use dcsbridge_broker::registry::Capability;
+    use dcsbridge_broker::state::Token;
 
     use crate::lua;
 

@@ -49,7 +49,7 @@ use prost::Message;
 use crate::config::Config;
 use crate::encode::Encoder;
 use crate::fanout::{ConnectionId, Connections};
-use crate::state::Capability;
+use crate::registry::Capability;
 use crate::transport::Record;
 
 /// The live keys the reader thread decides by, as of one moment.

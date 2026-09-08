@@ -20,6 +20,8 @@ pub mod handshake;
 #[cfg(not(loom))]
 pub mod inbound;
 #[cfg(not(loom))]
+pub mod registry;
+#[cfg(not(loom))]
 pub mod state;
 #[cfg(not(loom))]
 pub mod transport;

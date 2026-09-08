@@ -480,7 +480,7 @@ fn is_private(addr: IpAddr) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::state::Capability;
+    use crate::registry::Capability;
 
     fn n(x: f64) -> Value {
         Value::Number(x)
