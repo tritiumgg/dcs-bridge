@@ -609,35 +609,46 @@ mod configure {
             let mut caps = HashSet::new();
             for n in 1..=count {
                 lua::lua_rawgeti(state, -1, n as c_int);
-                let cap = match lua::lua_type(state, -1) {
-                    lua::TSTRING => {
-                        let mut len = 0;
-                        let s = lua::lua_tolstring(state, -1, &mut len);
-                        match core::slice::from_raw_parts(s.cast::<u8>(), len) {
-                            b"read" => Some(Capability::Read),
-                            b"command" => Some(Capability::Command),
-                            b"reload" => Some(Capability::Reload),
-                            _ => None,
-                        }
-                    }
-                    lua::TNUMBER => {
-                        let n = lua::lua_tonumber(state, -1);
-                        if n == 1.0 {
-                            Some(Capability::Read)
-                        } else if n == 2.0 {
-                            Some(Capability::Command)
-                        } else if n == 3.0 {
-                            Some(Capability::Reload)
-                        } else {
-                            None
-                        }
-                    }
-                    _ => None,
-                };
+                let cap = crate::member(state, -1);
                 lua::lua_settop(state, -2);
                 caps.insert(cap?);
             }
             Some(caps)
+        }
+    }
+}
+
+/// The member of a mirrored enum that the value at `index` names, by its
+/// lowercase name or the schema's number, or nothing for any other value.
+///
+/// # Safety
+///
+/// `state` is live and `index` is on its stack. Nothing is pushed.
+#[cfg(any(unix, feature = "dcs-lua"))]
+unsafe fn member<V: dcsbridge_broker::registry::Member>(
+    state: *mut core::ffi::c_void,
+    index: core::ffi::c_int,
+) -> Option<V> {
+    // SAFETY: the caller's contract; the bytes read are Lua's for the span
+    // they are read in, and a number is copied out.
+    unsafe {
+        match lua::lua_type(state, index) {
+            lua::TSTRING => {
+                let mut len = 0;
+                let s = lua::lua_tolstring(state, index, &mut len);
+                V::from_name(core::slice::from_raw_parts(s.cast::<u8>(), len))
+            }
+            lua::TNUMBER => {
+                let n = lua::lua_tonumber(state, index);
+                // A fraction or a number past the enum's range is no member,
+                // and the cast would round the first and saturate the second
+                // onto one.
+                if n.fract() != 0.0 || !(0.0..=f64::from(u32::MAX)).contains(&n) {
+                    return None;
+                }
+                V::from_number(n as u32)
+            }
+            _ => None,
         }
     }
 }
