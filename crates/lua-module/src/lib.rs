@@ -170,7 +170,7 @@ mod lua {
 /// The hook driver compares it at its first `configure` and disables itself
 /// on a mismatch, so it moves when a call is added, removed or changes
 /// signature, and for nothing else. It is an opaque equality, not an order.
-pub const INTERFACE_VERSION: &str = "3";
+pub const INTERFACE_VERSION: &str = "4";
 
 /// Open the bridge in `state`, leaving one table on the stack.
 ///
@@ -181,7 +181,7 @@ pub const INTERFACE_VERSION: &str = "3";
 ///
 /// The table carries the broker version, the interface version, `opens`, the
 /// number of times the module has been opened in this process, `configure`,
-/// `schema` and the put calls. The first table reads 1 and the second reads
+/// `schema`, the registration calls and the put calls. The first table reads 1 and the second reads
 /// 2, which is how two tables are shown to sit over one bridge.
 ///
 /// An open allocates nothing and listens on nothing. The first
@@ -204,7 +204,11 @@ pub unsafe extern "C" fn luaopen_dcsbridge(state: *mut core::ffi::c_void) -> cor
     // value back off. Lua copies the bytes it is given, so nothing this crate
     // allocated is left for DCS's C runtime to free.
     unsafe {
-        lua::lua_createtable(state, 0, 7 + put::CALLS.len() as core::ffi::c_int);
+        lua::lua_createtable(
+            state,
+            0,
+            7 + (put::CALLS.len() + register::CALLS.len()) as core::ffi::c_int,
+        );
         lua::lua_pushlstring(
             state,
             version.as_ptr().cast::<core::ffi::c_char>(),
@@ -228,6 +232,7 @@ pub unsafe extern "C" fn luaopen_dcsbridge(state: *mut core::ffi::c_void) -> cor
         schema::install(state);
         tick::install(state);
         epoch::install(state);
+        register::install(state);
     }
 
     1
@@ -823,6 +828,234 @@ mod epoch {
             dcsbridge_broker::bridge().set_epoch(epoch);
         }
         0
+    }
+}
+
+/// The registration calls: `shim.classes(table)`, `shim.routes(table)`,
+/// `shim.caps(table)` and `shim.replies(list)`, from the generated file of
+/// either driver.
+///
+/// Each table maps a topic to a member of the enum its call is named for,
+/// spelled by lowercase name or by the schema's number: a class is
+/// `'durable'`, `'lossy'`, `'command'` or `'lifecycle'`, a route
+/// `'sim_driver'` or `'hook_driver'`, a capability `'read'`, `'command'`
+/// or `'reload'`. `replies` takes a list of topics. Each call merges into
+/// what the other registrar left and answers the number of rows it added,
+/// so a reload's re-registration answers zero and succeeds; a row naming a
+/// registered topic with a different value raises, naming the topic and
+/// both values, and applies none of the call. A key that is not a string
+/// or a value that names no member raises the same way, before the broker
+/// is asked. `replies` is its own call rather than an argument of another:
+/// ADR 0023.
+///
+/// The calls only store, so none is refused before the first `configure`.
+#[cfg(any(unix, feature = "dcs-lua"))]
+mod register {
+    use core::ffi::{CStr, c_int, c_void};
+
+    use dcsbridge_broker::registry::{Capability, Member, RecordClass, Target, Topic};
+
+    use crate::lua;
+
+    /// The four calls, by the name each goes on the table under.
+    pub const CALLS: [(&CStr, lua::CFunction); 4] = [
+        (c"classes", classes),
+        (c"routes", routes),
+        (c"caps", caps),
+        (c"replies", replies),
+    ];
+
+    /// Put the four calls on the table at the top of the stack.
+    ///
+    /// # Safety
+    ///
+    /// `state` is live, the table is at -1, and one stack slot is free.
+    pub unsafe fn install(state: *mut c_void) {
+        // SAFETY: each push and setfield pair, leaving the table on top.
+        unsafe {
+            for (name, call) in CALLS {
+                lua::lua_pushcclosure(state, call, 0);
+                lua::lua_setfield(state, -2, name.as_ptr());
+            }
+        }
+    }
+
+    unsafe extern "C" fn classes(state: *mut c_void) -> c_int {
+        // SAFETY: a Lua call.
+        unsafe {
+            table::<RecordClass>(state, "classes", |rows| {
+                dcsbridge_broker::bridge().register_classes(rows)
+            })
+        }
+    }
+
+    unsafe extern "C" fn routes(state: *mut c_void) -> c_int {
+        // SAFETY: a Lua call.
+        unsafe {
+            table::<Target>(state, "routes", |rows| {
+                dcsbridge_broker::bridge().register_routes(rows)
+            })
+        }
+    }
+
+    unsafe extern "C" fn caps(state: *mut c_void) -> c_int {
+        // SAFETY: a Lua call.
+        unsafe {
+            table::<Capability>(state, "caps", |rows| {
+                dcsbridge_broker::bridge().register_caps(rows)
+            })
+        }
+    }
+
+    /// `shim.replies(list)`: the topics a record may be addressed to one
+    /// connection on. A set has no value to conflict on, so the broker
+    /// never refuses it; a list that is not one of strings raises here.
+    unsafe extern "C" fn replies(state: *mut c_void) -> c_int {
+        // SAFETY: a Lua call. The list is read whole before the broker
+        // sees any of it, and the raise happens with the read dropped.
+        unsafe {
+            lua::luaL_checktype(state, 1, lua::TTABLE);
+            let topics = match read_list(state) {
+                Ok(topics) => topics,
+                Err(why) => raise(state, "replies", why),
+            };
+            let added = dcsbridge_broker::bridge().register_replies(topics);
+            lua::lua_pushinteger(state, added as isize);
+        }
+        1
+    }
+
+    /// One registration call over a table of `V`: read the whole table,
+    /// hand it to `register`, and answer the rows added or raise.
+    ///
+    /// # Safety
+    ///
+    /// `state` is inside a Lua call whose first argument is the table, with
+    /// four stack slots free, and nothing on the Rust stack that needs
+    /// dropping when this raises.
+    unsafe fn table<V: Member>(
+        state: *mut c_void,
+        call: &'static str,
+        register: impl FnOnce(Vec<(Topic, V)>) -> Result<usize, dcsbridge_broker::registry::Conflict>,
+    ) -> c_int {
+        // SAFETY: the caller's contract. The table is read whole before the
+        // broker sees any of it, so a bad row leaves the maps as they were,
+        // and every raise happens with the read consumed or dropped.
+        unsafe {
+            lua::luaL_checktype(state, 1, lua::TTABLE);
+            let rows = match read_rows::<V>(state) {
+                Ok(rows) => rows,
+                Err(why) => raise(state, call, why),
+            };
+            match register(rows) {
+                Ok(added) => lua::lua_pushinteger(state, added as isize),
+                Err(conflict) => {
+                    let why = conflict.to_string();
+                    drop(conflict);
+                    raise(state, call, why)
+                }
+            }
+        }
+        1
+    }
+
+    /// Raise `why` as `<call> refused: <why>`. Never returns.
+    ///
+    /// Every string is dropped by hand before the jump, which runs no Rust
+    /// drop of its own.
+    unsafe fn raise(state: *mut c_void, call: &str, why: String) -> ! {
+        let message = format!("{call} refused: {why}");
+        drop(why);
+        // SAFETY: Lua copies the bytes it is given, and the raise takes the
+        // copy off the top of the stack.
+        unsafe {
+            lua::lua_pushlstring(state, message.as_ptr().cast(), message.len());
+            drop(message);
+            lua::lua_error(state);
+        }
+        unreachable!("lua_error does not return")
+    }
+
+    /// Read the table at argument 1 as topic-to-member rows, or say which
+    /// row is not one. Leaves the stack as found.
+    ///
+    /// # Safety
+    ///
+    /// `state` is live, argument 1 is a table, and three stack slots are
+    /// free.
+    unsafe fn read_rows<V: Member>(state: *mut c_void) -> Result<Vec<(Topic, V)>, String> {
+        // SAFETY: each `lua_next` pops the key it was given and pushes a
+        // pair, both popped before the next call and on the way out of a
+        // refusal. The key is checked to be a string before it is read as
+        // one, because reading a number key as a string converts it in
+        // place and breaks the walk.
+        unsafe {
+            let mut rows = Vec::new();
+            lua::lua_pushnil(state);
+            while lua::lua_next(state, 1) != 0 {
+                if lua::lua_type(state, -2) != lua::TSTRING {
+                    lua::lua_settop(state, -3);
+                    return Err("a key is not a topic".into());
+                }
+                let mut len = 0;
+                let s = lua::lua_tolstring(state, -2, &mut len);
+                let topic = String::from_utf8_lossy(core::slice::from_raw_parts(s.cast(), len))
+                    .into_owned();
+                let value = crate::member::<V>(state, -1);
+                lua::lua_settop(state, -2);
+                match value {
+                    Some(value) => rows.push((topic, value)),
+                    None => {
+                        lua::lua_settop(state, -2);
+                        return Err(format!("`{topic}` names no {}", names::<V>()));
+                    }
+                }
+            }
+            Ok(rows)
+        }
+    }
+
+    /// Read the list at argument 1 as topics, or say which entry is not
+    /// one. Leaves the stack as found.
+    ///
+    /// # Safety
+    ///
+    /// `state` is live, argument 1 is a table, and three stack slots are
+    /// free.
+    unsafe fn read_list(state: *mut c_void) -> Result<Vec<Topic>, String> {
+        // SAFETY: each `lua_next` pops the key it was given and pushes a
+        // pair; the value is popped before the next call and both on the
+        // way out of a refusal.
+        unsafe {
+            let mut topics = Vec::new();
+            lua::lua_pushnil(state);
+            while lua::lua_next(state, 1) != 0 {
+                let entry = topics.len() + 1;
+                if lua::lua_type(state, -2) != lua::TNUMBER {
+                    lua::lua_settop(state, -3);
+                    return Err("a key is not a position: the list is a table".into());
+                }
+                if lua::lua_type(state, -1) != lua::TSTRING {
+                    lua::lua_settop(state, -3);
+                    return Err(format!("entry {entry} is not a topic"));
+                }
+                let mut len = 0;
+                let s = lua::lua_tolstring(state, -1, &mut len);
+                topics.push(
+                    String::from_utf8_lossy(core::slice::from_raw_parts(s.cast(), len))
+                        .into_owned(),
+                );
+                lua::lua_settop(state, -2);
+            }
+            Ok(topics)
+        }
+    }
+
+    /// The members of `V`, spelled the way a table may spell them, for a
+    /// refusal.
+    fn names<V: Member>() -> String {
+        let names: Vec<&str> = V::ALL.iter().map(|m| m.name()).collect();
+        format!("member: one of {}", names.join(", "))
     }
 }
 
