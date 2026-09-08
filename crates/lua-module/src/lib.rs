@@ -152,7 +152,8 @@ mod lua {
 
         /// Raise the value at the top of the stack as an error. Never
         /// returns. Unlike `luaL_error` it formats nothing, so a message
-        /// built on the Rust side is pushed, dropped, and then raised.
+        /// built on the Rust side is pushed and dropped by `push_error`,
+        /// and then raised from a frame that owns nothing.
         pub unsafe fn lua_error(state: *mut c_void) -> c_int;
 
         /// Push `n`.
@@ -294,47 +295,52 @@ mod configure {
     /// file }` for each restart-tier key whose file value differs from the
     /// one in force, with `pending_restart` its length.
     unsafe extern "C" fn configure(state: *mut c_void) -> c_int {
-        // SAFETY: a Lua call. The argument is a table for the whole call,
-        // and every value pushed while reading it is popped before the read
-        // returns, so a raise jumps past nothing on the stack that is this
-        // crate's, and past nothing on the heap: the table read is consumed
-        // or dropped before the raise, and the message is Lua's by then.
+        // SAFETY: a Lua call. This frame owns nothing, which is what lets it
+        // raise; see `push_error`.
+        unsafe {
+            if apply(state) {
+                return 1;
+            }
+            lua::lua_error(state);
+        }
+        unreachable!("lua_error does not return")
+    }
+
+    /// Read the table, apply it, and push the answer, or push the refusal.
+    /// Returns whether the answer was pushed.
+    ///
+    /// # Safety
+    ///
+    /// `state` is inside a Lua call whose first argument is at 1, with
+    /// five stack slots free.
+    // Never inlined into the entry: the entry raises, and a raise crosses
+    // this frame only if this frame is not there. See `push_error`.
+    #[inline(never)]
+    unsafe fn apply(state: *mut c_void) -> bool {
+        // SAFETY: the argument is a table for the whole call, and every
+        // value pushed while reading it is popped before the read returns.
         unsafe {
             lua::luaL_checktype(state, 1, lua::TTABLE);
             let table = match read_table(state) {
                 Ok(table) => table,
-                Err(why) => raise(state, why),
+                Err(why) => return refuse(state, why),
             };
             match dcsbridge_broker::bridge().configure(table) {
-                Ok(applied) => push_applied(state, &applied),
-                Err(error) => {
-                    // Rendered and dropped before the jump: the error owns
-                    // a string the jump would otherwise leak.
-                    let why = error.to_string();
-                    drop(error);
-                    raise(state, why)
+                Ok(applied) => {
+                    push_applied(state, &applied);
+                    true
                 }
+                Err(error) => refuse(state, error.to_string()),
             }
         }
-        1
     }
 
-    /// Raise `message` as a Lua error. Never returns.
-    ///
-    /// The message is pushed and dropped before the raise, so the jump
-    /// runs no Rust drop it needed to.
-    unsafe fn raise(state: *mut c_void, why: String) -> ! {
-        let message = format!("configure refused: {why}");
-        drop(why);
-        // SAFETY: Lua copies the bytes it is given, and the raise takes
-        // the copy off the top of the stack. Both strings are dropped by
-        // hand before the jump, which runs no drop of its own.
-        unsafe {
-            lua::lua_pushlstring(state, message.as_ptr().cast(), message.len());
-            drop(message);
-            lua::lua_error(state);
-        }
-        unreachable!("lua_error does not return")
+    /// Push `configure refused: <why>` for the caller to raise. Always
+    /// false.
+    unsafe fn refuse(state: *mut c_void, why: String) -> bool {
+        // SAFETY: the caller's contract.
+        unsafe { crate::push_error(state, format!("configure refused: {why}")) }
+        false
     }
 
     /// Read the flat table at argument 1 into its keys and values, or say
@@ -623,6 +629,39 @@ mod configure {
     }
 }
 
+/// Push `message` as the value a Lua error will carry, and drop it. The
+/// caller raises.
+///
+/// A raise is a `longjmp`, and on x64 Windows a `longjmp` is an unwind:
+/// it visits every frame it crosses and consults the exception tables of
+/// any frame that has them. What DCS's process does when the frame it
+/// jumps out of is a Rust frame full of vectors, strings and destructor
+/// funclets is exit, silently, with no report; the tables at the raise
+/// name nothing to destroy in that frame, so the exact step is not
+/// pinned down. What is pinned down is the shape that survives: a frame
+/// that owns nothing at all. Every `extern "C"` entry here that raises is
+/// shaped that way: the work, the message and every drop happen in a
+/// callee that returns, and the entry then calls `lua_error` holding
+/// nothing.
+///
+/// The callee is `#[inline(never)]`, because the shape is the source's and
+/// the optimizer is free to undo it. Inlined into the entry, the callee's
+/// vectors and strings become the entry's, and that is what took DCS down
+/// at the first refusal raised live from a registration call, while
+/// `configure`, whose callee happened to stay a call, survived. The
+/// release IR is the check: every raising entry is a few lines, calls its
+/// callee, and frees nothing.
+///
+/// # Safety
+///
+/// `state` is live and one stack slot is free.
+#[cfg(any(unix, feature = "dcs-lua"))]
+unsafe fn push_error(state: *mut core::ffi::c_void, message: String) {
+    // SAFETY: Lua copies the bytes it is given.
+    unsafe { lua::lua_pushlstring(state, message.as_ptr().cast(), message.len()) }
+    drop(message);
+}
+
 /// The member of a mirrored enum that the value at `index` names, by its
 /// lowercase name or the schema's number, or nothing for any other value.
 ///
@@ -690,11 +729,30 @@ mod schema {
     /// in hex. Raises `schema refused: ...` before the first `configure`,
     /// on empty bytes, and once a schema is held.
     unsafe extern "C" fn schema(state: *mut c_void) -> c_int {
-        // SAFETY: a Lua call. The argument is checked to be a string, so
-        // the pointer and length name Lua's own bytes for the whole call,
-        // and the broker copies them before anything is pushed. The one
-        // Rust allocation before a raise is the message, which the raise
-        // drops by hand.
+        // SAFETY: a Lua call. This frame owns nothing, which is what lets it
+        // raise; see `push_error`.
+        unsafe {
+            if hand_over(state) {
+                return 1;
+            }
+            lua::lua_error(state);
+        }
+        unreachable!("lua_error does not return")
+    }
+
+    /// Hand the bytes over and push the hash, or push the refusal. Returns
+    /// whether the hash was pushed.
+    ///
+    /// # Safety
+    ///
+    /// `state` is inside a Lua call whose first argument is at 1, with one
+    /// stack slot free.
+    // Never inlined into the entry; see `apply` in `configure`.
+    #[inline(never)]
+    unsafe fn hand_over(state: *mut c_void) -> bool {
+        // SAFETY: the argument is checked to be a string, so the pointer
+        // and length name Lua's own bytes for the whole call, and the
+        // broker copies them before anything is pushed.
         unsafe {
             // checklstring alone would take a number as its decimal
             // string, and a number is a call that meant something else.
@@ -707,17 +765,14 @@ mod schema {
                     let hex: String = sha256.iter().map(|byte| format!("{byte:02x}")).collect();
                     lua::lua_pushlstring(state, hex.as_ptr().cast(), hex.len());
                     drop(hex);
+                    true
                 }
                 Err(error) => {
-                    let message = format!("schema refused: {error}");
-                    lua::lua_pushlstring(state, message.as_ptr().cast(), message.len());
-                    drop(message);
-                    lua::lua_error(state);
-                    unreachable!("lua_error does not return")
+                    crate::push_error(state, format!("schema refused: {error}"));
+                    false
                 }
             }
         }
-        1
     }
 }
 
@@ -880,100 +935,101 @@ mod register {
         }
     }
 
-    unsafe extern "C" fn classes(state: *mut c_void) -> c_int {
-        // SAFETY: a Lua call.
-        unsafe {
-            table::<RecordClass>(state, "classes", |rows| {
-                dcsbridge_broker::bridge().register_classes(rows)
-            })
-        }
+    /// The entry every call shares: do the work in a callee that returns,
+    /// then raise from a frame that owns nothing. See `push_error`.
+    macro_rules! entry {
+        ($name:ident, $work:expr) => {
+            unsafe extern "C" fn $name(state: *mut c_void) -> c_int {
+                // SAFETY: a Lua call. This frame owns nothing.
+                unsafe {
+                    if $work(state) {
+                        return 1;
+                    }
+                    lua::lua_error(state);
+                }
+                unreachable!("lua_error does not return")
+            }
+        };
     }
 
-    unsafe extern "C" fn routes(state: *mut c_void) -> c_int {
-        // SAFETY: a Lua call.
-        unsafe {
-            table::<Target>(state, "routes", |rows| {
-                dcsbridge_broker::bridge().register_routes(rows)
-            })
-        }
-    }
-
-    unsafe extern "C" fn caps(state: *mut c_void) -> c_int {
-        // SAFETY: a Lua call.
-        unsafe {
-            table::<Capability>(state, "caps", |rows| {
-                dcsbridge_broker::bridge().register_caps(rows)
-            })
-        }
-    }
+    entry!(classes, |state| table::<RecordClass>(
+        state,
+        "classes",
+        |rows| { dcsbridge_broker::bridge().register_classes(rows) }
+    ));
+    entry!(routes, |state| table::<Target>(state, "routes", |rows| {
+        dcsbridge_broker::bridge().register_routes(rows)
+    }));
+    entry!(caps, |state| table::<Capability>(state, "caps", |rows| {
+        dcsbridge_broker::bridge().register_caps(rows)
+    }));
+    entry!(replies, list);
 
     /// `shim.replies(list)`: the topics a record may be addressed to one
     /// connection on. A set has no value to conflict on, so the broker
-    /// never refuses it; a list that is not one of strings raises here.
-    unsafe extern "C" fn replies(state: *mut c_void) -> c_int {
-        // SAFETY: a Lua call. The list is read whole before the broker
-        // sees any of it, and the raise happens with the read dropped.
+    /// never refuses it; a list that is not one of strings is refused
+    /// here. Returns whether the count was pushed.
+    ///
+    /// # Safety
+    ///
+    /// `state` is inside a Lua call whose first argument is at 1, with
+    /// three stack slots free.
+    // Never inlined into the entry; see `apply` in `configure`.
+    #[inline(never)]
+    unsafe fn list(state: *mut c_void) -> bool {
+        // SAFETY: the list is read whole before the broker sees any of it.
         unsafe {
             lua::luaL_checktype(state, 1, lua::TTABLE);
             let topics = match read_list(state) {
                 Ok(topics) => topics,
-                Err(why) => raise(state, "replies", why),
+                Err(why) => return refuse(state, "replies", why),
             };
             let added = dcsbridge_broker::bridge().register_replies(topics);
             lua::lua_pushinteger(state, added as isize);
         }
-        1
+        true
     }
 
     /// One registration call over a table of `V`: read the whole table,
-    /// hand it to `register`, and answer the rows added or raise.
+    /// hand it to `register`, and push the rows added or the refusal.
+    /// Returns whether the count was pushed.
     ///
     /// # Safety
     ///
-    /// `state` is inside a Lua call whose first argument is the table, with
-    /// four stack slots free, and nothing on the Rust stack that needs
-    /// dropping when this raises.
+    /// `state` is inside a Lua call whose first argument is at 1, with
+    /// three stack slots free.
+    // Never inlined into the entry; see `apply` in `configure`.
+    #[inline(never)]
     unsafe fn table<V: Member>(
         state: *mut c_void,
         call: &'static str,
         register: impl FnOnce(Vec<(Topic, V)>) -> Result<usize, dcsbridge_broker::registry::Conflict>,
-    ) -> c_int {
+    ) -> bool {
         // SAFETY: the caller's contract. The table is read whole before the
-        // broker sees any of it, so a bad row leaves the maps as they were,
-        // and every raise happens with the read consumed or dropped.
+        // broker sees any of it, so a bad row leaves the maps as they were.
         unsafe {
             lua::luaL_checktype(state, 1, lua::TTABLE);
             let rows = match read_rows::<V>(state) {
                 Ok(rows) => rows,
-                Err(why) => raise(state, call, why),
+                Err(why) => return refuse(state, call, why),
             };
             match register(rows) {
-                Ok(added) => lua::lua_pushinteger(state, added as isize),
-                Err(conflict) => {
-                    let why = conflict.to_string();
-                    drop(conflict);
-                    raise(state, call, why)
+                Ok(added) => {
+                    lua::lua_pushinteger(state, added as isize);
+                    true
                 }
+                Err(conflict) => refuse(state, call, conflict.to_string()),
             }
         }
-        1
     }
 
-    /// Raise `why` as `<call> refused: <why>`. Never returns.
-    ///
-    /// Every string is dropped by hand before the jump, which runs no Rust
-    /// drop of its own.
-    unsafe fn raise(state: *mut c_void, call: &str, why: String) -> ! {
-        let message = format!("{call} refused: {why}");
-        drop(why);
-        // SAFETY: Lua copies the bytes it is given, and the raise takes the
-        // copy off the top of the stack.
+    /// Push `<call> refused: <why>` for the entry to raise. Always false.
+    unsafe fn refuse(state: *mut c_void, call: &str, why: String) -> bool {
+        // SAFETY: the caller's contract.
         unsafe {
-            lua::lua_pushlstring(state, message.as_ptr().cast(), message.len());
-            drop(message);
-            lua::lua_error(state);
+            crate::push_error(state, format!("{call} refused: {why}"));
         }
-        unreachable!("lua_error does not return")
+        false
     }
 
     /// Read the table at argument 1 as topic-to-member rows, or say which
