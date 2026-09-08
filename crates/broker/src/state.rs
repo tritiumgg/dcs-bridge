@@ -7,9 +7,9 @@
 //! to what the other had done.
 //!
 //! `Bridge` is where everything process-global lives. The registration maps
-//! of [`crate::registry`] are here, and the outbound path, the writer thread over the commit ring and the
-//! listener that fans it out, joins them once [`Bridge::start_outbound`] is
-//! called. The inbound rings and the reader thread arrive as they are built.
+//! of [`crate::registry`] are here, and the outbound path, the writer thread
+//! over the commit ring and the listener that fans it out, joins them once
+//! [`Bridge::start_outbound`] is called. The inbound rings and the reader thread arrive as they are built.
 //! ADR 0007.
 //!
 //! Both DCS states commit records, and they run on one thread, so the commit
@@ -23,7 +23,8 @@ use std::io;
 use std::net::{SocketAddr, ToSocketAddrs};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{
-    Arc, Mutex, MutexGuard, OnceLock, PoisonError, RwLock, RwLockReadGuard, TryLockError,
+    Arc, Mutex, MutexGuard, OnceLock, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard,
+    TryLockError,
 };
 use std::time::Instant;
 
@@ -32,7 +33,7 @@ use crate::encode::Stamp;
 use crate::fanout::{Commit, ConnectionId, Writer};
 use crate::handshake;
 use crate::inbound::{Answers, AuthError, Limits, Liveness, Session};
-use crate::registry::{Capability, Registry};
+use crate::registry::{Capability, Conflict, RecordClass, Registry, Target, Topic};
 use crate::transport::{Listener, Record};
 
 /// What the DCS process shares between its two Lua states.
@@ -51,6 +52,9 @@ pub struct Bridge {
     /// Records refused at `begin_to` because their topic is neither a reply
     /// nor the acknowledgement.
     misaddressed: AtomicU64,
+    /// Records refused at `begin` or `begin_to` because their topic has no
+    /// class or no capability registered. `partial_registration_total`.
+    partial_registration: AtomicU64,
     /// Names this process in every handshake, so a consumer can tell a
     /// restarted broker from the one it was talking to.
     instance_id: u64,
@@ -377,6 +381,7 @@ impl Bridge {
             outbound: OnceLock::new(),
             starting: Mutex::new(()),
             misaddressed: AtomicU64::new(0),
+            partial_registration: AtomicU64::new(0),
             instance_id,
             started: Instant::now(),
             heartbeat: AtomicU64::new(0),
@@ -888,12 +893,76 @@ impl Bridge {
     pub fn misaddressed(&self) -> u64 {
         self.misaddressed.load(Ordering::Relaxed)
     }
+
+    /// Whether `topic` has a class and a capability registered, counting a
+    /// refusal in `partial_registration_total`.
+    ///
+    /// Asked at every `begin` and `begin_to`, and answered the way
+    /// [`Bridge::addressable`] is: a plain boolean with no lock held, so the
+    /// raise the Lua side makes of `false` jumps past no guard.
+    pub fn registered(&self, topic: &[u8]) -> bool {
+        let complete = self.registry().is_complete(topic);
+        if !complete {
+            self.partial_registration.fetch_add(1, Ordering::Relaxed);
+        }
+        complete
+    }
+
+    /// How many records were refused at `begin` or `begin_to` for naming a
+    /// topic missing a class or a capability. A topic in that state comes
+    /// from generated files of two different runs, and `doctor` names each
+    /// such topic.
+    pub fn partial_registration(&self) -> u64 {
+        self.partial_registration.load(Ordering::Relaxed)
+    }
+
+    /// Write to the registration maps.
+    ///
+    /// Reads through poison for the reason [`Bridge::registry`] does. The
+    /// only writers are the two registrars, both on the logic thread, so
+    /// the lock is never waited on by them; a reader on another thread
+    /// waits for the length of one merge.
+    fn registry_mut(&self) -> RwLockWriteGuard<'_, Registry> {
+        self.registry
+            .write()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Merge a table of drop policies, answering the rows it added, or the
+    /// conflict that refused it whole. [`Registry::register_classes`].
+    pub fn register_classes(
+        &self,
+        rows: impl IntoIterator<Item = (Topic, RecordClass)>,
+    ) -> Result<usize, Conflict> {
+        self.registry_mut().register_classes(rows)
+    }
+
+    /// Merge a table of destination states. [`Registry::register_routes`].
+    pub fn register_routes(
+        &self,
+        rows: impl IntoIterator<Item = (Topic, Target)>,
+    ) -> Result<usize, Conflict> {
+        self.registry_mut().register_routes(rows)
+    }
+
+    /// Merge a table of required capabilities. [`Registry::register_caps`].
+    pub fn register_caps(
+        &self,
+        rows: impl IntoIterator<Item = (Topic, Capability)>,
+    ) -> Result<usize, Conflict> {
+        self.registry_mut().register_caps(rows)
+    }
+
+    /// Add topics to the addressable set, answering how many were new.
+    /// [`Registry::register_replies`].
+    pub fn register_replies(&self, topics: impl IntoIterator<Item = Topic>) -> usize {
+        self.registry_mut().register_replies(topics)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::registry::{RecordClass, Target};
 
     /// The whole point of the process-global rule: two registrars in two Lua
     /// states have to see each other's entries, which they only can through one
@@ -1248,6 +1317,85 @@ mod tests {
             bridge().misaddressed() >= before + 2,
             "two refusals were not counted as two"
         );
+    }
+
+    /// A registration goes through the bridge's write lock and is read
+    /// back through its read lock: two registrars over disjoint sets both
+    /// merge, a repeat adds nothing, and a conflict is refused with the
+    /// maps as they were.
+    #[test]
+    fn registrations_merge_through_the_bridge() {
+        let bridge = Bridge::new(3);
+        const EVENT: &str = "dcsbridge.builtin.sim.UnitDestroyed";
+        const COMMAND: &str = "dcsbridge.builtin.sim.SetFlag";
+
+        assert_eq!(
+            bridge.register_classes([(EVENT.to_string(), RecordClass::Durable)]),
+            Ok(1)
+        );
+        assert_eq!(
+            bridge.register_classes([
+                (EVENT.to_string(), RecordClass::Durable),
+                (COMMAND.to_string(), RecordClass::Command),
+            ]),
+            Ok(1)
+        );
+        assert_eq!(
+            bridge.register_routes([(COMMAND.to_string(), Target::SimDriver)]),
+            Ok(1)
+        );
+        let refused = bridge.register_caps([
+            (EVENT.to_string(), Capability::Read),
+            (COMMAND.to_string(), Capability::Command),
+        ]);
+        assert_eq!(refused, Ok(2));
+        let refused = bridge.register_caps([(EVENT.to_string(), Capability::Command)]);
+        assert_eq!(
+            refused.map_err(|c| c.to_string()),
+            Err(format!("{EVENT} is registered as read, not command"))
+        );
+
+        let registry = bridge.registry();
+        assert_eq!(registry.classes().len(), 2);
+        assert_eq!(registry.routes().len(), 1);
+        assert_eq!(registry.caps()[EVENT], Capability::Read);
+    }
+
+    /// A `begin` on a topic with a class and a capability is allowed, one
+    /// on a topic missing either is refused and counted, and a registered
+    /// reply becomes addressable.
+    #[test]
+    fn a_begin_needs_a_class_and_a_capability_and_a_reply_needs_registering() {
+        let bridge = Bridge::new(4);
+        const EVENT: &str = "dcsbridge.builtin.sim.UnitDestroyed";
+        const REPLY: &str = "dcsbridge.builtin.sim.FlagValue";
+
+        assert!(!bridge.registered(EVENT.as_bytes()));
+        assert_eq!(bridge.partial_registration(), 1);
+
+        bridge
+            .register_classes([(EVENT.to_string(), RecordClass::Durable)])
+            .expect("classes");
+        assert!(
+            !bridge.registered(EVENT.as_bytes()),
+            "a class alone made a topic registered"
+        );
+        bridge
+            .register_caps([(EVENT.to_string(), Capability::Read)])
+            .expect("caps");
+        assert!(bridge.registered(EVENT.as_bytes()));
+        assert_eq!(
+            bridge.partial_registration(),
+            2,
+            "an allowed begin was counted"
+        );
+
+        assert!(bridge.registered(dcsbridge_topic::COMMAND_ACK.as_bytes()));
+
+        assert!(!bridge.addressable(REPLY.as_bytes()));
+        assert_eq!(bridge.register_replies([REPLY.to_string()]), 1);
+        assert!(bridge.addressable(REPLY.as_bytes()));
+        assert_eq!(bridge.misaddressed(), 1);
     }
 
     /// The outbound path starts once, and a record committed after that
