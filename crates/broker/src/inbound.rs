@@ -10,9 +10,10 @@
 //! so it reads as little as it can and bounds every read before it makes it.
 //! The length prefix is checked against the frame cap before a byte of the
 //! frame is allocated for, and the payload's type URL, which is the one
-//! string read out of every frame, is checked against the URL cap. Both are
-//! configuration, read fresh for every frame through [`Limits`], so a later
-//! `configure` binds from the next frame on.
+//! string read out of every frame, is checked against the URL cap before
+//! the decoder allocates for it. Both are configuration, read fresh for
+//! every frame through [`Limits`], so a later `configure` binds from the
+//! next frame on.
 //! The envelope decodes through `prost`, the one crate the shipped build
 //! takes: a decoder written beside the encoder would share its misreadings,
 //! and this one is fuzzed and bounds its own recursion. ADR 0016.
@@ -204,15 +205,15 @@ impl From<io::Error> for Close {
 /// between frames.
 ///
 /// `limits` is asked once the length prefix has arrived, not before the
-/// wait for it, so the cap in force when a frame arrives is the one it is
-/// checked against: a cap lowered while the reader waited binds on that
-/// frame. What it answered comes back with the envelope, for the checks
-/// that follow.
+/// wait for it, so the caps in force when a frame arrives are the ones it
+/// is checked against: a cap lowered while the reader waited binds on that
+/// frame. Both caps are applied here, the frame's before the body is
+/// allocated for and the type URL's before the envelope decodes.
 pub fn read_frame(
     stream: &mut impl Read,
     body: &mut Vec<u8>,
     limits: impl FnOnce() -> Limits,
-) -> Result<Option<(Envelope, Limits)>, Close> {
+) -> Result<Option<Envelope>, Close> {
     let mut length = [0u8; 4];
     // The first read tells a clean close between frames from a cut inside
     // one, which `read_exact` cannot; it retries an interrupted read the
@@ -237,21 +238,133 @@ pub fn read_frame(
     body.clear();
     body.resize(length as usize, 0);
     stream.read_exact(body)?;
+    check_type_url(body, limits.max_type_url_bytes)?;
     Envelope::decode(&body[..])
-        .map(|envelope| Some((envelope, limits)))
+        .map(Some)
         .map_err(Close::Envelope)
 }
 
+/// The wire type of a length-delimited field.
+const LEN: u64 = 2;
+
+/// The envelope's payload field, and the type URL field inside it.
+const PAYLOAD_FIELD: u64 = 4;
+const TYPE_URL_FIELD: u64 = 1;
+
+/// Refuse `body` if a type URL in it is over `cap`, before the decoder
+/// allocates for one.
+///
+/// The URL is the one string read out of every frame, and its length is
+/// the peer's to write: this is the same check the frame length gets, one
+/// descent further in. The walk reads field keys and lengths and nothing
+/// else, descends into the payload field only, and stops at the first byte
+/// it cannot read, leaving that to the decoder, which reads the bytes in
+/// the same order and so cannot reach a string this did not.
+fn check_type_url(body: &[u8], cap: usize) -> Result<(), Close> {
+    let mut fields = Fields(body);
+    while let Some((field, wire, value)) = fields.next() {
+        if field == PAYLOAD_FIELD && wire == LEN {
+            let mut inner = Fields(value);
+            while let Some((field, wire, value)) = inner.next() {
+                if field == TYPE_URL_FIELD && wire == LEN && value.len() > cap {
+                    return Err(Close::TypeUrlTooLong(value.len()));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// A walk over the fields of one message's bytes: each step is the field
+/// number, the wire type, and the bytes the field spans. A varint's bytes
+/// are the varint; a fixed field's are its width; a length-delimited
+/// field's are what its length names, and are the only ones anything
+/// descends into.
+///
+/// The walk steps over what the decoder steps over and stops where it
+/// stops, because a field the decoder skips and this walk halts at would
+/// be a place to hide a string from the check. A group, which the format
+/// once had and the decoder still skips, is stepped over whole: every
+/// field inside it, groups included, up to the end tag that closes it.
+struct Fields<'a>(&'a [u8]);
+
+/// The wire types of a group's start and end tags.
+const START_GROUP: u64 = 3;
+const END_GROUP: u64 = 4;
+
+impl<'a> Fields<'a> {
+    /// The next field outside any group, or `None` at the end or at a byte
+    /// the walk cannot read.
+    fn next(&mut self) -> Option<(u64, u64, &'a [u8])> {
+        let mut depth = 0u32;
+        loop {
+            if self.0.is_empty() {
+                return None;
+            }
+            let key = self.varint()?;
+            let (field, wire) = (key >> 3, key & 7);
+            let value = match wire {
+                0 => {
+                    let start = self.0;
+                    self.varint()?;
+                    &start[..start.len() - self.0.len()]
+                }
+                1 => self.take(8)?,
+                LEN => {
+                    let len = usize::try_from(self.varint()?).ok()?;
+                    self.take(len)?
+                }
+                5 => self.take(4)?,
+                START_GROUP => {
+                    depth = depth.checked_add(1)?;
+                    continue;
+                }
+                END_GROUP => {
+                    // An end with no start is a byte the decoder refuses.
+                    depth = depth.checked_sub(1)?;
+                    continue;
+                }
+                // A wire type the format has never had.
+                _ => return None,
+            };
+            if depth == 0 {
+                return Some((field, wire, value));
+            }
+        }
+    }
+
+    /// Read one varint, at most ten bytes, refusing a tenth that carries
+    /// more than the one bit left, as the decoder does.
+    fn varint(&mut self) -> Option<u64> {
+        let mut value = 0u64;
+        for (i, byte) in self.0.iter().take(10).enumerate() {
+            if i == 9 && *byte > 1 {
+                return None;
+            }
+            value |= u64::from(byte & 0x7f) << (7 * i);
+            if byte & 0x80 == 0 {
+                self.0 = &self.0[i + 1..];
+                return Some(value);
+            }
+        }
+        None
+    }
+
+    /// Take `len` bytes, or nothing if fewer remain.
+    fn take(&mut self, len: usize) -> Option<&'a [u8]> {
+        let (taken, rest) = self.0.split_at_checked(len)?;
+        self.0 = rest;
+        Some(taken)
+    }
+}
+
 /// The topic a frame carries: its type URL with the prefix every runtime
-/// writes taken off, checked against `max_type_url_bytes` first. A URL
-/// without the prefix is a topic nothing routes, and it comes back whole so
-/// the refusal can name it.
-pub fn topic(envelope: &Envelope, max_type_url_bytes: usize) -> Result<&str, Close> {
+/// writes taken off. The URL was held under `max_type_url_bytes` before
+/// the envelope decoded. A URL without the prefix is a topic nothing
+/// routes, and it comes back whole so the refusal can name it.
+pub fn topic(envelope: &Envelope) -> Result<&str, Close> {
     let payload = envelope.payload.as_ref().ok_or(Close::NoPayload)?;
     let url = payload.type_url.as_str();
-    if url.len() > max_type_url_bytes {
-        return Err(Close::TypeUrlTooLong(url.len()));
-    }
     Ok(url.strip_prefix(TYPE_URL_PREFIX).unwrap_or(url))
 }
 
@@ -385,7 +498,7 @@ pub fn serve(
     loop {
         // Asked for as each frame arrives, so a cap a later `configure`
         // lowered binds on the next frame rather than the next connection.
-        let (envelope, limits) = match read_frame(&mut stream, &mut body, || answers.limits()) {
+        let envelope = match read_frame(&mut stream, &mut body, || answers.limits()) {
             Ok(Some(read)) => read,
             Ok(None) if session.is_some() => return Ok(()),
             Ok(None) => return Err(Close::Closed),
@@ -401,7 +514,7 @@ pub fn serve(
             Err(close) => return Err(close),
         };
 
-        match (topic(&envelope, limits.max_type_url_bytes)?, &*session) {
+        match (topic(&envelope)?, &*session) {
             (topic::PING, _) => {
                 connections.answer(id, pong(answers.liveness()));
                 answered += 1;
@@ -561,24 +674,17 @@ mod tests {
     fn a_frame_decodes_to_seq_and_topic() {
         let bytes = frame(7, &type_url(topic::PING), &[]);
         let mut body = Vec::new();
-        let (envelope, limits) = read_frame(&mut &bytes[..], &mut body, Limits::default)
+        let envelope = read_frame(&mut &bytes[..], &mut body, Limits::default)
             .unwrap()
             .unwrap();
         assert_eq!(envelope.seq, 7);
-        assert_eq!(limits, Limits::default(), "the limits asked for come back");
-        assert_eq!(
-            topic(&envelope, limits.max_type_url_bytes).unwrap(),
-            topic::PING
-        );
+        assert_eq!(topic(&envelope).unwrap(), topic::PING);
 
         let bytes = frame(8, topic::PING, &[]);
-        let (envelope, _) = read_frame(&mut &bytes[..], &mut body, Limits::default)
+        let envelope = read_frame(&mut &bytes[..], &mut body, Limits::default)
             .unwrap()
             .unwrap();
-        assert_eq!(
-            topic(&envelope, limits.max_type_url_bytes).unwrap(),
-            topic::PING
-        );
+        assert_eq!(topic(&envelope).unwrap(), topic::PING);
 
         // At a clean end of stream the limits are never asked for.
         assert!(matches!(
@@ -611,7 +717,7 @@ mod tests {
             }
         }
         let bytes = frame(3, topic::PING, &[]);
-        let (envelope, _) = read_frame(
+        let envelope = read_frame(
             &mut Interrupted(&bytes, false),
             &mut Vec::new(),
             Limits::default,
@@ -655,26 +761,119 @@ mod tests {
             seq: 1,
             payload: None,
         };
-        assert!(matches!(
-            topic(&bare, max_type_url_bytes),
-            Err(Close::NoPayload)
-        ));
+        assert!(matches!(topic(&bare), Err(Close::NoPayload)));
 
-        let long = Envelope {
-            seq: 1,
-            payload: Some(Payload {
-                type_url: "x".repeat(max_type_url_bytes + 1),
-                value: Vec::new(),
-            }),
-        };
+        let long = frame(1, &"x".repeat(max_type_url_bytes + 1), &[]);
         assert!(matches!(
-            topic(&long, max_type_url_bytes),
+            read_frame(&mut &long[..], &mut body, Limits::default),
             Err(Close::TypeUrlTooLong(n)) if n == max_type_url_bytes + 1
         ));
+        let raised = || Limits {
+            max_type_url_bytes: max_type_url_bytes + 1,
+            ..Limits::default()
+        };
+        let envelope = read_frame(&mut &long[..], &mut body, raised)
+            .expect("a raised cap admits the URL")
+            .expect("a frame follows");
+        assert_eq!(
+            envelope.payload.unwrap().type_url.len(),
+            max_type_url_bytes + 1
+        );
+    }
+
+    /// The URL cap is applied to the bytes before the envelope decodes:
+    /// a URL at the cap passes, one over it is refused however it is
+    /// placed in the frame, and a frame the walk cannot read is left to the
+    /// decoder to refuse.
+    #[test]
+    fn the_type_url_is_checked_before_the_envelope_decodes() {
+        let cap = 16;
+        let at = "y".repeat(cap);
+        let over = "y".repeat(cap + 1);
+
+        assert!(check_type_url(&frame(1, &at, b"value")[4..], cap).is_ok());
         assert!(matches!(
-            topic(&long, max_type_url_bytes + 1),
-            Ok(url) if url.len() == max_type_url_bytes + 1
+            check_type_url(&frame(1, &over, b"value")[4..], cap),
+            Err(Close::TypeUrlTooLong(n)) if n == cap + 1
         ));
+        // A frame with no payload has no URL to check.
+        let bare = Envelope {
+            seq: 5,
+            payload: None,
+        }
+        .encode_to_vec();
+        assert!(check_type_url(&bare, cap).is_ok());
+
+        // Fields ahead of the payload, of every wire type, are stepped over:
+        // a varint, a fixed64, a length-delimited one and a fixed32.
+        let mut ahead = vec![0x08, 0xff, 0x01, 0x11];
+        ahead.extend([0u8; 8]);
+        ahead.extend([0x1a, 0x02, 0xaa, 0xbb, 0x15, 0, 0, 0, 0]);
+        let mut placed = ahead.clone();
+        placed.extend(&frame(1, &over, &[])[4..]);
+        assert!(matches!(
+            check_type_url(&placed, cap),
+            Err(Close::TypeUrlTooLong(n)) if n == cap + 1
+        ));
+        // Inside the payload the value can come first, and every URL is
+        // checked: a second one over the cap is refused too.
+        let mut payload = vec![0x12, 0x03, 1, 2, 3, 0x0a, cap as u8];
+        payload.extend(at.as_bytes());
+        payload.extend([0x0a, cap as u8 + 1]);
+        payload.extend(over.as_bytes());
+        let mut twice = vec![0x22, payload.len() as u8];
+        twice.extend(&payload);
+        assert!(matches!(
+            check_type_url(&twice, cap),
+            Err(Close::TypeUrlTooLong(n)) if n == cap + 1
+        ));
+
+        // A group the decoder skips is stepped over, not stopped at: an
+        // empty group on an unused field, a group holding fields of every
+        // kind and a group inside it, and a group holding what looks like
+        // the payload, each ahead of a payload whose URL is over the cap.
+        let over_payload = &frame(1, &over, &[])[4..];
+        let inner_group = [0x2b, 0x08, 0x01, 0x2c];
+        let mut nested = vec![0x33, 0x08, 0x01, 0x11];
+        nested.extend([0u8; 8]);
+        nested.extend([0x1a, 0x01, 0x00, 0x15, 0, 0, 0, 0]);
+        nested.extend(inner_group);
+        nested.extend([0x34]);
+        let mut fake_payload = vec![0x2b];
+        fake_payload.extend(over_payload);
+        fake_payload.extend([0x2c]);
+        for group in [vec![0x2b, 0x2c], nested, fake_payload] {
+            let mut hidden = group;
+            hidden.extend(over_payload);
+            assert!(
+                matches!(
+                    check_type_url(&hidden, cap),
+                    Err(Close::TypeUrlTooLong(n)) if n == cap + 1
+                ),
+                "a group hid the URL from the check: {hidden:02x?}"
+            );
+        }
+
+        // A length past the end, an unfinished varint, an unclosed group, an
+        // end with no start and a tenth varint byte past the one bit left
+        // each end the walk without a verdict; the decoder refuses the frame.
+        for unreadable in [
+            vec![0x22u8, 0x7f, 0x0a, 0x01],
+            vec![0x22u8, 0x80],
+            vec![0x23u8, 0x0a, 0x01, 0x41],
+            vec![0x2cu8, 0x0a, 0x01, 0x41],
+            vec![
+                0x08u8, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x02,
+            ],
+        ] {
+            assert!(check_type_url(&unreadable, cap).is_ok());
+            let mut bytes = (unreadable.len() as u32).to_le_bytes().to_vec();
+            bytes.extend(&unreadable);
+            assert!(matches!(
+                read_frame(&mut &bytes[..], &mut Vec::new(), Limits::default),
+                Err(Close::Envelope(_))
+            ));
+        }
     }
 
     /// `AuthResult` decodes to `ok` with no error, or to the error's schema
