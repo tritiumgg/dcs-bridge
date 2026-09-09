@@ -415,6 +415,10 @@ impl Answers for Global {
     fn refused_no_capability(&self, topic: &str) {
         bridge().refused_no_capability(topic);
     }
+
+    fn deliver(&self, command: Command) -> Delivery {
+        bridge().deliver(command)
+    }
 }
 
 /// One entry of the `tokens` key: a consumer's credential.
@@ -1763,6 +1767,47 @@ mod tests {
                 mission_time: None,
             },
             "a record outside an epoch carried a stamp"
+        );
+
+        // A record sent on a registered inbound topic reaches the ring its
+        // route names, through the shared bridge's own reader thread, and
+        // is polled with the sender's connection id and its bytes.
+        bridge().start_inbound(4, 4);
+        bridge()
+            .register_routes([(HOOK_COMMAND.to_string(), Target::HookDriver)])
+            .expect("a new route merges");
+        let sent = {
+            let body = crate::inbound::Envelope {
+                seq: 2,
+                payload: Some(crate::inbound::Payload {
+                    type_url: format!("{}{}", dcsbridge_topic::TYPE_URL_PREFIX, HOOK_COMMAND),
+                    value: vec![0x08, 0x2a],
+                }),
+            }
+            .encode_to_vec();
+            let mut bytes = (body.len() as u32).to_le_bytes().to_vec();
+            bytes.extend(body);
+            bytes
+        };
+        client.write_all(&sent).expect("the command is sent");
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        let polled = loop {
+            if let Some(command) = bridge().poll(Target::HookDriver).expect("the rings exist") {
+                break command;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the command never reached the hook ring"
+            );
+            std::thread::yield_now();
+        };
+        assert_eq!(polled.from, ConnectionId::from_raw(1), "the sender's id");
+        assert_eq!(polled.topic, HOOK_COMMAND, "the topic as registered");
+        assert_eq!(polled.value, [0x08, 0x2a], "the payload's bytes");
+        assert_eq!(
+            bridge().poll(Target::SimDriver),
+            Ok(None),
+            "the sim ring saw it"
         );
     }
 

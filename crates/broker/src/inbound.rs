@@ -34,8 +34,12 @@
 //! broker handles itself: `GetSchema`, answered with the schema or with why
 //! there is none; `SeqAck`, consumed and counted and answered by nothing;
 //! and `SetEnabled`, the kill switch, applied when the token carries
-//! `reload` and counted when it does not. None of them reaches a ring. Any
-//! other topic closes the connection until the rings exist to route it.
+//! `reload` and counted when it does not. None of them reaches a ring.
+//! Every other topic is a record for Lua, and this thread puts it on the
+//! ring the registered route map names for it, with the connection's id
+//! for the answer to be addressed to. A topic in no route map goes nowhere
+//! and is counted; a ring with no room turns the record away and counts
+//! it; neither closes the connection. ADR 0024.
 
 use std::collections::HashSet;
 use std::io::{self, Read};
@@ -160,6 +164,12 @@ pub trait Answers: Send + Sync + 'static {
     /// A message was refused because the session's token lacks the
     /// capability it requires.
     fn refused_no_capability(&self, topic: &str);
+    /// A record for Lua: put it on the ring its route names, or hand it
+    /// back. With nothing behind the transport there is no ring, so
+    /// nothing is routed.
+    fn deliver(&self, command: Command) -> Delivery {
+        Delivery::Unrouted(command)
+    }
 }
 
 /// Why the reader thread closed a connection.
@@ -185,8 +195,9 @@ pub enum Close {
     AuthFailed(AuthError),
     /// The peer closed cleanly before authenticating.
     Closed,
-    /// An authenticated connection sent a topic nothing here handles yet.
-    Unrouted(String),
+    /// An authenticated connection sent a second `Auth`. A session is
+    /// opened once, and a peer that asks again is not the protocol's.
+    SecondAuth,
 }
 
 impl From<io::Error> for Close {
@@ -596,6 +607,7 @@ pub fn serve(
                 }
             }
             (other, None) => return Err(Close::Unauthenticated(other.to_owned())),
+            (topic::AUTH, Some(_)) => return Err(Close::SecondAuth),
             (topic::GET_SCHEMA, Some(_)) => {
                 connections.answer(id, schema(answers.schema().as_deref()));
             }
@@ -614,7 +626,14 @@ pub fn serve(
                     answers.refused_no_capability(refused);
                 }
             }
-            (other, Some(_)) => return Err(Close::Unrouted(other.to_owned())),
+            // Every other topic is a record for Lua, on the ring its route
+            // names. What the rings hand back is dropped here, on the
+            // thread that read it: the answer that would tell the sender,
+            // `Rejected`, is a later task's.
+            (_, Some(_)) => {
+                let command = Command::from_envelope(id, envelope)?;
+                drop(answers.deliver(command));
+            }
         }
     }
 }

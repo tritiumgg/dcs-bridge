@@ -368,8 +368,8 @@ mod tests {
     /// A fan-out topic, one the broker does not know by name.
     const TOPIC: &[u8] = b"dcsbridge.builtin.sim.UnitDestroyed";
 
-    /// A command topic the broker does not route yet, so it is refused
-    /// after authentication and closes the connection before it.
+    /// A command topic no route map names, so it goes nowhere after
+    /// authentication and closes the connection before it.
     const UNROUTED: &str = "dcsbridge.sim.Resync";
 
     /// A type URL as a stock encoder writes one.
@@ -1260,14 +1260,25 @@ mod tests {
             }
         };
 
-        // A refused message after authentication: the broker closes.
-        let mut refused = client(listener.local_addr());
-        read_handshake(&mut refused);
-        assert!(authenticate(&mut refused, SECRET).1.ok);
-        refused
+        // An unrouted record after authentication goes nowhere and closes
+        // nothing: the connection still answers, and closes when the peer
+        // does.
+        let mut unrouted = client(listener.local_addr());
+        read_handshake(&mut unrouted);
+        assert!(authenticate(&mut unrouted, SECRET).1.ok);
+        unrouted
             .write_all(&inbound(2, UNROUTED, &[]))
             .expect("the frame is sent");
-        assert!(is_closed(&mut refused));
+        unrouted
+            .write_all(&inbound(3, topic::PING, &[]))
+            .expect("the ping is sent");
+        assert_eq!(
+            read_frame(&mut unrouted).payload.unwrap().type_url,
+            type_url(topic::PONG),
+            "an unrouted record closed the connection"
+        );
+        assert_eq!(closed.load(Ordering::SeqCst), 0);
+        drop(unrouted);
         wait_closed(1);
 
         // A peer that closes cleanly, and one that closes inside a frame.
@@ -1476,6 +1487,151 @@ mod tests {
             "the close took {:?}, which is a timeout rather than the cap",
             started.elapsed()
         );
+
+        drop(listener);
+        drop(writer);
+    }
+
+    /// An authenticated record reaches the ring its route names and no
+    /// other, carrying the sender's connection id; an unrouted topic goes
+    /// nowhere and is counted; a ring with no room turns the newest record
+    /// away and counts it; and none of the three closes the connection.
+    #[test]
+    fn a_record_reaches_the_ring_its_route_names_and_no_other() {
+        use crate::inbound::{Command, Delivery};
+        use crate::registry::Target;
+        use crate::ring::{Producer, Push, Ring};
+        use std::collections::HashMap;
+
+        /// The stub with two rings and a route map behind it.
+        struct Routed {
+            routes: HashMap<&'static str, Target>,
+            sim: Mutex<Producer<Command>>,
+            hook: Mutex<Producer<Command>>,
+            unrouted: AtomicU64,
+            busy: AtomicU64,
+        }
+        impl Answers for Routed {
+            fn handshake(&self) -> Record {
+                Stub.handshake()
+            }
+            fn liveness(&self) -> inbound::Liveness {
+                Stub.liveness()
+            }
+            fn authenticate(&self, secret: &[u8]) -> Result<Session, AuthError> {
+                Stub.authenticate(secret)
+            }
+            fn disconnected(&self, _: &Session) {}
+            fn schema(&self) -> Option<Record> {
+                None
+            }
+            fn seq_ack(&self, _: u64) {}
+            fn set_enabled(&self, _: bool) {}
+            fn refused_no_capability(&self, _: &str) {}
+            fn deliver(&self, command: Command) -> Delivery {
+                let ring = match self.routes.get(command.topic.as_str()) {
+                    Some(Target::SimDriver) => &self.sim,
+                    Some(Target::HookDriver) => &self.hook,
+                    None => {
+                        self.unrouted.fetch_add(1, Ordering::SeqCst);
+                        return Delivery::Unrouted(command);
+                    }
+                };
+                match ring.lock().unwrap().offer(command) {
+                    Push::Stored => Delivery::Stored,
+                    Push::Refused(command) | Push::Evicted(command) => {
+                        self.busy.fetch_add(1, Ordering::SeqCst);
+                        Delivery::Busy(command)
+                    }
+                }
+            }
+        }
+
+        const SIM_COMMAND: &str = "dcsbridge.builtin.sim.SetFlag";
+        const HOOK_COMMAND: &str = "dcsbridge.builtin.hook.Kick";
+        let (sim, mut sim_ring) = Ring::split(4);
+        let (hook, mut hook_ring) = Ring::split(1);
+        let routed = Arc::new(Routed {
+            routes: [
+                (SIM_COMMAND, Target::SimDriver),
+                (HOOK_COMMAND, Target::HookDriver),
+            ]
+            .into_iter()
+            .collect(),
+            sim: Mutex::new(sim),
+            hook: Mutex::new(hook),
+            unrouted: AtomicU64::new(0),
+            busy: AtomicU64::new(0),
+        });
+        let (writer, _commit, connections) = Writer::spawn(64);
+        let answers: Arc<dyn Answers> = routed.clone();
+        let listener = Listener::spawn("127.0.0.1:0", connections, 64, answers).unwrap();
+
+        // Two senders, so the id polled is shown to be the sender's rather
+        // than the only one there is.
+        let mut first = client(listener.local_addr());
+        read_handshake(&mut first);
+        assert!(authenticate(&mut first, SECRET).1.ok);
+        let mut second = client(listener.local_addr());
+        read_handshake(&mut second);
+        assert!(authenticate(&mut second, SECRET).1.ok);
+
+        // A `Ping` behind a sender's frames, answered after them, is how
+        // the reader is known to have got through them; the second sender
+        // sends only once the first's are in, since two readers keep no
+        // order between them.
+        let ping = |sender: &mut TcpStream| {
+            sender
+                .write_all(&inbound(9, topic::PING, &[]))
+                .expect("the ping is sent");
+            assert_eq!(
+                read_frame(sender).payload.unwrap().type_url,
+                type_url(topic::PONG),
+                "a record for Lua closed the connection"
+            );
+        };
+        first
+            .write_all(&inbound(2, HOOK_COMMAND, b"from one"))
+            .expect("the frame is sent");
+        first
+            .write_all(&inbound(3, UNROUTED, b"nowhere"))
+            .expect("the frame is sent");
+        ping(&mut first);
+        second
+            .write_all(&inbound(2, SIM_COMMAND, b"from two"))
+            .expect("the frame is sent");
+        // The hook ring holds one, so a second hook command is turned away.
+        second
+            .write_all(&inbound(3, HOOK_COMMAND, b"no room"))
+            .expect("the frame is sent");
+        ping(&mut second);
+
+        let polled = sim_ring.pop().expect("the sim ring holds the sim command");
+        assert_eq!(polled.from, ConnectionId::from_raw(2), "the sender's id");
+        assert_eq!(polled.topic, SIM_COMMAND, "the topic without its prefix");
+        assert_eq!(polled.value, b"from two");
+        assert!(
+            sim_ring.pop().is_none(),
+            "the sim ring held a second record"
+        );
+
+        let polled = hook_ring
+            .pop()
+            .expect("the hook ring holds the hook command");
+        assert_eq!(polled.from, ConnectionId::from_raw(1));
+        assert_eq!(polled.topic, HOOK_COMMAND);
+        assert_eq!(polled.value, b"from one");
+        assert!(
+            hook_ring.pop().is_none(),
+            "the hook ring held a second record"
+        );
+
+        assert_eq!(
+            routed.unrouted.load(Ordering::SeqCst),
+            1,
+            "the unrouted count"
+        );
+        assert_eq!(routed.busy.load(Ordering::SeqCst), 1, "the busy count");
 
         drop(listener);
         drop(writer);
