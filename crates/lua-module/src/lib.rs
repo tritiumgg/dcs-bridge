@@ -171,7 +171,7 @@ mod lua {
 /// The hook driver compares it at its first `configure` and disables itself
 /// on a mismatch, so it moves when a call is added, removed or changes
 /// signature, and for nothing else. It is an opaque equality, not an order.
-pub const INTERFACE_VERSION: &str = "4";
+pub const INTERFACE_VERSION: &str = "5";
 
 /// Open the bridge in `state`, leaving one table on the stack.
 ///
@@ -182,8 +182,9 @@ pub const INTERFACE_VERSION: &str = "4";
 ///
 /// The table carries the broker version, the interface version, `opens`, the
 /// number of times the module has been opened in this process, `configure`,
-/// `schema`, the registration calls and the put calls. The first table reads 1 and the second reads
-/// 2, which is how two tables are shown to sit over one bridge.
+/// `schema`, `tick`, `epoch`, `poll`, the registration calls and the put
+/// calls. The first table reads 1 and the second reads 2, which is how two
+/// tables are shown to sit over one bridge.
 ///
 /// An open allocates nothing and listens on nothing. The first
 /// `shim.configure` does both, from the configuration it is handed, so a
@@ -208,7 +209,7 @@ pub unsafe extern "C" fn luaopen_dcsbridge(state: *mut core::ffi::c_void) -> cor
         lua::lua_createtable(
             state,
             0,
-            7 + (put::CALLS.len() + register::CALLS.len()) as core::ffi::c_int,
+            8 + (put::CALLS.len() + register::CALLS.len()) as core::ffi::c_int,
         );
         lua::lua_pushlstring(
             state,
@@ -234,6 +235,7 @@ pub unsafe extern "C" fn luaopen_dcsbridge(state: *mut core::ffi::c_void) -> cor
         tick::install(state);
         epoch::install(state);
         register::install(state);
+        poll::install(state);
     }
 
     1
@@ -1112,6 +1114,103 @@ mod register {
     fn names<V: Member>() -> String {
         let names: Vec<&str> = V::ALL.iter().map(|m| m.name()).collect();
         format!("member: one of {}", names.join(", "))
+    }
+}
+
+/// `shim.poll(target)`: the oldest inbound record on that target's ring, as
+/// the connection id it came from, its topic and its bytes, or `nil` when
+/// the ring holds nothing.
+///
+/// Each Lua state polls the ring the route map sends its records to, and
+/// under the injection route where the hook driver ferries the sim
+/// driver's records it polls both. The id is what `begin_to` takes to
+/// address the answer; the topic is what the generated decoders switch
+/// on; the bytes are the payload's, opaque here. ADR 0024.
+#[cfg(any(unix, feature = "dcs-lua"))]
+mod poll {
+    use core::ffi::{c_int, c_void};
+
+    use dcsbridge_broker::registry::{Member, Target};
+
+    use crate::lua;
+
+    /// Put `poll` on the table at the top of the stack.
+    ///
+    /// # Safety
+    ///
+    /// `state` is live, the table is at -1, and one stack slot is free.
+    pub unsafe fn install(state: *mut c_void) {
+        // SAFETY: the push and the setfield pair, leaving the table on top.
+        unsafe {
+            lua::lua_pushcclosure(state, poll, 0);
+            lua::lua_setfield(state, -2, c"poll".as_ptr());
+        }
+    }
+
+    /// `shim.poll('sim_driver')`, or by the schema's number. Returns three
+    /// values, or one `nil`; raises before the first `configure` or on a
+    /// target that names no member.
+    unsafe extern "C" fn poll(state: *mut c_void) -> c_int {
+        // SAFETY: a Lua call. This frame owns nothing, which is what lets
+        // it raise; see `push_error`.
+        unsafe {
+            match take(state) {
+                Some(pushed) => pushed,
+                None => {
+                    lua::lua_error(state);
+                    unreachable!("lua_error does not return")
+                }
+            }
+        }
+    }
+
+    /// Pop the ring and push what came out, or push the refusal. Returns
+    /// how many values were pushed, or `None` for a refusal.
+    ///
+    /// The record is dropped here, after its parts are copied into Lua,
+    /// so nothing this crate allocated is left for the entry to hold.
+    ///
+    /// # Safety
+    ///
+    /// `state` is inside a Lua call whose first argument is at 1, with
+    /// three stack slots free.
+    // Never inlined into the entry; see `apply` in `configure`.
+    #[inline(never)]
+    unsafe fn take(state: *mut c_void) -> Option<c_int> {
+        // SAFETY: the caller's contract. Lua copies every byte it is given.
+        unsafe {
+            let Some(target) = crate::member::<Target>(state, 1) else {
+                let names: Vec<&str> = Target::ALL.iter().map(|t| t.name()).collect();
+                crate::push_error(
+                    state,
+                    format!(
+                        "poll refused: the target names no member: one of {}",
+                        names.join(", ")
+                    ),
+                );
+                return None;
+            };
+            match dcsbridge_broker::bridge().poll(target) {
+                Ok(Some(command)) => {
+                    // An id is numbered from one and a double carries it
+                    // exactly to 2^53, which is more connections than a
+                    // process will ever accept.
+                    lua::lua_pushnumber(state, command.from.get() as f64);
+                    lua::lua_pushlstring(state, command.topic.as_ptr().cast(), command.topic.len());
+                    lua::lua_pushlstring(state, command.value.as_ptr().cast(), command.value.len());
+                    drop(command);
+                    Some(3)
+                }
+                Ok(None) => {
+                    lua::lua_pushnil(state);
+                    Some(1)
+                }
+                Err(error) => {
+                    crate::push_error(state, format!("poll refused: {error}"));
+                    None
+                }
+            }
+        }
     }
 }
 
