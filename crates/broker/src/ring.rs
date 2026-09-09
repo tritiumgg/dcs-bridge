@@ -16,8 +16,7 @@
 //! The other drop rule the build needs — turn the newest record away and leave
 //! the queue alone, which is what a ring of pending commands wants — is a
 //! shorter path through the same protocol rather than a policy flag: claim a
-//! free slot, and give the record back if there is none. It arrives as its own
-//! method when something needs it.
+//! free slot, and give the record back if there is none. That is [`Producer::offer`].
 
 use std::mem::MaybeUninit;
 
@@ -307,6 +306,36 @@ impl<T> Producer<T> {
                 _ => unreachable!("a slot the producer does not hold is stamped by its owner"),
             }
         }
+    }
+
+    /// Offer a record: store it if the ring has room, and give it back if
+    /// not. The newest record is the one turned away, and what the ring
+    /// holds is left as it is.
+    ///
+    /// A queue of pending commands wants this rule rather than eviction: a
+    /// command that has waited is not stale, and the one that would evict it
+    /// is the one the sender can be told about, since the sender is on the
+    /// line at that moment. Never blocks, never allocates, and takes no
+    /// compare-exchange: the slot is either stamped free for this index or it
+    /// is not, and a slot the consumer is inside of counts as not.
+    pub fn offer(&mut self, value: T) -> Push<T> {
+        let slot = &self.ring.slots[self.cursor];
+
+        if slot.stamp.load(Ordering::SeqCst) == stamp(self.index, EMPTY) {
+            // SAFETY: as in `push`: the stamp says the slot is empty and
+            // ready for this index, the consumer stamps a slot empty only
+            // after moving the old value out, and no other thread writes a
+            // slot stamped for the producer's index.
+            slot.value.with_mut(|slot| unsafe { (*slot).write(value) });
+            slot.stamp.store(stamp(self.index, FULL), Ordering::SeqCst);
+            self.advance();
+
+            return Push::Stored;
+        }
+
+        self.ring.dropped.fetch_add(1, Ordering::Relaxed);
+
+        Push::Refused(value)
     }
 
     /// How many records the ring has turned away.
@@ -609,6 +638,91 @@ mod tests {
         );
     }
 
+    /// The other drop rule: a full ring turns the newest record away, keeps
+    /// what it holds in order, counts the refusal, and takes the next record
+    /// once the consumer has made room.
+    #[test]
+    fn an_offer_to_a_full_ring_refuses_the_newest() {
+        let (mut producer, mut consumer) = Ring::split(3);
+
+        for value in 0..3 {
+            assert_eq!(producer.offer(value), Push::Stored, "{value} found no room");
+        }
+        assert_eq!(
+            producer.offer(3),
+            Push::Refused(3),
+            "a full ring did not give the newest record back"
+        );
+        assert_eq!(producer.dropped(), 1, "the refusal was not counted");
+        assert_eq!(producer.len(), 3, "a refusal changed what the ring holds");
+
+        assert_eq!(
+            consumer.pop(),
+            Some(0),
+            "a refusal disturbed the oldest record"
+        );
+        assert_eq!(
+            producer.offer(4),
+            Push::Stored,
+            "the slot the consumer freed was not offered into"
+        );
+
+        let rest: Vec<u32> = std::iter::from_fn(|| consumer.pop()).collect();
+        assert_eq!(rest, vec![1, 2, 4], "the ring reordered around a refusal");
+        assert_eq!(
+            producer.dropped(),
+            1,
+            "a stored offer was counted as turned away"
+        );
+    }
+
+    /// A refused record comes back whole and undropped, the way an evicted
+    /// one does, so the caller decides what a refusal means.
+    #[test]
+    fn a_refused_record_comes_back_whole() {
+        let drops = Arc::new(AtomicUsize::new(0));
+        let (mut producer, _consumer) = Ring::split(1);
+
+        assert!(matches!(
+            producer.offer(Counted::new(1, &drops)),
+            Push::Stored
+        ));
+        let Push::Refused(refused) = producer.offer(Counted::new(2, &drops)) else {
+            panic!("an offer to a full ring did not refuse");
+        };
+
+        assert_eq!(
+            refused.value, 2,
+            "the ring gave back a record other than the one offered"
+        );
+        assert_eq!(
+            drops.load(Ordering::Relaxed),
+            0,
+            "the ring dropped a record it had handed back"
+        );
+    }
+
+    /// The two rules share one ring: a push after a refused offer evicts,
+    /// and an offer after an eviction is refused, each counted once.
+    #[test]
+    fn push_and_offer_share_the_ring_and_the_count() {
+        let (mut producer, mut consumer) = Ring::split(2);
+
+        assert_eq!(producer.offer(0), Push::Stored);
+        assert_eq!(producer.push(1), Push::Stored);
+        assert_eq!(producer.offer(2), Push::Refused(2));
+        assert_eq!(producer.push(3), Push::Evicted(0));
+        assert_eq!(producer.offer(4), Push::Refused(4));
+        assert_eq!(
+            producer.dropped(),
+            3,
+            "three records turned away were not counted as three"
+        );
+
+        let held: Vec<u32> = std::iter::from_fn(|| consumer.pop()).collect();
+        assert_eq!(held, vec![1, 3], "the wrong records survived the two rules");
+    }
+
     /// The ring owns what it holds, so every record it takes is dropped exactly
     /// once: where its caller lets go of it, or with the ring itself.
     ///
@@ -762,6 +876,44 @@ mod loom_tests {
                 arrived.windows(2).all(|pair| pair[0] < pair[1]),
                 "records arrived out of order or twice: {arrived:?}"
             );
+        });
+    }
+
+    /// Every interleaving of a producer that offers and a consumer that
+    /// drains accounts for each record once, in order: an offer the consumer
+    /// is still inside of is refused rather than written over, and one it
+    /// has left is stored.
+    #[test]
+    fn a_producer_that_offers_never_races_its_consumer() {
+        loom::model(|| {
+            let (mut producer, mut consumer) = Ring::split(2);
+
+            let pushing = loom::thread::spawn(move || {
+                let mut refused = Vec::new();
+                for value in 0..3u32 {
+                    if let Push::Refused(record) = producer.offer(value) {
+                        refused.push(record);
+                    }
+                }
+                refused
+            });
+
+            let mut arrived = Vec::new();
+            while let Some(record) = consumer.pop() {
+                arrived.push(record);
+            }
+            let refused = pushing.join().expect("the pushing thread only offers");
+            while let Some(record) = consumer.pop() {
+                arrived.push(record);
+            }
+
+            assert!(
+                arrived.windows(2).all(|pair| pair[0] < pair[1]),
+                "records arrived out of order or twice: {arrived:?}"
+            );
+            let mut all: Vec<u32> = arrived.iter().chain(refused.iter()).copied().collect();
+            all.sort_unstable();
+            assert_eq!(all, vec![0, 1, 2], "a record neither arrived nor came back");
         });
     }
 }
