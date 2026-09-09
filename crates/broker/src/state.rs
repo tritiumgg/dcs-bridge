@@ -9,8 +9,10 @@
 //! `Bridge` is where everything process-global lives. The registration maps
 //! of [`crate::registry`] are here, and the outbound path, the writer thread
 //! over the commit ring and the listener that fans it out, joins them once
-//! [`Bridge::start_outbound`] is called. The inbound rings and the reader thread arrive as they are built.
-//! ADR 0007.
+//! [`Bridge::start_outbound`] is called. The two inbound rings, one per
+//! target, join them at [`Bridge::start_inbound`]: every connection's reader
+//! thread pushes into the one its route map names, and Lua polls each from
+//! the state that owns it. ADR 0007, ADR 0024.
 //!
 //! Both DCS states commit records, and they run on one thread, so the commit
 //! ring's one producer is shared between them behind a lock that is never
@@ -32,8 +34,9 @@ use crate::config::{self, Applied, Config, Value};
 use crate::encode::Stamp;
 use crate::fanout::{Commit, ConnectionId, Writer};
 use crate::handshake;
-use crate::inbound::{Answers, AuthError, Limits, Liveness, Session};
+use crate::inbound::{Answers, AuthError, Command, Delivery, Limits, Liveness, Session};
 use crate::registry::{Capability, Conflict, RecordClass, Registry, Target, Topic};
+use crate::ring::{Consumer, Producer, Push, Ring};
 use crate::transport::{Listener, Record};
 
 /// What the DCS process shares between its two Lua states.
@@ -46,9 +49,13 @@ pub struct Bridge {
     opens: AtomicU32,
     registry: RwLock<Registry>,
     outbound: OnceLock<Outbound>,
-    /// Held while the outbound path is being started, so two starters
-    /// cannot both bind.
+    inbound: OnceLock<Inbound>,
+    /// Held while the outbound path or the inbound rings are being started,
+    /// so two starters cannot both bind or both allocate.
     starting: Mutex<()>,
+    /// Inbound records whose topic no route map names, dropped and counted.
+    /// `unrouted_topic_total`.
+    unrouted: AtomicU64,
     /// Records refused at `begin_to` because their topic is neither a reply
     /// nor the acknowledgement.
     misaddressed: AtomicU64,
@@ -229,6 +236,79 @@ impl Outbound {
     }
 }
 
+/// The inbound rings: one per target, each with the reader threads at one
+/// end and a Lua state at the other.
+///
+/// The producer is shared by every connection's reader thread behind a
+/// lock those threads alone take, for one push each; the consumer is the
+/// logic thread's and is taken the way the commit ring's producer is, with
+/// a `try_lock` that refuses rather than waits. ADR 0024.
+pub struct Inbound {
+    sim: Lane,
+    hook: Lane,
+}
+
+impl Inbound {
+    /// The ring `target` polls.
+    fn lane(&self, target: Target) -> &Lane {
+        match target {
+            Target::SimDriver => &self.sim,
+            Target::HookDriver => &self.hook,
+        }
+    }
+}
+
+impl fmt::Debug for Inbound {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Inbound")
+            .field("sim_busy", &self.sim.busy.load(Ordering::Relaxed))
+            .field("hook_busy", &self.hook.busy.load(Ordering::Relaxed))
+            .finish_non_exhaustive()
+    }
+}
+
+/// One inbound ring's two ends and its count of records turned away.
+struct Lane {
+    producer: Mutex<Producer<Command>>,
+    consumer: Mutex<Consumer<Command>>,
+    /// Records the ring had no room for. Each was the newest at the time
+    /// and came back to the reader thread that offered it.
+    busy: AtomicU64,
+}
+
+impl Lane {
+    fn new(capacity: usize) -> Self {
+        let (producer, consumer) = Ring::split(capacity);
+        Lane {
+            producer: Mutex::new(producer),
+            consumer: Mutex::new(consumer),
+            busy: AtomicU64::new(0),
+        }
+    }
+}
+
+/// Why a `poll` answered nothing at all, rather than an empty ring.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PollError {
+    /// The inbound rings have not been allocated: `configure` comes first.
+    NotStarted,
+    /// Another thread was polling the same ring. Refused, because waiting
+    /// would put a lock on the logic thread and a second poller is a
+    /// defect.
+    Busy,
+}
+
+impl fmt::Display for PollError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            PollError::NotStarted => "configure comes first: the rings are allocated by it",
+            PollError::Busy => "another thread is polling this ring",
+        })
+    }
+}
+
+impl std::error::Error for PollError {}
+
 /// Why a `configure` was refused, with nothing changed.
 #[derive(Debug)]
 pub enum ConfigureError {
@@ -379,7 +459,9 @@ impl Bridge {
             opens: AtomicU32::new(0),
             registry: RwLock::new(Registry::default()),
             outbound: OnceLock::new(),
+            inbound: OnceLock::new(),
             starting: Mutex::new(()),
+            unrouted: AtomicU64::new(0),
             misaddressed: AtomicU64::new(0),
             partial_registration: AtomicU64::new(0),
             instance_id,
@@ -418,14 +500,19 @@ impl Bridge {
     /// so a connection authenticating after this sees the new one; a
     /// session opened under a token the table drops is not closed here.
     ///
-    /// The first call is also what allocates and binds: the commit ring,
-    /// the listener on `bind_address` and `port`, and the ring each
-    /// connection gets, all sized from the table. A bind that fails refuses
-    /// the call with nothing in force and nothing started, so the hook
-    /// driver can fix the address and call again. A later call never
-    /// reallocates and never rebinds. The commit ring has no key of its own
-    /// and takes `ring_out_records`: one thread drains it into every
-    /// connection's ring, so it needs no more room than one of them.
+    /// The first call is also what allocates and binds: the two inbound
+    /// rings, the commit ring, the listener on `bind_address` and `port`,
+    /// and the ring each connection gets, all sized from the table. The
+    /// inbound rings come first, so no connection can be accepted before
+    /// the ring its records go to exists. A bind that fails refuses the
+    /// call with nothing in force and nothing started, so the hook driver
+    /// can fix the address and call again; the inbound rings it allocated
+    /// stay, sized as the refused table sized them, since the next call
+    /// carries the same restart-tier keys or the file has changed under a
+    /// broker that has never listened. A later call never reallocates and
+    /// never rebinds. The commit ring has no key of its own and takes
+    /// `ring_out_records`: one thread drains it into every connection's
+    /// ring, so it needs no more room than one of them.
     ///
     /// The swap is one pointer store, so a reader sees the old
     /// configuration or the new one and never a mix. The read lock is held
@@ -448,6 +535,10 @@ impl Bridge {
             let applied = Config::first(table)?;
             let addr = SocketAddr::new(applied.config.bind_address, applied.config.port);
             let ring = applied.config.ring_out_records as usize;
+            self.start_inbound(
+                applied.config.ring_in_sim_driver_records as usize,
+                applied.config.ring_in_hook_driver_records as usize,
+            );
             self.start_outbound(addr, ring, ring)
                 .map_err(|error| ConfigureError::Bind { addr, error })?;
             applied
@@ -522,6 +613,98 @@ impl Bridge {
     /// The outbound path, once started.
     pub fn outbound(&self) -> Option<&Outbound> {
         self.outbound.get()
+    }
+
+    /// Allocate the two inbound rings, `sim_capacity` records for the sim
+    /// driver's and `hook_capacity` for the hook driver's, once. A second
+    /// call changes nothing.
+    ///
+    /// # Panics
+    ///
+    /// If either capacity is zero, which the configuration's check on the
+    /// two keys does not let through.
+    pub fn start_inbound(&self, sim_capacity: usize, hook_capacity: usize) {
+        let _starting = self.starting.lock().unwrap_or_else(PoisonError::into_inner);
+        if self.inbound.get().is_some() {
+            return;
+        }
+        // The lock above makes this the only setter.
+        let _ = self.inbound.set(Inbound {
+            sim: Lane::new(sim_capacity),
+            hook: Lane::new(hook_capacity),
+        });
+    }
+
+    /// The inbound rings, once allocated.
+    pub fn inbound(&self) -> Option<&Inbound> {
+        self.inbound.get()
+    }
+
+    /// Put an inbound record on the ring its route names, or hand it back.
+    ///
+    /// Called on a reader thread. The route is read under the registry's
+    /// read lock and the lock released before the ring's producer is taken,
+    /// so no thread holds both. A topic in no route map goes nowhere and is
+    /// counted, never defaulted to the sim driver: a command the sim driver
+    /// was not told to expect is not one it should run. A full ring turns
+    /// the newest record away and counts it; the `Rejected` that tells the
+    /// sender is a later task's. Before the rings exist nothing can have
+    /// connected, so a record arriving then is a defect, and it is dropped
+    /// and counted as unrouted rather than held anywhere. ADR 0024.
+    pub fn deliver(&self, command: Command) -> Delivery {
+        let target = self.registry().routes().get(&command.topic).copied();
+        let lane = match (target, self.inbound.get()) {
+            (Some(target), Some(inbound)) => inbound.lane(target),
+            _ => {
+                self.unrouted.fetch_add(1, Ordering::Relaxed);
+                return Delivery::Unrouted(command);
+            }
+        };
+        let offered = lane
+            .producer
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .offer(command);
+        match offered {
+            Push::Stored => Delivery::Stored,
+            Push::Refused(command) | Push::Evicted(command) => {
+                lane.busy.fetch_add(1, Ordering::Relaxed);
+                Delivery::Busy(command)
+            }
+        }
+    }
+
+    /// Take the oldest record from `target`'s ring, or `None` when it holds
+    /// nothing.
+    ///
+    /// Called on the logic thread, by the Lua state the target names. The
+    /// consumer is never waited on: a second thread polling the same ring
+    /// is a defect, so it is refused and reported rather than served.
+    pub fn poll(&self, target: Target) -> Result<Option<Command>, PollError> {
+        let lane = self
+            .inbound
+            .get()
+            .ok_or(PollError::NotStarted)?
+            .lane(target);
+        match lane.consumer.try_lock() {
+            Ok(mut consumer) => Ok(consumer.pop()),
+            Err(TryLockError::Poisoned(poisoned)) => Ok(poisoned.into_inner().pop()),
+            Err(TryLockError::WouldBlock) => Err(PollError::Busy),
+        }
+    }
+
+    /// How many inbound records named a topic in no route map, and were
+    /// dropped for it.
+    pub fn unrouted_topic(&self) -> u64 {
+        self.unrouted.load(Ordering::Relaxed)
+    }
+
+    /// How many inbound records `target`'s ring had no room for. Zero
+    /// before the rings exist.
+    pub fn inbound_busy(&self, target: Target) -> u64 {
+        self.inbound.get().map_or(0, |inbound| {
+            inbound.lane(target).busy.load(Ordering::Relaxed)
+        })
     }
 
     /// What this broker greets a connection with, as of now.
@@ -1756,6 +1939,179 @@ mod tests {
             bridge.mission_time(),
             42.0,
             "closing the epoch moved the clock"
+        );
+    }
+
+    const SIM_COMMAND: &str = "dcsbridge.builtin.sim.SetFlag";
+    const HOOK_COMMAND: &str = "dcsbridge.builtin.hook.Kick";
+
+    /// A command from connection `from` on `topic`, as the reader thread
+    /// hands one over.
+    fn command(from: u64, topic: &str, value: &[u8]) -> Command {
+        Command {
+            from: ConnectionId::from_raw(from),
+            topic: topic.to_owned(),
+            value: value.to_vec(),
+        }
+    }
+
+    /// Register the two commands' routes on `bridge`.
+    fn route_both(bridge: &Bridge) {
+        bridge
+            .register_routes([
+                (SIM_COMMAND.to_string(), Target::SimDriver),
+                (HOOK_COMMAND.to_string(), Target::HookDriver),
+            ])
+            .expect("two new routes merge");
+    }
+
+    /// A delivered command is polled from the ring its route names and
+    /// from no other, in the order it was delivered, with its sender's id
+    /// and its bytes intact, and an empty ring answers `None`.
+    #[test]
+    fn a_routed_command_is_polled_from_its_ring_and_no_other() {
+        let bridge = Bridge::new(20);
+        bridge.start_inbound(4, 4);
+        bridge.start_inbound(1, 1);
+        route_both(&bridge);
+
+        assert_eq!(bridge.poll(Target::SimDriver), Ok(None));
+        assert_eq!(bridge.poll(Target::HookDriver), Ok(None));
+
+        assert_eq!(
+            bridge.deliver(command(7, SIM_COMMAND, b"first")),
+            Delivery::Stored
+        );
+        assert_eq!(
+            bridge.deliver(command(8, HOOK_COMMAND, b"kick")),
+            Delivery::Stored
+        );
+        assert_eq!(
+            bridge.deliver(command(9, SIM_COMMAND, b"second")),
+            Delivery::Stored
+        );
+
+        assert_eq!(
+            bridge.poll(Target::HookDriver),
+            Ok(Some(command(8, HOOK_COMMAND, b"kick"))),
+            "the hook ring did not hold the hook command"
+        );
+        assert_eq!(
+            bridge.poll(Target::HookDriver),
+            Ok(None),
+            "the hook ring held a sim command"
+        );
+        assert_eq!(
+            bridge.poll(Target::SimDriver),
+            Ok(Some(command(7, SIM_COMMAND, b"first")))
+        );
+        assert_eq!(
+            bridge.poll(Target::SimDriver),
+            Ok(Some(command(9, SIM_COMMAND, b"second")))
+        );
+        assert_eq!(bridge.poll(Target::SimDriver), Ok(None));
+        assert_eq!(
+            bridge.unrouted_topic(),
+            0,
+            "a routed command was counted as unrouted"
+        );
+        assert_eq!(
+            bridge.inbound_busy(Target::SimDriver) + bridge.inbound_busy(Target::HookDriver),
+            0,
+            "a stored command was counted as turned away"
+        );
+    }
+
+    /// A command on a topic no route map names comes back, is counted, and
+    /// reaches neither ring; it is never defaulted to the sim driver. A
+    /// topic with a class and a capability but no route is the same case.
+    #[test]
+    fn an_unrouted_command_is_counted_and_polled_from_neither() {
+        let bridge = Bridge::new(21);
+        bridge.start_inbound(4, 4);
+        route_both(&bridge);
+        const EVENT: &str = "dcsbridge.builtin.sim.UnitDestroyed";
+        bridge
+            .register_classes([(EVENT.to_string(), RecordClass::Durable)])
+            .unwrap();
+        bridge
+            .register_caps([(EVENT.to_string(), Capability::Read)])
+            .unwrap();
+
+        let stray = command(3, "dcsbridge.sim.Resync", b"");
+        assert_eq!(bridge.deliver(stray.clone()), Delivery::Unrouted(stray));
+        let outbound_only = command(3, EVENT, b"");
+        assert_eq!(
+            bridge.deliver(outbound_only.clone()),
+            Delivery::Unrouted(outbound_only)
+        );
+        assert_eq!(bridge.unrouted_topic(), 2);
+        assert_eq!(bridge.poll(Target::SimDriver), Ok(None));
+        assert_eq!(bridge.poll(Target::HookDriver), Ok(None));
+    }
+
+    /// A full ring turns the newest command away and keeps what it holds,
+    /// counting the refusal against that ring alone, and takes the next
+    /// command once one has been polled.
+    #[test]
+    fn a_full_ring_refuses_the_newest_and_keeps_the_first() {
+        let bridge = Bridge::new(22);
+        bridge.start_inbound(2, 1);
+        route_both(&bridge);
+
+        assert_eq!(
+            bridge.deliver(command(1, SIM_COMMAND, b"a")),
+            Delivery::Stored
+        );
+        assert_eq!(
+            bridge.deliver(command(1, SIM_COMMAND, b"b")),
+            Delivery::Stored
+        );
+        let third = command(1, SIM_COMMAND, b"c");
+        assert_eq!(bridge.deliver(third.clone()), Delivery::Busy(third));
+        assert_eq!(bridge.inbound_busy(Target::SimDriver), 1);
+        assert_eq!(bridge.inbound_busy(Target::HookDriver), 0);
+        assert_eq!(
+            bridge.unrouted_topic(),
+            0,
+            "a full ring was counted as no route"
+        );
+
+        assert_eq!(
+            bridge.poll(Target::SimDriver),
+            Ok(Some(command(1, SIM_COMMAND, b"a"))),
+            "the oldest command was not kept"
+        );
+        assert_eq!(
+            bridge.deliver(command(1, SIM_COMMAND, b"d")),
+            Delivery::Stored
+        );
+        assert_eq!(
+            bridge.poll(Target::SimDriver),
+            Ok(Some(command(1, SIM_COMMAND, b"b")))
+        );
+        assert_eq!(
+            bridge.poll(Target::SimDriver),
+            Ok(Some(command(1, SIM_COMMAND, b"d")))
+        );
+        assert_eq!(bridge.poll(Target::SimDriver), Ok(None));
+    }
+
+    /// Before the rings exist a poll is refused as not started, and a
+    /// command, which nothing could have sent, is dropped and counted.
+    #[test]
+    fn a_poll_before_the_rings_exist_is_refused() {
+        let bridge = Bridge::new(23);
+        route_both(&bridge);
+        assert_eq!(bridge.poll(Target::SimDriver), Err(PollError::NotStarted));
+        assert_eq!(bridge.poll(Target::HookDriver), Err(PollError::NotStarted));
+        let early = command(1, SIM_COMMAND, b"");
+        assert_eq!(bridge.deliver(early.clone()), Delivery::Unrouted(early));
+        assert_eq!(bridge.unrouted_topic(), 1);
+        assert_eq!(bridge.inbound_busy(Target::SimDriver), 0);
+        assert_eq!(
+            PollError::NotStarted.to_string(),
+            "configure comes first: the rings are allocated by it"
         );
     }
 }

@@ -392,6 +392,60 @@ pub struct Session {
     pub caps: HashSet<Capability>,
 }
 
+/// An inbound record as the rings carry it from the reader thread to Lua:
+/// who sent it, what topic it is on, and the payload's own bytes.
+///
+/// The topic is the type URL with the prefix taken off, which is the name
+/// the route map and the generated decoders know it by. The bytes are the
+/// `Any`'s value, decoded by whoever the topic is for and by nothing here.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Command {
+    /// The connection it arrived on, for the answer to be addressed to.
+    pub from: ConnectionId,
+    /// The topic, as registered.
+    pub topic: String,
+    /// The payload's bytes, opaque.
+    pub value: Vec<u8>,
+}
+
+impl Command {
+    /// Take the topic and the bytes out of a decoded envelope.
+    ///
+    /// The prefix is drained off the front of the string the decoder
+    /// allocated, so the topic costs no second allocation.
+    pub fn from_envelope(from: ConnectionId, envelope: Envelope) -> Result<Self, Close> {
+        let Payload {
+            mut type_url,
+            value,
+        } = envelope.payload.ok_or(Close::NoPayload)?;
+        if type_url.starts_with(TYPE_URL_PREFIX) {
+            type_url.drain(..TYPE_URL_PREFIX.len());
+        }
+        Ok(Command {
+            from,
+            topic: type_url,
+            value,
+        })
+    }
+}
+
+/// What became of a command handed to the rings.
+///
+/// A command the rings do not keep comes back, as a ring hands back what
+/// it turns away: the reader thread is the one that can tell the sender,
+/// and it decides where the record is dropped.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum Delivery {
+    /// The ring its route names holds it.
+    Stored,
+    /// No route map names its topic, so it went nowhere. Counted in
+    /// `unrouted_topic_total`.
+    Unrouted(Command),
+    /// The ring its route names was full, so the newest record, this one,
+    /// was turned away. Counted against that ring.
+    Busy(Command),
+}
+
 /// Why an `Auth` failed. Mirrors `dcsbridge.broker.AuthError`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AuthError {
