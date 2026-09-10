@@ -82,7 +82,7 @@ fn schema_sha256(envelope: &Envelope) -> Option<String> {
 /// says whether the token was accepted, and the handshake says which schema
 /// the bridge serves, because those are the two records a person watching
 /// needs the inside of.
-fn write_frame_line(out: &mut impl Write, envelope: &Envelope) -> io::Result<()> {
+pub fn write_frame_line(out: &mut impl Write, envelope: &Envelope) -> io::Result<()> {
     write!(out, "seq={}", envelope.seq)?;
     match (envelope.topic(), &envelope.payload) {
         (Some(topic), Some(any)) => {
@@ -267,11 +267,21 @@ mod tests {
         use dcsbridge_broker::registry::Capability;
         use dcsbridge_broker::state::Token;
 
-        dcsbridge_broker::bridge().set_tokens(vec![Token {
-            id: "tail".into(),
-            secret: b"tail-secret".to_vec(),
-            caps: [Capability::Read].into_iter().collect(),
-        }]);
+        // The table is the bridge's one table and `send`'s test sets it
+        // too, in parallel, so both set the same two tokens and neither
+        // order loses one.
+        dcsbridge_broker::bridge().set_tokens(vec![
+            Token {
+                id: "tail".into(),
+                secret: b"tail-secret".to_vec(),
+                caps: [Capability::Read].into_iter().collect(),
+            },
+            Token {
+                id: "send".into(),
+                secret: b"send-secret".to_vec(),
+                caps: [Capability::Command].into_iter().collect(),
+            },
+        ]);
         let mut stream = TcpStream::connect(addr).expect("the listener accepts");
         stream
             .write_all(&auth_frame("tail-secret"))

@@ -204,6 +204,11 @@ impl Deadline {
             until: Instant::now() + wait,
         }
     }
+
+    /// The same stream under a new deadline, `wait` from now.
+    pub fn again(self, wait: Duration) -> Self {
+        Self::new(self.stream, wait)
+    }
 }
 
 impl Read for Deadline {

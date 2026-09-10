@@ -6,10 +6,12 @@
 //! numbers show that records were dropped. `ping` asks whether the sim is
 //! alive and exits by the answer, so a script can ask too. `schema` fetches
 //! the set the bridge serves and writes it to a file, so it can be checked
-//! against the deployed one.
+//! against the deployed one. `send` puts one record on a topic, so a
+//! command can be seen to reach the Lua state its route names.
 
 mod ping;
 mod schema;
+mod send;
 mod tail;
 mod wire;
 
@@ -38,6 +40,8 @@ enum Verb {
     Ping(PingArgs),
     /// Fetch the schema a bridge serves and write it to a file.
     Schema(SchemaArgs),
+    /// Send one record on a topic, and exit 1 when the token is refused.
+    Send(SendArgs),
 }
 
 /// The address the bridge listens on.
@@ -90,6 +94,37 @@ struct SchemaArgs {
     token: TokenFile,
 }
 
+#[derive(Args)]
+struct SendArgs {
+    /// The topic: the record's fully qualified message name, such as
+    /// `dcsbridge.builtin.sim.SetFlag`.
+    #[arg(value_name = "TOPIC")]
+    topic: String,
+
+    /// A file holding the record's encoded bytes, sent whole.
+    ///
+    /// Without it and without `--hex`, the record is sent with no fields.
+    #[arg(long, value_name = "PATH", conflicts_with = "hex")]
+    file: Option<PathBuf>,
+
+    /// The record's encoded bytes as hex, two digits per byte, spaces
+    /// between bytes allowed.
+    #[arg(long, value_name = "HEX")]
+    hex: Option<String>,
+
+    /// Seconds to keep reading after the record is sent, printing each
+    /// frame that comes back as `tail` does. Nothing answers a record
+    /// unless something sends an answer, so the default is not to wait.
+    #[arg(long, value_name = "SECS", default_value_t = 0)]
+    wait: u64,
+
+    #[command(flatten)]
+    addr: Addr,
+
+    #[command(flatten)]
+    token: TokenFile,
+}
+
 /// The environment variable a secret is read from when no file names one.
 const TOKEN_ENV: &str = "DCSB_TOKEN";
 
@@ -104,6 +139,100 @@ fn main() -> ExitCode {
         Verb::Tail(args) => tail_verb(&args),
         Verb::Ping(args) => ping_verb(&args),
         Verb::Schema(args) => schema_verb(&args),
+        Verb::Send(args) => send_verb(&args),
+    }
+}
+
+/// Connect, authenticate, send one record, and exit by the token's answer.
+///
+/// The token accepted exits 0, after one line naming the topic and the
+/// size, and after whatever `--wait` printed. The token refused exits 1,
+/// and so does a wait cut mid-frame or fed bytes no envelope decodes from,
+/// after everything readable before it has been printed, as `tail` exits:
+/// the record was sent and that line has been printed already. Nothing
+/// learned exits 2: no token or no payload to send, a refused connection,
+/// a bridge that closes without answering or does not answer in time.
+fn send_verb(args: &SendArgs) -> ExitCode {
+    let secret = match token(args.token.token_file.as_deref()) {
+        Ok(secret) => secret,
+        Err(error) => {
+            eprintln!("{error}");
+            return ExitCode::from(2);
+        }
+    };
+    let value = match send::payload(args.file.as_deref(), args.hex.as_deref()) {
+        Ok(value) => value,
+        Err(error) => {
+            eprintln!("{error}");
+            return ExitCode::from(2);
+        }
+    };
+    let addr = &args.addr.addr;
+    let mut stream = match TcpStream::connect(addr) {
+        Ok(stream) => stream,
+        Err(error) => {
+            eprintln!("cannot connect to {addr}: {error}");
+            return ExitCode::from(2);
+        }
+    };
+    // The token and the record go out together, as `schema` sends its
+    // request: the bridge reads frames in order, and a refused token closes
+    // the connection before the record is read.
+    let bytes = value.len();
+    let mut request = wire::auth_frame(&secret);
+    request.extend(send::record_frame(&args.topic, value));
+    if let Err(error) = stream.write_all(&request) {
+        eprintln!("cannot send the record to {addr}: {error}");
+        return ExitCode::from(2);
+    }
+    let mut reader = wire::Deadline::new(stream, ANSWER_WAIT);
+
+    match send::run(&mut reader) {
+        Ok(send::Outcome::Sent) => {
+            println!("sent topic={} bytes={bytes}", args.topic);
+            if args.wait == 0 {
+                return ExitCode::SUCCESS;
+            }
+            let reader = reader.again(Duration::from_secs(args.wait));
+            let stdout = io::stdout();
+            let mut out = stdout.lock();
+            let result = send::wait(reader, &mut out);
+            let _ = out.flush();
+            match result {
+                Ok(_) => ExitCode::SUCCESS,
+                Err(error) => {
+                    eprintln!("send: {error}");
+                    ExitCode::from(1)
+                }
+            }
+        }
+        Ok(send::Outcome::Refused(error)) => {
+            eprintln!(
+                "the bridge refused the token: {}",
+                wire::auth_error_name(error)
+            );
+            ExitCode::from(1)
+        }
+        Ok(send::Outcome::Closed) => {
+            eprintln!("{addr} closed the connection without answering");
+            ExitCode::from(2)
+        }
+        Err(error)
+            if matches!(
+                error.kind(),
+                io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+            ) =>
+        {
+            eprintln!(
+                "no answer from {addr} within {} seconds",
+                ANSWER_WAIT.as_secs()
+            );
+            ExitCode::from(2)
+        }
+        Err(error) => {
+            eprintln!("send: {error}");
+            ExitCode::from(2)
+        }
     }
 }
 
