@@ -1,6 +1,6 @@
 # Working state
 
-**Last updated:** 2026-09-08
+**Last updated:** 2026-09-09
 
 The handoff between sessions. Read it first; update it before a session ends,
 not only when a task finishes. Stamp the date above each time; it carries a
@@ -18,7 +18,7 @@ is just deleted. Write entries as one or two lines, never paragraphs.
 
 ## In progress
 
-Nothing. 2.12 is closed; 2.C4 is next.
+Nothing. 2.C4 is closed; 2.13 is next.
 
 *One task at most. Say what is done, what is not, and where to resume. Say what
 is committed and what is only in the working tree. Say what is knowingly
@@ -26,28 +26,29 @@ broken. Empty this when the task closes.*
 
 ## Just finished
 
+- **2.C4** — `dcsb send`: bytes from a file or hex, `--wait`. PR #78, ADR 0025.
 - **2.12** — the two inbound rings, the routing, `poll(target)`. PR #77, ADR 0024.
 - **2.16** — the four registration calls, the merge, and `begin` refusing
   an unregistered topic. PR #75, ADR 0023.
-- **2.11** — `shim.tick` and `shim.epoch`: the heartbeat, the stamp. PR #74.
 
 *The last three at most, one line each. Git log holds the rest.*
 
 ## Next
 
-**Task 2.C4** — `dcsb send`: authenticate, read a record from a file or the
-command line, send it. Done when a record sent by `dcsb send` arrives on
-the right ring. One branch, about 250 lines.
+**Task 2.13** — `Rejected` from the reader thread with the four reasons,
+echoing the inbound `seq` and the topic; a header that does not parse drops
+the connection; then the three rate caps and `rejections_suppressed_total`.
+Done when a refused command is answered once and a flood of them is not.
+One branch, two runs of commits, about 600 lines.
 
-**An agent verifies** the send over loopback against the broker's reader;
-**the maintainer verifies** at a live install that a record sent on a
-`sim_driver` topic is polled from the sim ring and never the hook ring,
-which is 2.12's routing check under a real DCS and SPEC §17's "Routing"
-row; the pull request carries the steps.
+**An agent verifies** both over loopback: `dcsb send` on an unrouted topic
+with `--wait` prints the `Rejected`, and a flood is answered under the cap;
+**the maintainer verifies** at a live install that a `Rejected` reaches
+`dcsb send --wait` with the sent `seq`; the pull request carries the steps.
 
 ## After that
 
-- **M2.2**: after 2.C4, 2.13, then 2.14.
+- **M2.2**: after 2.13, 2.14 closes it.
 - **Phase 3** opens on `protoc-gen-dcsbridge-lua`, which reads the four message
   options this schema defines and splits its output by `Target`. It reads the
   plugin request through `prost-types`; ADR 0016.
