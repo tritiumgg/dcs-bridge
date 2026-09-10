@@ -219,6 +219,10 @@ dcsb tail --addr 192.0.2.10:7742   Connect to a bridge on another address.
 dcsb tail --token-file token.txt   Read the token from a file instead.
 dcsb ping                          Ask whether the sim is alive.
 dcsb schema fetched.pb             Write the schema the bridge serves to a file.
+dcsb send dcsbridge.builtin.sim.SetFlag --hex 082a
+                                   Send one record, its bytes given as hex.
+dcsb send dcsbridge.builtin.sim.SetFlag --file record.bin --wait 2
+                                   Send the file's bytes and print what answers.
 dcsb --help                        List the available commands.
 ```
 
@@ -245,7 +249,19 @@ exits 1, writing nothing, when the bridge holds no schema yet, refuses the
 token, or serves bytes that do not hash to what its handshake said. Nothing
 learned exits 2.
 
-`tail`, `ping` and `schema` are built. The others are planned: `send`,
+`send` authenticates like `tail` and sends one record on the topic named,
+which is the record's fully qualified message name. The record's encoded
+bytes come from the file `--file` names, or from `--hex` as two hex digits
+per byte, with spaces between bytes allowed; with neither, the record is
+sent with no fields. The bridge does not check the bytes, so a record that
+does not decode fails in the Lua handler that reads it. `send` prints `sent
+topic=<name> bytes=<n>` and exits 0 once the bridge accepts the token, or
+exits 1 when it refuses it. Nothing answers a record unless a handler sends
+an answer; `--wait <seconds>` keeps reading for that long and prints each
+frame that comes back as `tail` prints it. Encoding a record from JSON
+through the served schema is planned.
+
+`tail`, `ping`, `schema` and `send` are built. The others are planned:
 `doctor`, `stats`, `record`, `replay` and `mock`.
 
 ## Build from source
