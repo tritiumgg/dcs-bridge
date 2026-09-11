@@ -34,7 +34,9 @@ use crate::config::{self, Applied, Config, Value};
 use crate::encode::Stamp;
 use crate::fanout::{Commit, ConnectionId, Writer};
 use crate::handshake;
-use crate::inbound::{Answers, AuthError, Command, Delivery, Limits, Liveness, Session};
+use crate::inbound::{
+    Answers, AuthError, Command, Delivery, Limits, Liveness, RejectedReason, Session,
+};
 use crate::registry::{Capability, Conflict, RecordClass, Registry, Target, Topic};
 use crate::ring::{Consumer, Producer, Push, Ring};
 use crate::transport::{Listener, Record};
@@ -104,10 +106,13 @@ pub struct Bridge {
     /// `SeqAck` records consumed. Nothing reads the number they carry until
     /// the replay spool exists.
     seq_acks: AtomicU64,
-    /// Messages refused because the session's token lacked the capability
-    /// they require. `commands_rejected_total` by that reason, once stats
-    /// exist.
-    no_capability: AtomicU64,
+    /// Records refused, by reason, in `RejectedReason::ALL`'s order:
+    /// `commands_rejected_total`. Every refusal counts here, answered or
+    /// not.
+    commands_rejected: [AtomicU64; 4],
+    /// Refusals above `rejected_max_per_sec` or `busy_max_per_sec`,
+    /// counted here and answered with nothing: `rejections_suppressed_total`.
+    rejections_suppressed: AtomicU64,
     /// The schema the hook driver handed over, held for the life of the
     /// process: replacing the served set is a DCS restart, so a second
     /// hand-off is refused rather than applied.
@@ -412,8 +417,8 @@ impl Answers for Global {
         bridge().set_enabled(enabled);
     }
 
-    fn refused_no_capability(&self, topic: &str) {
-        bridge().refused_no_capability(topic);
+    fn rejected(&self, reason: RejectedReason, answered: bool) {
+        bridge().rejected(reason, answered);
     }
 
     fn deliver(&self, command: Command) -> Delivery {
@@ -480,7 +485,8 @@ impl Bridge {
             unknown_keys: AtomicU64::new(0),
             authenticated: AtomicU64::new(0),
             seq_acks: AtomicU64::new(0),
-            no_capability: AtomicU64::new(0),
+            commands_rejected: [const { AtomicU64::new(0) }; 4],
+            rejections_suppressed: AtomicU64::new(0),
             schema: OnceLock::new(),
         }
     }
@@ -898,16 +904,23 @@ impl Bridge {
         self.seq_acks.load(Ordering::Relaxed)
     }
 
-    /// A message on `topic` was refused because the session's token lacks
-    /// the capability it requires. Counted; the `Rejected` that would tell
-    /// the sender is a later task's.
-    pub fn refused_no_capability(&self, _topic: &str) {
-        self.no_capability.fetch_add(1, Ordering::Relaxed);
+    /// A record was refused for `reason`; `answered` says whether the
+    /// `Rejected` was sent or withheld by its cap.
+    pub fn rejected(&self, reason: RejectedReason, answered: bool) {
+        self.commands_rejected[reason as usize - 1].fetch_add(1, Ordering::Relaxed);
+        if !answered {
+            self.rejections_suppressed.fetch_add(1, Ordering::Relaxed);
+        }
     }
 
-    /// How many messages were refused for a capability the token lacked.
-    pub fn no_capability(&self) -> u64 {
-        self.no_capability.load(Ordering::Relaxed)
+    /// How many records were refused for `reason`, answered or not.
+    pub fn commands_rejected(&self, reason: RejectedReason) -> u64 {
+        self.commands_rejected[reason as usize - 1].load(Ordering::Relaxed)
+    }
+
+    /// How many refusals were over their cap and answered with nothing.
+    pub fn rejections_suppressed(&self) -> u64 {
+        self.rejections_suppressed.load(Ordering::Relaxed)
     }
 
     /// Replace the token table whole, leaving every other key as it is.

@@ -34,12 +34,19 @@
 //! broker handles itself: `GetSchema`, answered with the schema or with why
 //! there is none; `SeqAck`, consumed and counted and answered by nothing;
 //! and `SetEnabled`, the kill switch, applied when the token carries
-//! `reload` and counted when it does not. None of them reaches a ring.
+//! `reload` and refused when it does not. None of them reaches a ring.
 //! Every other topic is a record for Lua, and this thread puts it on the
 //! ring the registered route map names for it, with the connection's id
-//! for the answer to be addressed to. A topic in no route map goes nowhere
-//! and is counted; a ring with no room turns the record away and counts
-//! it; neither closes the connection. ADR 0024.
+//! for the answer to be addressed to. A topic in no route map goes nowhere;
+//! a ring with no room turns the record away; neither closes the
+//! connection. ADR 0024.
+//!
+//! A record the broker delivers nowhere is refused out loud: the sender is
+//! answered with `Rejected`, carrying the `seq` it gave the record, the
+//! topic and the reason, so it can tell which record went nowhere and
+//! nothing here has to remember it. A frame that does not parse is not
+//! refused this way, because nothing in it can be echoed; that connection
+//! is closed.
 
 use std::collections::HashSet;
 use std::io::{self, Read};
@@ -161,9 +168,14 @@ pub trait Answers: Send + Sync + 'static {
     fn seq_ack(&self, seq: u64);
     /// A consumer with the `reload` capability sets the kill switch.
     fn set_enabled(&self, enabled: bool);
-    /// A message was refused because the session's token lacks the
-    /// capability it requires.
-    fn refused_no_capability(&self, topic: &str);
+    /// A record was refused for `reason`, and the `Rejected` that says so
+    /// was sent when `answered` is true and withheld by its cap when it is
+    /// not. Every refusal is counted by reason; a withheld one is counted
+    /// as suppressed as well. With nothing behind the transport, nothing
+    /// counts.
+    fn rejected(&self, reason: RejectedReason, answered: bool) {
+        let _ = (reason, answered);
+    }
     /// A record for Lua: put it on the ring its route names, or hand it
     /// back. With nothing behind the transport there is no ring, so
     /// nothing is routed.
@@ -457,6 +469,43 @@ pub enum Delivery {
     Busy(Command),
 }
 
+/// Why a record was refused. Mirrors `dcsbridge.broker.RejectedReason`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RejectedReason {
+    /// No route map names the topic.
+    UnknownTopic = 1,
+    /// The session's token lacks the capability the topic requires.
+    NoCapability = 2,
+    /// The connection is over `inbound_records_per_sec`.
+    RateLimited = 3,
+    /// The ring the route names had no room.
+    Busy = 4,
+}
+
+impl RejectedReason {
+    /// Every member, in wire order, for a counter per reason.
+    pub const ALL: [RejectedReason; 4] = [
+        RejectedReason::UnknownTopic,
+        RejectedReason::NoCapability,
+        RejectedReason::RateLimited,
+        RejectedReason::Busy,
+    ];
+}
+
+/// `dcsbridge.broker.Rejected` as an envelope tail: the sender's `seq` and
+/// topic echoed, and why the record went nowhere. The topic is the
+/// sender's own string, held under `max_type_url_bytes` when it was read,
+/// so the answer is sized for it.
+pub fn rejected(seq: u64, topic: &str, reason: RejectedReason) -> Record {
+    let mut e = Encoder::with_capacity(ANSWER_BYTES + topic.len());
+    e.begin(topic::REJECTED.as_bytes(), None);
+    // A uint64 is a varint of the same bits an int64 is.
+    e.integer(1, seq as i64).expect("the answer fits");
+    e.string(2, topic.as_bytes()).expect("the answer fits");
+    e.integer(3, reason as i64).expect("the answer fits");
+    Record::from(e.commit().expect("the answer fits"))
+}
+
 /// Why an `Auth` failed. Mirrors `dcsbridge.broker.AuthError`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AuthError {
@@ -617,25 +666,51 @@ pub fn serve(
             }
             (refused @ topic::SET_ENABLED, Some(opened)) => {
                 let set = SetEnabled::decode(payload(&envelope)).map_err(Close::Payload)?;
-                // Nothing answers this, and nothing yet refuses it out loud:
-                // the `Rejected` record is a later task's, so a token
-                // without `reload` is counted and the switch is left alone.
+                // Nothing answers this when it is applied. A token without
+                // `reload` leaves the switch alone and is told so.
                 if opened.caps.contains(&Capability::Reload) {
                     answers.set_enabled(set.enabled);
                 } else {
-                    answers.refused_no_capability(refused);
+                    refuse(
+                        connections,
+                        answers,
+                        id,
+                        envelope.seq,
+                        refused,
+                        RejectedReason::NoCapability,
+                    );
                 }
             }
             // Every other topic is a record for Lua, on the ring its route
-            // names. What the rings hand back is dropped here, on the
-            // thread that read it: the answer that would tell the sender,
-            // `Rejected`, is a later task's.
+            // names. What the rings hand back is refused here, on the
+            // thread that read it, with the sender's own `seq` so it can
+            // tell which record went nowhere.
             (_, Some(_)) => {
+                let seq = envelope.seq;
                 let command = Command::from_envelope(id, envelope)?;
-                drop(answers.deliver(command));
+                let (command, reason) = match answers.deliver(command) {
+                    Delivery::Stored => continue,
+                    Delivery::Unrouted(command) => (command, RejectedReason::UnknownTopic),
+                    Delivery::Busy(command) => (command, RejectedReason::Busy),
+                };
+                refuse(connections, answers, id, seq, &command.topic, reason);
             }
         }
     }
+}
+
+/// Answer the record numbered `seq` on `topic` with a `Rejected` for
+/// `reason`, and count it.
+fn refuse(
+    connections: &Connections<Record>,
+    answers: &dyn Answers,
+    id: ConnectionId,
+    seq: u64,
+    topic: &str,
+    reason: RejectedReason,
+) {
+    connections.answer(id, rejected(seq, topic, reason));
+    answers.rejected(reason, true);
 }
 
 /// A socket read under a wall-clock deadline.

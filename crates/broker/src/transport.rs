@@ -348,7 +348,7 @@ mod tests {
     use super::*;
     use crate::encode::Encoder;
     use crate::fanout::Writer;
-    use crate::inbound::{AuthError, Session};
+    use crate::inbound::{AuthError, RejectedReason, Session};
     use dcsbridge_topic::{self as topic, TYPE_URL_PREFIX};
     use prost::Message;
     use std::io::Read;
@@ -456,8 +456,6 @@ mod tests {
         fn seq_ack(&self, _: u64) {}
 
         fn set_enabled(&self, _: bool) {}
-
-        fn refused_no_capability(&self, _: &str) {}
     }
 
     const SECRET: &[u8] = b"open-sesame";
@@ -502,7 +500,9 @@ mod tests {
         fn set_enabled(&self, enabled: bool) {
             self.enabled.store(enabled, Ordering::SeqCst);
         }
-        fn refused_no_capability(&self, _: &str) {
+        fn rejected(&self, reason: RejectedReason, answered: bool) {
+            assert_eq!(reason, RejectedReason::NoCapability);
+            assert!(answered);
             self.refused.fetch_add(1, Ordering::SeqCst);
         }
     }
@@ -818,6 +818,42 @@ mod tests {
         bridge_enabled: bool,
     }
 
+    /// `dcsbridge.broker.Rejected` as a consumer decodes it.
+    #[derive(Clone, PartialEq, Message)]
+    struct Rejected {
+        #[prost(uint64, tag = "1")]
+        seq: u64,
+        #[prost(string, tag = "2")]
+        topic_id: String,
+        #[prost(int32, tag = "3")]
+        reason: i32,
+    }
+
+    /// The next frame, which must be a `Rejected`, decoded.
+    fn read_rejected(client: &mut TcpStream) -> Rejected {
+        let frame = read_frame(client);
+        let payload = frame.payload.expect("the frame carries a payload");
+        assert_eq!(
+            payload.type_url,
+            type_url(topic::REJECTED),
+            "the next frame was not a Rejected"
+        );
+        Rejected::decode(&payload.value[..]).expect("the Rejected decodes")
+    }
+
+    /// The next frame is a `Rejected` echoing `seq` and `topic`, for
+    /// `reason`.
+    fn assert_rejected(client: &mut TcpStream, seq: u64, topic: &str, reason: RejectedReason) {
+        assert_eq!(
+            read_rejected(client),
+            Rejected {
+                seq,
+                topic_id: topic.to_owned(),
+                reason: reason as i32,
+            }
+        );
+    }
+
     /// The three commands the broker handles itself, after authentication:
     /// `GetSchema` is answered with the error while there is no schema,
     /// `SeqAck` is consumed and answered by nothing, `SetEnabled` flips the
@@ -914,6 +950,12 @@ mod tests {
         reader
             .write_all(&inbound(2, topic::SET_ENABLED, &off))
             .expect("the switch is sent");
+        assert_rejected(
+            &mut reader,
+            2,
+            topic::SET_ENABLED,
+            RejectedReason::NoCapability,
+        );
         assert!(
             pong(&mut reader).bridge_enabled,
             "a token without reload flipped the switch"
@@ -973,7 +1015,6 @@ mod tests {
             }
             fn seq_ack(&self, _: u64) {}
             fn set_enabled(&self, _: bool) {}
-            fn refused_no_capability(&self, _: &str) {}
         }
 
         // A compiled set, if the schema task has written one, so the test
@@ -1060,6 +1101,33 @@ mod tests {
         );
         assert!(commit.is_empty(), "the answer went through the commit ring");
         assert_eq!(commit.dropped(), 0);
+
+        drop(listener);
+        drop(writer);
+    }
+
+    /// A frame whose envelope does not parse is not refused, because
+    /// nothing in it can be echoed: the connection is closed, after
+    /// authentication as before it, and nothing is written to it first.
+    #[test]
+    fn a_frame_whose_header_does_not_parse_drops_the_connection_unanswered() {
+        let (writer, _commit, connections) = Writer::spawn(64);
+        let listener = listener(connections);
+        let mut offender = client(listener.local_addr());
+        read_handshake(&mut offender);
+        assert!(authenticate(&mut offender, SECRET).1.ok);
+
+        let garbage = vec![3u8, 0, 0, 0, 0xff, 0xff, 0xff];
+        offender.write_all(&garbage).expect("the frame is sent");
+        offender
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .expect("the timeout is set");
+        let mut sink = [0u8; 64];
+        let read = offender.read(&mut sink);
+        assert!(
+            matches!(read, Ok(0)) || read.is_err(),
+            "the offender was answered rather than closed: {read:?}"
+        );
 
         drop(listener);
         drop(writer);
@@ -1170,7 +1238,6 @@ mod tests {
             }
             fn seq_ack(&self, _: u64) {}
             fn set_enabled(&self, _: bool) {}
-            fn refused_no_capability(&self, _: &str) {}
         }
         let (writer, _commit, connections) = Writer::spawn(64);
         let listener = Listener::spawn("127.0.0.1:0", connections, 64, Arc::new(Quick)).unwrap();
@@ -1234,7 +1301,6 @@ mod tests {
             }
             fn seq_ack(&self, _: u64) {}
             fn set_enabled(&self, _: bool) {}
-            fn refused_no_capability(&self, _: &str) {}
         }
         let opened = Arc::new(AtomicU64::new(0));
         let closed = Arc::new(AtomicU64::new(0));
@@ -1261,8 +1327,8 @@ mod tests {
         };
 
         // An unrouted record after authentication goes nowhere and closes
-        // nothing: the connection still answers, and closes when the peer
-        // does.
+        // nothing: the connection is told, still answers, and closes when
+        // the peer does.
         let mut unrouted = client(listener.local_addr());
         read_handshake(&mut unrouted);
         assert!(authenticate(&mut unrouted, SECRET).1.ok);
@@ -1272,6 +1338,7 @@ mod tests {
         unrouted
             .write_all(&inbound(3, topic::PING, &[]))
             .expect("the ping is sent");
+        assert_rejected(&mut unrouted, 2, UNROUTED, RejectedReason::UnknownTopic);
         assert_eq!(
             read_frame(&mut unrouted).payload.unwrap().type_url,
             type_url(topic::PONG),
@@ -1392,7 +1459,6 @@ mod tests {
             }
             fn seq_ack(&self, _: u64) {}
             fn set_enabled(&self, _: bool) {}
-            fn refused_no_capability(&self, _: &str) {}
         }
         let (writer, _commit, connections) = Writer::spawn(64);
         let listener = Listener::spawn("127.0.0.1:0", connections, 64, Arc::new(Quick)).unwrap();
@@ -1452,7 +1518,6 @@ mod tests {
             }
             fn seq_ack(&self, _: u64) {}
             fn set_enabled(&self, _: bool) {}
-            fn refused_no_capability(&self, _: &str) {}
         }
         let limits = Arc::new(RwLock::new(inbound::Limits::default()));
         let (writer, _commit, connections) = Writer::spawn(64);
@@ -1527,7 +1592,6 @@ mod tests {
             }
             fn seq_ack(&self, _: u64) {}
             fn set_enabled(&self, _: bool) {}
-            fn refused_no_capability(&self, _: &str) {}
             fn deliver(&self, command: Command) -> Delivery {
                 let ring = match self.routes.get(command.topic.as_str()) {
                     Some(Target::SimDriver) => &self.sim,
@@ -1596,14 +1660,20 @@ mod tests {
         first
             .write_all(&inbound(3, UNROUTED, b"nowhere"))
             .expect("the frame is sent");
+        // The record that went nowhere is refused to its sender, with the
+        // sender's own number on it; the one that was stored is answered
+        // by nothing.
+        assert_rejected(&mut first, 3, UNROUTED, RejectedReason::UnknownTopic);
         ping(&mut first);
         second
             .write_all(&inbound(2, SIM_COMMAND, b"from two"))
             .expect("the frame is sent");
-        // The hook ring holds one, so a second hook command is turned away.
+        // The hook ring holds one, so a second hook command is turned away
+        // and its sender told which one.
         second
             .write_all(&inbound(3, HOOK_COMMAND, b"no room"))
             .expect("the frame is sent");
+        assert_rejected(&mut second, 3, HOOK_COMMAND, RejectedReason::Busy);
         ping(&mut second);
 
         let polled = sim_ring.pop().expect("the sim ring holds the sim command");

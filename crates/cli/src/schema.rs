@@ -273,7 +273,6 @@ mod tests {
             }
             fn seq_ack(&self, _: u64) {}
             fn set_enabled(&self, _: bool) {}
-            fn refused_no_capability(&self, _: &str) {}
         }
 
         // The compiled set when the schema task has written one, so the
