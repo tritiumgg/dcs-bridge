@@ -665,6 +665,7 @@ pub fn serve(
         stream,
         until: Some(Instant::now() + answers.limits().handshake_timeout),
     };
+    let mut refusals = Refusals::new(Instant::now());
 
     loop {
         // Asked for as each frame arrives, so a cap a later `configure`
@@ -732,6 +733,7 @@ pub fn serve(
                         connections,
                         answers,
                         id,
+                        &mut refusals,
                         envelope.seq,
                         refused,
                         RejectedReason::NoCapability,
@@ -750,24 +752,70 @@ pub fn serve(
                     Delivery::Unrouted(command) => (command, RejectedReason::UnknownTopic),
                     Delivery::Busy(command) => (command, RejectedReason::Busy),
                 };
-                refuse(connections, answers, id, seq, &command.topic, reason);
+                refuse(
+                    connections,
+                    answers,
+                    id,
+                    &mut refusals,
+                    seq,
+                    &command.topic,
+                    reason,
+                );
             }
         }
     }
 }
 
+/// What one connection is told of its refusals per second.
+///
+/// Two windows, because the two caps mean different things: an unknown
+/// topic, a missing capability or the connection's own rate say the
+/// consumer is misbuilt or misbehaving, and a low cap keeps one from
+/// filling a log; a full ring says the broker is congested, and its cap is
+/// set so a correct consumer hears of every record it lost. A refusal over
+/// its cap is counted and answered with nothing. ADR 0026.
+struct Refusals {
+    rejected: Window,
+    busy: Window,
+}
+
+impl Refusals {
+    fn new(now: Instant) -> Self {
+        Refusals {
+            rejected: Window::new(now),
+            busy: Window::new(now),
+        }
+    }
+
+    /// Whether a refusal for `reason` at `now` is answered under `limits`.
+    fn admit(&mut self, now: Instant, limits: &Limits, reason: RejectedReason) -> bool {
+        match reason {
+            RejectedReason::Busy => self.busy.admit(now, limits.busy_max_per_sec),
+            RejectedReason::UnknownTopic
+            | RejectedReason::NoCapability
+            | RejectedReason::RateLimited => self.rejected.admit(now, limits.rejected_max_per_sec),
+        }
+    }
+}
+
 /// Answer the record numbered `seq` on `topic` with a `Rejected` for
-/// `reason`, and count it.
+/// `reason` if the connection's cap on that reason admits one, and count
+/// it either way. The cap is asked for now, as the frame cap was, so a cap
+/// lowered by a later `configure` binds on this refusal.
 fn refuse(
     connections: &Connections<Record>,
     answers: &dyn Answers,
     id: ConnectionId,
+    refusals: &mut Refusals,
     seq: u64,
     topic: &str,
     reason: RejectedReason,
 ) {
-    connections.answer(id, rejected(seq, topic, reason));
-    answers.rejected(reason, true);
+    let answered = refusals.admit(Instant::now(), &answers.limits(), reason);
+    if answered {
+        connections.answer(id, rejected(seq, topic, reason));
+    }
+    answers.rejected(reason, answered);
 }
 
 /// A socket read under a wall-clock deadline.

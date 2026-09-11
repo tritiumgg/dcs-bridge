@@ -2172,4 +2172,22 @@ mod tests {
             "configure comes first: the rings are allocated by it"
         );
     }
+
+    /// Every refusal counts under its reason, answered or not, and one
+    /// answered with nothing counts as suppressed as well.
+    #[test]
+    fn a_refusal_counts_by_reason_and_a_withheld_one_as_suppressed_too() {
+        let bridge = Bridge::new(29);
+        for reason in RejectedReason::ALL {
+            assert_eq!(bridge.commands_rejected(reason), 0);
+        }
+        bridge.rejected(RejectedReason::UnknownTopic, true);
+        bridge.rejected(RejectedReason::UnknownTopic, false);
+        bridge.rejected(RejectedReason::Busy, false);
+        assert_eq!(bridge.commands_rejected(RejectedReason::UnknownTopic), 2);
+        assert_eq!(bridge.commands_rejected(RejectedReason::NoCapability), 0);
+        assert_eq!(bridge.commands_rejected(RejectedReason::RateLimited), 0);
+        assert_eq!(bridge.commands_rejected(RejectedReason::Busy), 1);
+        assert_eq!(bridge.rejections_suppressed(), 2);
+    }
 }

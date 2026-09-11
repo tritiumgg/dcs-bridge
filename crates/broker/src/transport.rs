@@ -1706,4 +1706,116 @@ mod tests {
         drop(listener);
         drop(writer);
     }
+
+    /// The stub every record is refused by, in the way it is told to, under
+    /// the limits it is given; it counts what the reader reports.
+    struct Refusing {
+        limits: inbound::Limits,
+        busy: bool,
+        refused: AtomicU64,
+        suppressed: AtomicU64,
+    }
+    impl Answers for Refusing {
+        fn handshake(&self) -> Record {
+            Stub.handshake()
+        }
+        fn liveness(&self) -> inbound::Liveness {
+            Stub.liveness()
+        }
+        fn limits(&self) -> inbound::Limits {
+            self.limits
+        }
+        fn authenticate(&self, secret: &[u8]) -> Result<Session, AuthError> {
+            Stub.authenticate(secret)
+        }
+        fn disconnected(&self, _: &Session) {}
+        fn schema(&self) -> Option<Record> {
+            None
+        }
+        fn seq_ack(&self, _: u64) {}
+        fn set_enabled(&self, _: bool) {}
+        fn rejected(&self, _: RejectedReason, answered: bool) {
+            self.refused.fetch_add(1, Ordering::SeqCst);
+            if !answered {
+                self.suppressed.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        fn deliver(&self, command: inbound::Command) -> inbound::Delivery {
+            if self.busy {
+                inbound::Delivery::Busy(command)
+            } else {
+                inbound::Delivery::Unrouted(command)
+            }
+        }
+    }
+
+    /// A flood of refused records is answered up to the cap and no
+    /// further: every refusal is counted, the ones over the cap as
+    /// suppressed, and the connection stays open and answers. A full ring
+    /// is capped apart from the other reasons, so a cap of zero on those
+    /// withholds nothing from it.
+    #[test]
+    fn a_flood_of_refusals_is_answered_up_to_the_cap_and_counted_past_it() {
+        let flood = |busy: bool, rejected_max_per_sec: u32, busy_max_per_sec: u32| {
+            let refusing = Arc::new(Refusing {
+                limits: inbound::Limits {
+                    rejected_max_per_sec,
+                    busy_max_per_sec,
+                    ..inbound::Limits::default()
+                },
+                busy,
+                refused: AtomicU64::new(0),
+                suppressed: AtomicU64::new(0),
+            });
+            let (writer, _commit, connections) = Writer::spawn(64);
+            let answers: Arc<dyn Answers> = refusing.clone();
+            let listener = Listener::spawn("127.0.0.1:0", connections, 64, answers).unwrap();
+            let mut sender = client(listener.local_addr());
+            read_handshake(&mut sender);
+            assert!(authenticate(&mut sender, SECRET).1.ok);
+
+            let mut burst = Vec::new();
+            for seq in 2..22 {
+                burst.extend(inbound(seq, UNROUTED, b"again"));
+            }
+            burst.extend(inbound(22, topic::PING, &[]));
+            sender.write_all(&burst).expect("the burst is sent");
+
+            let reason = if busy {
+                RejectedReason::Busy
+            } else {
+                RejectedReason::UnknownTopic
+            };
+            let mut answered = Vec::new();
+            loop {
+                let frame = read_frame(&mut sender);
+                let payload = frame.payload.expect("the frame carries a payload");
+                if payload.type_url == type_url(topic::PONG) {
+                    break;
+                }
+                assert_eq!(payload.type_url, type_url(topic::REJECTED));
+                let refusal = Rejected::decode(&payload.value[..]).expect("the Rejected decodes");
+                assert_eq!(refusal.topic_id, UNROUTED);
+                assert_eq!(refusal.reason, reason as i32);
+                answered.push(refusal.seq);
+            }
+            drop(listener);
+            drop(writer);
+            (
+                answered,
+                refusing.refused.load(Ordering::SeqCst),
+                refusing.suppressed.load(Ordering::SeqCst),
+            )
+        };
+
+        // The first three of twenty are answered, in order, and the rest
+        // are counted. Twenty frames in one write take well under the
+        // second the window holds for.
+        assert_eq!(flood(false, 3, 100), (vec![2, 3, 4], 20, 17));
+        // A full ring is under the other cap: zero on the first withholds
+        // nothing, and two on the second answers two.
+        assert_eq!(flood(true, 0, 2), (vec![2, 3], 20, 18));
+        // And the other way about.
+        assert_eq!(flood(false, 1, 0), (vec![2], 20, 19));
+    }
 }
