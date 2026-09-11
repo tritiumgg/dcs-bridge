@@ -1,6 +1,6 @@
 # Working state
 
-**Last updated:** 2026-09-09
+**Last updated:** 2026-09-10
 
 The handoff between sessions. Read it first; update it before a session ends,
 not only when a task finishes. Stamp the date above each time; it carries a
@@ -18,7 +18,7 @@ is just deleted. Write entries as one or two lines, never paragraphs.
 
 ## In progress
 
-Nothing. 2.C4 is closed; 2.13 is next.
+Nothing. 2.13 is closed; 2.14 is next.
 
 *One task at most. Say what is done, what is not, and where to resume. Say what
 is committed and what is only in the working tree. Say what is knowingly
@@ -26,29 +26,28 @@ broken. Empty this when the task closes.*
 
 ## Just finished
 
+- **2.13** — `Rejected` from the reader with the four reasons, the two
+  refusal caps, the inbound rate per connection and in total. PR #79, ADR 0026.
 - **2.C4** — `dcsb send`: bytes from a file or hex, `--wait`. PR #78, ADR 0025.
 - **2.12** — the two inbound rings, the routing, `poll(target)`. PR #77, ADR 0024.
-- **2.16** — the four registration calls, the merge, and `begin` refusing
-  an unregistered topic. PR #75, ADR 0023.
 
 *The last three at most, one line each. Git log holds the rest.*
 
 ## Next
 
-**Task 2.13** — `Rejected` from the reader thread with the four reasons,
-echoing the inbound `seq` and the topic; a header that does not parse drops
-the connection; then the three rate caps and `rejections_suppressed_total`.
-Done when a refused command is answered once and a flood of them is not.
-One branch, two runs of commits, about 600 lines.
+**Task 2.14** — the outbound capability filter at fan-out, before `seq`,
+from each connection's `Authenticated` control; `records_filtered_total`.
+Addressed records (a reply, an acknowledgement, a `Rejected`) pass
+untouched. Done when a filtered consumer sees no `seq` gap and
+`records_dropped_total` does not move. One branch, about 300 lines. Closes M2.2.
 
-**An agent verifies** both over loopback: `dcsb send` on an unrouted topic
-with `--wait` prints the `Rejected`, and a flood is answered under the cap;
-**the maintainer verifies** at a live install that a `Rejected` reaches
-`dcsb send --wait` with the sent `seq`; the pull request carries the steps.
+**An agent verifies** over loopback: a `read`-only token sees no record
+its capability does not cover and no `seq` gap; **the maintainer verifies**
+at a live install that `dcsb tail` under such a token prints no `gap` line.
 
 ## After that
 
-- **M2.2**: after 2.13, 2.14 closes it.
+- **M2.2**: 2.14 closes it.
 - **Phase 3** opens on `protoc-gen-dcsbridge-lua`, which reads the four message
   options this schema defines and splits its output by `Target`. It reads the
   plugin request through `prost-types`; ADR 0016.
@@ -92,15 +91,13 @@ entries at most: an eleventh means something here is finished, or belongs in
 - **Task 2.2's load banner is owed by 4.1.** SPEC §13 addresses the banner to
   the Lua side and SPEC §15 has `doctor` check it. Nothing makes the DLL write
   one, and SPEC §4 leaves it no `io`. Delete this when 4.1 closes.
-- **What 2.4 to 2.16 left to 2.13, 2.14 and 9.7.** Every broker key is in
-  `Config` since 2.15, and nothing reads these yet: the rate limits
-  (`rejected_max_per_sec`, `busy_max_per_sec`, `inbound_records_per_sec`
-  and its total) are 2.13's, and SPEC §17 "Broker hardening"
-  (`max_unauthenticated_connections`, `auth_failures_per_min`, revocation
-  dropping sessions) has no owner: a later `configure` swaps the token table
-  and leaves a session under a dropped token open. `SetEnabled` without
-  `reload`, an unrouted topic and a full inbound ring are counted, not
-  answered, until 2.13; the inbound capability check is 2.14's; `GetTopics`
+- **What 2.4 to 2.16 left to 2.14 and 9.7.** Every broker key is in
+  `Config` since 2.15, and nothing reads these yet: SPEC §17 "Broker
+  hardening" (`max_unauthenticated_connections`, `auth_failures_per_min`,
+  revocation dropping sessions) has no owner: a later `configure` swaps the
+  token table and leaves a session under a dropped token open. The inbound
+  capability check on a record for Lua is 2.14's, and `NO_CAPABILITY`
+  answers only `SetEnabled` until then (ADR 0026); `GetTopics`
   and `SetTopicFilter` route as records until 2.20. `commit` allocates once
   per record and a connection drains one frame per socket call, one record
   in forty at a 20000-record burst on Windows loopback; PROBE-7 at 9.7
