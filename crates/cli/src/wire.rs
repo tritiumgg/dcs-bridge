@@ -342,4 +342,43 @@ mod tests {
             "the trickle held the read past the deadline, for {took:?}"
         );
     }
+
+    /// The names printed for the schema's two error enums are the schema's
+    /// own, at the schema's numbers: a member renumbered in the `.proto`
+    /// fails here rather than printing the wrong name at a live install.
+    #[test]
+    fn the_printed_names_match_the_schema() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../proto/dcsbridge/broker/broker.proto"
+        );
+        let schema =
+            std::fs::read_to_string(path).unwrap_or_else(|e| panic!("could not read {path}: {e}"));
+        let number = |member: &str| -> i32 {
+            schema
+                .lines()
+                .map(str::trim)
+                .find_map(|line| {
+                    line.strip_prefix(member)?
+                        .trim_start()
+                        .strip_prefix('=')?
+                        .trim()
+                        .strip_suffix(';')?
+                        .parse()
+                        .ok()
+                })
+                .unwrap_or_else(|| panic!("{member} is not in {path}"))
+        };
+        for name in ["BAD_TOKEN", "EMPTY_CAPABILITY_SET", "SERVER_FULL"] {
+            assert_eq!(auth_error_name(number(&format!("AUTH_ERROR_{name}"))), name);
+        }
+        for name in ["UNKNOWN_TOPIC", "NO_CAPABILITY", "RATE_LIMITED", "BUSY"] {
+            assert_eq!(
+                rejected_reason_name(number(&format!("REJECTED_REASON_{name}"))),
+                name
+            );
+        }
+        assert_eq!(auth_error_name(0), "UNSPECIFIED");
+        assert_eq!(rejected_reason_name(0), "UNSPECIFIED");
+    }
 }

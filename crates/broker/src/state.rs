@@ -1262,7 +1262,20 @@ mod tests {
         let schema =
             std::fs::read_to_string(path).unwrap_or_else(|e| panic!("could not read {path}: {e}"));
 
-        let pairs: [(&str, i32); 12] = [
+        let pairs: [(&str, i32); 16] = [
+            (
+                "REJECTED_REASON_UNKNOWN_TOPIC",
+                RejectedReason::UnknownTopic as i32,
+            ),
+            (
+                "REJECTED_REASON_NO_CAPABILITY",
+                RejectedReason::NoCapability as i32,
+            ),
+            (
+                "REJECTED_REASON_RATE_LIMITED",
+                RejectedReason::RateLimited as i32,
+            ),
+            ("REJECTED_REASON_BUSY", RejectedReason::Busy as i32),
             ("AUTH_ERROR_BAD_TOKEN", AuthError::BadToken as i32),
             (
                 "AUTH_ERROR_EMPTY_CAPABILITY_SET",
