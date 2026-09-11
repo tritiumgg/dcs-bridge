@@ -314,16 +314,19 @@ mod tests {
 
         // A `Ping` behind the record, answered after it, is how the reader
         // is known to have got through the record before the ring is read.
-        let send = |secret: &str, topic: &str, value: &[u8]| {
+        // Without the barrier, what comes back is left for `wait`.
+        let send = |secret: &str, topic: &str, value: &[u8], barrier: bool| {
             let mut client =
                 TcpStream::connect(listener.local_addr()).expect("the listener accepts");
             let mut request = wire::auth_frame(secret);
             request.extend(record_frame(topic, value.to_vec()));
-            request.extend(wire::frame(3, topic::PING, Vec::new()));
+            if barrier {
+                request.extend(wire::frame(3, topic::PING, Vec::new()));
+            }
             client.write_all(&request).expect("the request is sent");
             let mut reader = wire::Deadline::new(client, Duration::from_secs(30));
             let outcome = run(&mut reader).unwrap();
-            if outcome == Outcome::Sent {
+            if outcome == Outcome::Sent && barrier {
                 loop {
                     let envelope = read_frame(&mut reader)
                         .expect("the pong arrives")
@@ -336,7 +339,7 @@ mod tests {
             (outcome, reader)
         };
 
-        let (outcome, reader) = send("send-secret", TOPIC, &[0x08, 0x2a]);
+        let (outcome, reader) = send("send-secret", TOPIC, &[0x08, 0x2a], true);
         assert_eq!(outcome, Outcome::Sent);
         let polled = bridge
             .poll(Target::HookDriver)
@@ -372,8 +375,21 @@ mod tests {
             "the wait gave up early"
         );
 
-        let (outcome, _reader) = send("send-secret", UNROUTED, &[]);
+        // An unrouted topic is answered with a `Rejected` naming the record
+        // by the number `send` gave it, which is what the wait prints.
+        let (outcome, reader) = send("send-secret", UNROUTED, &[], false);
         assert_eq!(outcome, Outcome::Sent);
+        let mut out = Vec::new();
+        let reader = reader.again(Duration::from_secs(2));
+        assert_eq!(wait(reader, &mut out).unwrap(), 1);
+        let out = String::from_utf8(out).unwrap();
+        assert!(
+            out.starts_with(&format!("seq=3 topic={} bytes=", topic::REJECTED))
+                && out.ends_with(&format!(
+                    " rejected_seq=2 rejected_topic={UNROUTED} reason=UNKNOWN_TOPIC\n"
+                )),
+            "the wait did not print the refusal: {out}"
+        );
         assert_eq!(
             bridge.poll(Target::SimDriver),
             Ok(None),
@@ -386,7 +402,7 @@ mod tests {
         );
         assert_eq!(bridge.unrouted_topic(), 1);
 
-        let (outcome, _reader) = send("wrong", TOPIC, &[0x08, 0x2a]);
+        let (outcome, _reader) = send("wrong", TOPIC, &[0x08, 0x2a], true);
         assert_eq!(outcome, Outcome::Refused(1));
         assert_eq!(
             bridge.poll(Target::HookDriver),
