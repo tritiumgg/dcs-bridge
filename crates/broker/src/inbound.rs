@@ -80,6 +80,18 @@ pub struct Limits {
     /// The most bytes a payload's type URL may take. A real one is about
     /// fifty.
     pub max_type_url_bytes: usize,
+    /// The most records for Lua one connection may send in a second; the
+    /// next is refused and the connection kept.
+    pub inbound_records_per_sec: u32,
+    /// The most records for Lua every connection together may send in a
+    /// second; the connection that sends the next is closed.
+    pub inbound_records_per_sec_total: u32,
+    /// The most `Rejected` one connection is sent in a second for an
+    /// unknown topic, a missing capability or its own rate.
+    pub rejected_max_per_sec: u32,
+    /// The most `Rejected` one connection is sent in a second for a full
+    /// ring, capped apart because it answers a well-behaved consumer.
+    pub busy_max_per_sec: u32,
 }
 
 impl From<&Config> for Limits {
@@ -88,6 +100,51 @@ impl From<&Config> for Limits {
             handshake_timeout: Duration::from_millis(config.handshake_timeout_ms),
             max_frame_bytes: config.max_frame_bytes,
             max_type_url_bytes: config.max_type_url_bytes as usize,
+            inbound_records_per_sec: config.inbound_records_per_sec,
+            inbound_records_per_sec_total: config.inbound_records_per_sec_total,
+            rejected_max_per_sec: config.rejected_max_per_sec,
+            busy_max_per_sec: config.busy_max_per_sec,
+        }
+    }
+}
+
+/// A count of what one second admitted, for a cap stated per second.
+///
+/// The window is fixed rather than sliding: it opens at the first event
+/// after the last one closed and holds for a second, and what it admits is
+/// what fits under the cap. Across a boundary that lets two seconds' worth
+/// through in less than a second, which every cap here can afford. The
+/// cap is the caller's, read fresh for every event, so a later `configure`
+/// binds on the next event. The clock is the caller's too, so a test can
+/// drive it. ADR 0026.
+#[derive(Clone, Copy, Debug)]
+pub struct Window {
+    since: Instant,
+    count: u32,
+}
+
+impl Window {
+    /// A window that opens at the first event.
+    pub fn new(now: Instant) -> Self {
+        Window {
+            since: now,
+            count: 0,
+        }
+    }
+
+    /// Admit one event at `now` under `cap`: true when it fits, false
+    /// when it does not. A refused event is not counted, so a cap of zero
+    /// refuses everything and a window never fills past its cap.
+    pub fn admit(&mut self, now: Instant, cap: u32) -> bool {
+        if now.saturating_duration_since(self.since) >= Duration::from_secs(1) {
+            self.since = now;
+            self.count = 0;
+        }
+        if self.count < cap {
+            self.count += 1;
+            true
+        } else {
+            false
         }
     }
 }
@@ -814,6 +871,63 @@ mod tests {
         let mut bytes = (body.len() as u32).to_le_bytes().to_vec();
         bytes.extend(body);
         bytes
+    }
+
+    /// A window admits its cap and no more, opens again a second after it
+    /// opened, and counts nothing it refused; a cap of zero refuses every
+    /// event and a cap raised mid-window binds at once.
+    #[test]
+    fn a_window_admits_its_cap_per_second() {
+        let start = Instant::now();
+        let at = |ms: u64| start + Duration::from_millis(ms);
+        let mut window = Window::new(start);
+
+        assert!(window.admit(at(0), 2));
+        assert!(window.admit(at(10), 2));
+        assert!(!window.admit(at(20), 2), "a third event fit under two");
+        assert!(!window.admit(at(999), 2), "the window closed early");
+        assert!(window.admit(at(1000), 2), "the window did not open again");
+        assert!(window.admit(at(1001), 2));
+        assert!(!window.admit(at(1002), 2));
+
+        // The refused events were not counted, so the cap raised by one
+        // admits exactly one more.
+        assert!(window.admit(at(1003), 3));
+        assert!(!window.admit(at(1004), 3));
+
+        // A second window opens at the first event after the boundary, not
+        // at the boundary: an idle connection starts fresh.
+        assert!(window.admit(at(5500), 1));
+        assert!(!window.admit(at(6499), 1));
+        assert!(window.admit(at(6500), 1));
+
+        let mut shut = Window::new(start);
+        assert!(!shut.admit(at(0), 0), "a cap of zero admitted an event");
+        assert!(!shut.admit(at(2000), 0));
+
+        // A clock that reads earlier than the window opened is inside it.
+        let mut early = Window::new(at(100));
+        assert!(early.admit(at(0), 1));
+        assert!(!early.admit(at(50), 1));
+    }
+
+    /// The reader's limits are the configuration's rate keys as well as its
+    /// size keys, so a rate lowered by a later `configure` binds like a
+    /// cap does.
+    #[test]
+    fn the_limits_carry_the_rate_keys() {
+        let config = Config {
+            inbound_records_per_sec: 7,
+            inbound_records_per_sec_total: 8,
+            rejected_max_per_sec: 9,
+            busy_max_per_sec: 10,
+            ..Config::default()
+        };
+        let limits = Limits::from(&config);
+        assert_eq!(limits.inbound_records_per_sec, 7);
+        assert_eq!(limits.inbound_records_per_sec_total, 8);
+        assert_eq!(limits.rejected_max_per_sec, 9);
+        assert_eq!(limits.busy_max_per_sec, 10);
     }
 
     /// A frame decodes to its `seq` and its topic, and a topic with no
