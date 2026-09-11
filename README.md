@@ -256,10 +256,21 @@ per byte, with spaces between bytes allowed; with neither, the record is
 sent with no fields. The bridge does not check the bytes, so a record that
 does not decode fails in the Lua handler that reads it. `send` prints `sent
 topic=<name> bytes=<n>` and exits 0 once the bridge accepts the token, or
-exits 1 when it refuses it. Nothing answers a record unless a handler sends
-an answer; `--wait <seconds>` keeps reading for that long and prints each
-frame that comes back as `tail` prints it. Encoding a record from JSON
-through the served schema is planned.
+exits 1 when it refuses it. A record the bridge delivers nowhere is answered
+with a `Rejected` naming it by the `seq` `send` gave it, its topic and the
+reason: an unknown topic, a capability the token lacks, a connection over
+its rate, or a full queue. A record that was delivered is answered only if
+a handler answers it. `--wait <seconds>` keeps reading for that long and
+prints each frame that comes back as `tail` prints it, with a `Rejected`'s
+inside on its line. Encoding a record from JSON through the served schema
+is planned.
+
+The bridge limits what one consumer may send in a second and what all of
+them may send together, `inbound_records_per_sec` and its `_total`. Over
+its own limit a consumer's record is refused and its connection kept; the
+consumer that pushes the total over is disconnected. A consumer hears of at
+most `rejected_max_per_sec` refusals a second, and `busy_max_per_sec` for a
+full queue; the rest are counted and not answered.
 
 `tail`, `ping`, `schema` and `send` are built. The others are planned:
 `doctor`, `stats`, `record`, `replay` and `mock`.
