@@ -68,6 +68,18 @@ pub struct AuthResult {
     pub error: i32,
 }
 
+/// `dcsbridge.broker.Rejected`, as the bridge refuses a record it delivered
+/// nowhere: the sender's own `seq` echoed, the topic, and why.
+#[derive(Clone, PartialEq, Message)]
+pub struct Rejected {
+    #[prost(uint64, tag = "1")]
+    pub seq: u64,
+    #[prost(string, tag = "2")]
+    pub topic_id: String,
+    #[prost(int32, tag = "3")]
+    pub reason: i32,
+}
+
 /// `dcsbridge.broker.Handshake`, the one field of it a verb reads: the hash
 /// of the schema the bridge serves, absent until the hook driver hands the
 /// schema over.
@@ -101,6 +113,28 @@ pub fn auth_error_name(error: i32) -> &'static str {
         3 => "SERVER_FULL",
         _ => "UNSPECIFIED",
     }
+}
+
+/// The name the schema gives a `RejectedReason` number.
+pub fn rejected_reason_name(reason: i32) -> &'static str {
+    match reason {
+        1 => "UNKNOWN_TOPIC",
+        2 => "NO_CAPABILITY",
+        3 => "RATE_LIMITED",
+        4 => "BUSY",
+        _ => "UNSPECIFIED",
+    }
+}
+
+/// The `Rejected` a frame carries, if it is one. `None` for any other frame
+/// and for a `Rejected` whose bytes do not decode, which prints as the bare
+/// frame it is.
+pub fn rejected(envelope: &Envelope) -> Option<Rejected> {
+    if envelope.topic() != Some(topic::REJECTED) {
+        return None;
+    }
+    let any = envelope.payload.as_ref()?;
+    Rejected::decode(&any.value[..]).ok()
 }
 
 /// The `AuthResult` a frame carries, if it is one.

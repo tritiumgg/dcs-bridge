@@ -11,7 +11,10 @@
 
 use std::io::{self, Read, Write};
 
-use crate::wire::{Envelope, auth_error_name, auth_result, handshake_sha256, read_frame};
+use crate::wire::{
+    Envelope, auth_error_name, auth_result, handshake_sha256, read_frame, rejected,
+    rejected_reason_name,
+};
 use dcsbridge_topic as topic;
 
 /// What a run saw, for the closing line and for the tests.
@@ -79,9 +82,10 @@ fn schema_sha256(envelope: &Envelope) -> Option<String> {
 
 /// One line per frame: `seq`, the topic and the payload's size, then the
 /// epoch and mission time only when the frame carries them. An `AuthResult`
-/// says whether the token was accepted, and the handshake says which schema
-/// the bridge serves, because those are the two records a person watching
-/// needs the inside of.
+/// says whether the token was accepted, the handshake says which schema the
+/// bridge serves, and a `Rejected` says which command it refused and why,
+/// because those are the three records a person watching needs the inside
+/// of.
 pub fn write_frame_line(out: &mut impl Write, envelope: &Envelope) -> io::Result<()> {
     write!(out, "seq={}", envelope.seq)?;
     match (envelope.topic(), &envelope.payload) {
@@ -101,6 +105,15 @@ pub fn write_frame_line(out: &mut impl Write, envelope: &Envelope) -> io::Result
             write!(out, " ok=false error={}", auth_error_name(result.error))?;
         }
     }
+    if let Some(refusal) = rejected(envelope) {
+        write!(
+            out,
+            " rejected_seq={} rejected_topic={} reason={}",
+            refusal.seq,
+            refusal.topic_id,
+            rejected_reason_name(refusal.reason)
+        )?;
+    }
     if let Some(epoch) = envelope.epoch {
         write!(out, " epoch={epoch}")?;
     }
@@ -113,7 +126,7 @@ pub fn write_frame_line(out: &mut impl Write, envelope: &Envelope) -> io::Result
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::wire::{self, Auth, AuthResult, auth_frame};
+    use crate::wire::{self, Auth, AuthResult, Rejected, auth_frame};
     use dcsbridge_broker::encode::Encoder;
     use dcsbridge_broker::fanout::{Commit, Writer};
     use dcsbridge_broker::transport::{Listener, Record};
@@ -208,6 +221,39 @@ mod tests {
         assert_eq!(envelope.topic(), Some(topic::AUTH));
         let any = envelope.payload.unwrap();
         assert_eq!(Auth::decode(&any.value[..]).unwrap().token, "hunter2");
+    }
+
+    /// A `Rejected` line names the refused command by the `seq` the sender
+    /// gave it, its topic and the reason, so a person can match it to what
+    /// they sent. A `Rejected` that does not decode prints as a bare frame.
+    #[test]
+    fn a_rejected_prints_the_refused_seq_topic_and_reason() {
+        let refusal = wire::frame(
+            7,
+            topic::REJECTED,
+            Rejected {
+                seq: 2,
+                topic_id: TOPIC.to_owned(),
+                reason: 1,
+            }
+            .encode_to_vec(),
+        );
+        let mut out = Vec::new();
+        run(&refusal[..], &mut out).unwrap();
+        let out = String::from_utf8(out).unwrap();
+        assert!(
+            out.contains(&format!("seq=7 topic={} bytes=", topic::REJECTED))
+                && out.contains(&format!(
+                    " rejected_seq=2 rejected_topic={TOPIC} reason=UNKNOWN_TOPIC\n"
+                )),
+            "the refusal did not print its inside: {out}"
+        );
+
+        let garbled = wire::frame(1, topic::REJECTED, vec![0xff, 0xff, 0xff]);
+        let mut out = Vec::new();
+        run(&garbled[..], &mut out).unwrap();
+        let out = String::from_utf8(out).unwrap();
+        assert_eq!(out, format!("seq=1 topic={} bytes=3\n", topic::REJECTED));
     }
 
     /// The handshake line says which schema the bridge serves, as the hash
