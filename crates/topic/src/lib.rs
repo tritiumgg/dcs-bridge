@@ -59,6 +59,9 @@ topics! {
     /// one topic a record may be addressed to before any registration:
     /// the bridge's own message, so the broker knows it by name. ADR 0017.
     COMMAND_ACK = "CommandAck",
+    /// The broker's refusal of a record it delivered nowhere, addressed to
+    /// the sender with the sender's `seq` echoed.
+    REJECTED = "Rejected",
 }
 
 #[cfg(test)]

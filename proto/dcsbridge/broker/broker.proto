@@ -184,6 +184,24 @@ enum RejectedReason {
   REJECTED_REASON_BUSY = 4;
 }
 
+// The broker's refusal: what answers a record the broker delivered nowhere.
+// Answered by the broker itself, on the thread that read the record, and
+// addressed to the connection that sent it, so it carries no record class.
+// It echoes what the broker had already parsed and remembers nothing: a
+// consumer matches it to its own command by seq. A frame the broker cannot
+// parse is not refused this way; the connection is dropped instead.
+//
+// At most rejected_max_per_sec of these answer one connection for the first
+// three reasons, and busy_max_per_sec for BUSY; a refusal above either cap is
+// counted and not answered.
+message Rejected {
+  // The inbound envelope's seq, echoed.
+  uint64 seq = 1;
+  // The topic the refused record was on, as the sender named it.
+  string topic_id = 2;
+  RejectedReason reason = 3;
+}
+
 // The acknowledgement: what answers a command when no typed reply does. A
 // read that fails, a mutation that succeeds or fails, and a duplicate all
 // come back as one of these, addressed to the connection that sent the
