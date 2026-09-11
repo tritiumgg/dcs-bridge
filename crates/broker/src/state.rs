@@ -35,7 +35,7 @@ use crate::encode::Stamp;
 use crate::fanout::{Commit, ConnectionId, Writer};
 use crate::handshake;
 use crate::inbound::{
-    Answers, AuthError, Command, Delivery, Limits, Liveness, RejectedReason, Session,
+    Answers, AuthError, Command, Delivery, Limits, Liveness, RejectedReason, Session, Window,
 };
 use crate::registry::{Capability, Conflict, RecordClass, Registry, Target, Topic};
 use crate::ring::{Consumer, Producer, Push, Ring};
@@ -113,6 +113,10 @@ pub struct Bridge {
     /// Refusals above `rejected_max_per_sec` or `busy_max_per_sec`,
     /// counted here and answered with nothing: `rejections_suppressed_total`.
     rejections_suppressed: AtomicU64,
+    /// What every connection together has sent for Lua this second,
+    /// against `inbound_records_per_sec_total`. Reader threads take the
+    /// lock, for one count each; the logic thread never does. ADR 0026.
+    inbound_total: Mutex<Window>,
     /// The schema the hook driver handed over, held for the life of the
     /// process: replacing the served set is a DCS restart, so a second
     /// hand-off is refused rather than applied.
@@ -421,6 +425,10 @@ impl Answers for Global {
         bridge().rejected(reason, answered);
     }
 
+    fn admit_total(&self, now: Instant, cap: u32) -> bool {
+        bridge().admit_total(now, cap)
+    }
+
     fn deliver(&self, command: Command) -> Delivery {
         bridge().deliver(command)
     }
@@ -487,6 +495,7 @@ impl Bridge {
             seq_acks: AtomicU64::new(0),
             commands_rejected: [const { AtomicU64::new(0) }; 4],
             rejections_suppressed: AtomicU64::new(0),
+            inbound_total: Mutex::new(Window::new(Instant::now())),
             schema: OnceLock::new(),
         }
     }
@@ -657,8 +666,8 @@ impl Bridge {
     /// so no thread holds both. A topic in no route map goes nowhere and is
     /// counted, never defaulted to the sim driver: a command the sim driver
     /// was not told to expect is not one it should run. A full ring turns
-    /// the newest record away and counts it; the `Rejected` that tells the
-    /// sender is a later task's. Before the rings exist nothing can have
+    /// the newest record away and counts it; the reader thread answers the
+    /// sender with `Rejected` either way. Before the rings exist nothing can have
     /// connected, so a record arriving then is a defect, and it is dropped
     /// and counted as unrouted rather than held anywhere. ADR 0024.
     pub fn deliver(&self, command: Command) -> Delivery {
@@ -921,6 +930,15 @@ impl Bridge {
     /// How many refusals were over their cap and answered with nothing.
     pub fn rejections_suppressed(&self) -> u64 {
         self.rejections_suppressed.load(Ordering::Relaxed)
+    }
+
+    /// Count one record for Lua at `now` against every connection's total,
+    /// and say whether it fit under `cap`. Called on a reader thread.
+    pub fn admit_total(&self, now: Instant, cap: u32) -> bool {
+        self.inbound_total
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .admit(now, cap)
     }
 
     /// Replace the token table whole, leaving every other key as it is.
@@ -2189,5 +2207,17 @@ mod tests {
         assert_eq!(bridge.commands_rejected(RejectedReason::RateLimited), 0);
         assert_eq!(bridge.commands_rejected(RejectedReason::Busy), 1);
         assert_eq!(bridge.rejections_suppressed(), 2);
+    }
+
+    /// The total is one window shared by every reader thread: what one
+    /// connection admitted, another finds counted.
+    #[test]
+    fn the_inbound_total_is_one_window_across_connections() {
+        let bridge = Bridge::new(31);
+        let now = Instant::now();
+        assert!(bridge.admit_total(now, 2));
+        assert!(bridge.admit_total(now, 2));
+        assert!(!bridge.admit_total(now, 2), "a third record fit under two");
+        assert!(bridge.admit_total(now + std::time::Duration::from_secs(1), 2));
     }
 }

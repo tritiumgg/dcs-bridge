@@ -47,6 +47,13 @@
 //! nothing here has to remember it. A frame that does not parse is not
 //! refused this way, because nothing in it can be echoed; that connection
 //! is closed.
+//!
+//! Records for Lua are rate-limited here too, per connection and over
+//! every connection together, and the two answer differently: a connection
+//! over its own rate is refused the record and kept, because it is
+//! misbehaving alone; one that pushes the total over is closed, because
+//! that is a capacity problem no refusal fixes. What a connection is told
+//! of its refusals is capped as well, so a flood buys no answers. ADR 0026.
 
 use std::collections::HashSet;
 use std::io::{self, Read};
@@ -233,6 +240,13 @@ pub trait Answers: Send + Sync + 'static {
     fn rejected(&self, reason: RejectedReason, answered: bool) {
         let _ = (reason, answered);
     }
+    /// Whether a record for Lua at `now` fits under `cap`, the total every
+    /// connection together may send in a second. With nothing behind the
+    /// transport there is no total, so everything fits.
+    fn admit_total(&self, now: Instant, cap: u32) -> bool {
+        let _ = (now, cap);
+        true
+    }
     /// A record for Lua: put it on the ring its route names, or hand it
     /// back. With nothing behind the transport there is no ring, so
     /// nothing is routed.
@@ -267,6 +281,11 @@ pub enum Close {
     /// An authenticated connection sent a second `Auth`. A session is
     /// opened once, and a peer that asks again is not the protocol's.
     SecondAuth,
+    /// A record for Lua pushed every connection's total over
+    /// `inbound_records_per_sec_total`. Over its own rate a connection is
+    /// refused and kept; over everyone's it is closed, because that is a
+    /// capacity problem no refusal fixes.
+    RateLimitedTotal,
 }
 
 impl From<io::Error> for Close {
@@ -666,6 +685,10 @@ pub fn serve(
         until: Some(Instant::now() + answers.limits().handshake_timeout),
     };
     let mut refusals = Refusals::new(Instant::now());
+    // What this connection has sent for Lua this second. The messages the
+    // broker answers itself are not counted: the limit protects what the
+    // sim driver can dispatch, and they never reach it.
+    let mut sent = Window::new(Instant::now());
 
     loop {
         // Asked for as each frame arrives, so a cap a later `configure`
@@ -744,8 +767,28 @@ pub fn serve(
             // names. What the rings hand back is refused here, on the
             // thread that read it, with the sender's own `seq` so it can
             // tell which record went nowhere.
-            (_, Some(_)) => {
+            (over, Some(_)) => {
                 let seq = envelope.seq;
+                // The connection's own rate first, then everyone's: a
+                // record refused for the first is delivered nowhere, so it
+                // is not counted against the second.
+                let now = Instant::now();
+                let limits = answers.limits();
+                if !sent.admit(now, limits.inbound_records_per_sec) {
+                    refuse(
+                        connections,
+                        answers,
+                        id,
+                        &mut refusals,
+                        seq,
+                        over,
+                        RejectedReason::RateLimited,
+                    );
+                    continue;
+                }
+                if !answers.admit_total(now, limits.inbound_records_per_sec_total) {
+                    return Err(Close::RateLimitedTotal);
+                }
                 let command = Command::from_envelope(id, envelope)?;
                 let (command, reason) = match answers.deliver(command) {
                     Delivery::Stored => continue,

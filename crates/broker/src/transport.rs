@@ -1818,4 +1818,144 @@ mod tests {
         // And the other way about.
         assert_eq!(flood(false, 1, 0), (vec![2], 20, 19));
     }
+
+    /// The stub that stores every record, under the two inbound rates it
+    /// is given, and counts what reached it.
+    struct Limited {
+        limits: inbound::Limits,
+        total: Mutex<inbound::Window>,
+        stored: AtomicU64,
+    }
+    impl Answers for Limited {
+        fn handshake(&self) -> Record {
+            Stub.handshake()
+        }
+        fn liveness(&self) -> inbound::Liveness {
+            Stub.liveness()
+        }
+        fn limits(&self) -> inbound::Limits {
+            self.limits
+        }
+        fn authenticate(&self, secret: &[u8]) -> Result<Session, AuthError> {
+            Stub.authenticate(secret)
+        }
+        fn disconnected(&self, _: &Session) {}
+        fn schema(&self) -> Option<Record> {
+            None
+        }
+        fn seq_ack(&self, _: u64) {}
+        fn set_enabled(&self, _: bool) {}
+        fn admit_total(&self, now: Instant, cap: u32) -> bool {
+            self.total.lock().unwrap().admit(now, cap)
+        }
+        fn deliver(&self, _: inbound::Command) -> inbound::Delivery {
+            self.stored.fetch_add(1, Ordering::SeqCst);
+            inbound::Delivery::Stored
+        }
+    }
+
+    fn limited(per_connection: u32, total: u32) -> (Arc<Limited>, Listener, Writer<Record>) {
+        let limited = Arc::new(Limited {
+            limits: inbound::Limits {
+                inbound_records_per_sec: per_connection,
+                inbound_records_per_sec_total: total,
+                ..inbound::Limits::default()
+            },
+            total: Mutex::new(inbound::Window::new(Instant::now())),
+            stored: AtomicU64::new(0),
+        });
+        let (writer, _commit, connections) = Writer::spawn(64);
+        let answers: Arc<dyn Answers> = limited.clone();
+        let listener = Listener::spawn("127.0.0.1:0", connections, 64, answers).unwrap();
+        (limited, listener, writer)
+    }
+
+    /// A connection over its own rate is refused the record and kept: the
+    /// third record under a rate of two comes back `RATE_LIMITED` with its
+    /// own number, reaches no ring, and the connection still answers.
+    /// `Ping` is not a record for Lua, so it is not counted.
+    #[test]
+    fn a_connection_over_its_own_rate_is_refused_and_kept() {
+        const COMMAND: &str = "dcsbridge.builtin.sim.SetFlag";
+        let (limited, listener, writer) = limited(2, 100);
+        let mut sender = client(listener.local_addr());
+        read_handshake(&mut sender);
+        assert!(authenticate(&mut sender, SECRET).1.ok);
+
+        let mut burst = Vec::new();
+        burst.extend(inbound(2, topic::PING, &[]));
+        burst.extend(inbound(3, COMMAND, b"one"));
+        burst.extend(inbound(4, topic::PING, &[]));
+        burst.extend(inbound(5, COMMAND, b"two"));
+        burst.extend(inbound(6, COMMAND, b"three"));
+        burst.extend(inbound(7, topic::PING, &[]));
+        sender.write_all(&burst).expect("the burst is sent");
+
+        let pong = |sender: &mut TcpStream| {
+            assert_eq!(
+                read_frame(sender).payload.unwrap().type_url,
+                type_url(topic::PONG)
+            );
+        };
+        pong(&mut sender);
+        pong(&mut sender);
+        assert_rejected(&mut sender, 6, COMMAND, RejectedReason::RateLimited);
+        pong(&mut sender);
+        assert_eq!(limited.stored.load(Ordering::SeqCst), 2);
+
+        drop(listener);
+        drop(writer);
+    }
+
+    /// A connection that pushes every connection's total over the rate is
+    /// closed, with nothing sent first, and the connection whose records
+    /// were within it is kept: the total drops whoever arrived last.
+    #[test]
+    fn a_connection_that_pushes_the_total_over_is_closed_and_the_rest_kept() {
+        const COMMAND: &str = "dcsbridge.builtin.sim.SetFlag";
+        let (limited, listener, writer) = limited(100, 2);
+        let mut first = client(listener.local_addr());
+        read_handshake(&mut first);
+        assert!(authenticate(&mut first, SECRET).1.ok);
+        let mut second = client(listener.local_addr());
+        read_handshake(&mut second);
+        assert!(authenticate(&mut second, SECRET).1.ok);
+
+        let mut burst = Vec::new();
+        burst.extend(inbound(2, COMMAND, b"one"));
+        burst.extend(inbound(3, COMMAND, b"two"));
+        burst.extend(inbound(4, topic::PING, &[]));
+        first.write_all(&burst).expect("the burst is sent");
+        assert_eq!(
+            read_frame(&mut first).payload.unwrap().type_url,
+            type_url(topic::PONG)
+        );
+        assert_eq!(limited.stored.load(Ordering::SeqCst), 2);
+
+        second
+            .write_all(&inbound(2, COMMAND, b"three"))
+            .expect("the frame is sent");
+        second
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .expect("the timeout is set");
+        let mut sink = [0u8; 64];
+        let read = second.read(&mut sink);
+        assert!(
+            matches!(read, Ok(0)) || read.is_err(),
+            "the connection over the total was answered rather than closed: {read:?}"
+        );
+        assert_eq!(limited.stored.load(Ordering::SeqCst), 2);
+
+        first
+            .write_all(&inbound(5, topic::PING, &[]))
+            .expect("the ping is sent");
+        assert_eq!(
+            read_frame(&mut first).payload.unwrap().type_url,
+            type_url(topic::PONG),
+            "the connection within the total was closed"
+        );
+
+        drop(listener);
+        drop(writer);
+    }
 }
