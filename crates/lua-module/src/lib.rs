@@ -1228,6 +1228,7 @@ mod put {
 
     use dcsbridge_broker::encode::{Encoder, Error};
     use dcsbridge_broker::fanout::ConnectionId;
+    use dcsbridge_broker::registry::Capability;
 
     use crate::lua;
 
@@ -1247,9 +1248,16 @@ mod put {
     /// `encoder` is `None` until the first `begin`, which is refused before
     /// the first `configure`. A put or a commit with no encoder is one with
     /// no record open, and says so.
+    ///
+    /// `need` is the capability the open record's topic requires, looked up
+    /// by the registry check that admitted the `begin`, and handed to the
+    /// broker at `commit` so the writer thread can withhold the record from
+    /// a connection whose token lacks it without holding a registry. It is
+    /// meaningful only while a record is open.
     struct Pending {
         encoder: Option<Encoder>,
         to: Option<ConnectionId>,
+        need: Capability,
     }
 
     /// The calls and their names on the table.
@@ -1274,6 +1282,7 @@ mod put {
         let pending = Box::into_raw(Box::new(Pending {
             encoder: None,
             to: None,
+            need: Capability::Read,
         }));
 
         // SAFETY: the userdata is exactly one pointer wide and lives as long
@@ -1423,15 +1432,16 @@ mod put {
             let s = lua::luaL_checklstring(state, 1, &mut len);
             let topic = core::slice::from_raw_parts(s.cast::<u8>(), len);
             let pending = opening(state);
-            if !dcsbridge_broker::bridge().registered(topic) {
+            let Some(need) = dcsbridge_broker::bridge().registered(topic) else {
                 lua::luaL_error(
                     state,
                     c"begin refused: %s has no class or no capability registered".as_ptr(),
                     s,
                 );
                 unreachable!("luaL_error does not return")
-            }
+            };
             pending.to = None;
+            pending.need = need;
             pending
                 .encoder
                 .as_mut()
@@ -1489,14 +1499,14 @@ mod put {
             }
             // A reply is marked addressable by one table and given its
             // class and capability by two others, and needs all three.
-            if !dcsbridge_broker::bridge().registered(topic) {
+            let Some(need) = dcsbridge_broker::bridge().registered(topic) else {
                 lua::luaL_error(
                     state,
                     c"begin_to refused: %s has no class or no capability registered".as_ptr(),
                     s,
                 );
                 unreachable!("luaL_error does not return")
-            }
+            };
 
             let pending = opening(state);
             pending
@@ -1505,6 +1515,7 @@ mod put {
                 .expect("opening set it")
                 .begin(topic, dcsbridge_broker::bridge().stamp());
             pending.to = Some(ConnectionId::from_raw(id as u64));
+            pending.need = need;
         }
         0
     }

@@ -1112,18 +1112,21 @@ impl Bridge {
         self.misaddressed.load(Ordering::Relaxed)
     }
 
-    /// Whether `topic` has a class and a capability registered, counting a
-    /// refusal in `partial_registration_total`.
+    /// The capability `topic` requires, or `None` when it has no class or no
+    /// capability registered, counting a refusal in
+    /// `partial_registration_total`.
     ///
     /// Asked at every `begin` and `begin_to`, and answered the way
-    /// [`Bridge::addressable`] is: a plain boolean with no lock held, so the
-    /// raise the Lua side makes of `false` jumps past no guard.
-    pub fn registered(&self, topic: &[u8]) -> bool {
-        let complete = self.registry().is_complete(topic);
-        if !complete {
+    /// [`Bridge::addressable`] is: a plain value with no lock held, so the
+    /// raise the Lua side makes of `None` jumps past no guard. The value
+    /// travels with the record to [`Bridge::commit`], where the writer
+    /// thread withholds the record from a connection it does not cover.
+    pub fn registered(&self, topic: &[u8]) -> Option<Capability> {
+        let required = self.registry().required(topic);
+        if required.is_none() {
             self.partial_registration.fetch_add(1, Ordering::Relaxed);
         }
-        complete
+        required
     }
 
     /// How many records were refused at `begin` or `begin_to` for naming a
@@ -1601,27 +1604,35 @@ mod tests {
         const EVENT: &str = "dcsbridge.builtin.sim.UnitDestroyed";
         const REPLY: &str = "dcsbridge.builtin.sim.FlagValue";
 
-        assert!(!bridge.registered(EVENT.as_bytes()));
+        assert_eq!(bridge.registered(EVENT.as_bytes()), None);
         assert_eq!(bridge.partial_registration(), 1);
 
         bridge
             .register_classes([(EVENT.to_string(), RecordClass::Durable)])
             .expect("classes");
-        assert!(
-            !bridge.registered(EVENT.as_bytes()),
+        assert_eq!(
+            bridge.registered(EVENT.as_bytes()),
+            None,
             "a class alone made a topic registered"
         );
         bridge
             .register_caps([(EVENT.to_string(), Capability::Read)])
             .expect("caps");
-        assert!(bridge.registered(EVENT.as_bytes()));
+        assert_eq!(
+            bridge.registered(EVENT.as_bytes()),
+            Some(Capability::Read),
+            "a registered topic did not name its capability"
+        );
         assert_eq!(
             bridge.partial_registration(),
             2,
             "an allowed begin was counted"
         );
 
-        assert!(bridge.registered(dcsbridge_topic::COMMAND_ACK.as_bytes()));
+        assert_eq!(
+            bridge.registered(dcsbridge_topic::COMMAND_ACK.as_bytes()),
+            Some(Capability::Command)
+        );
 
         assert!(!bridge.addressable(REPLY.as_bytes()));
         assert_eq!(bridge.register_replies([REPLY.to_string()]), 1);

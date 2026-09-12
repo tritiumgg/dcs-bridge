@@ -289,10 +289,27 @@ impl Registry {
     /// that sent the command it answers, so its capability is that command's
     /// and no table needs to carry it. ADR 0017.
     pub fn is_complete(&self, topic: &[u8]) -> bool {
-        topic == dcsbridge_topic::COMMAND_ACK.as_bytes()
-            || std::str::from_utf8(topic).is_ok_and(|topic| {
-                self.classes.contains_key(topic) && self.caps.contains_key(topic)
-            })
+        self.required(topic).is_some()
+    }
+
+    /// The capability a connection needs to receive a record on `topic`, or
+    /// `None` when the topic is incomplete by [`is_complete`](Self::is_complete)'s
+    /// rule.
+    ///
+    /// Looked up once, when the record is opened, and carried with it to
+    /// fan-out: the writer thread holds no registry. The acknowledgement
+    /// answers `command`, so that is what covers it; it is addressed to the
+    /// one connection that sent the command, and an addressed record is
+    /// never filtered, so the value is not consulted on that path.
+    pub fn required(&self, topic: &[u8]) -> Option<Capability> {
+        if topic == dcsbridge_topic::COMMAND_ACK.as_bytes() {
+            return Some(Capability::Command);
+        }
+        let topic = std::str::from_utf8(topic).ok()?;
+        if !self.classes.contains_key(topic) {
+            return None;
+        }
+        self.caps.get(topic).copied()
     }
 }
 
@@ -429,12 +446,20 @@ mod tests {
             .expect("routes");
 
         assert!(registry.is_complete(EVENT.as_bytes()));
+        assert_eq!(registry.required(EVENT.as_bytes()), Some(Capability::Read));
         assert!(
             !registry.is_complete(COMMAND.as_bytes()),
             "a class and a route made a topic complete without a capability"
         );
         assert!(!registry.is_complete(b"dcsbridge.builtin.sim.Unregistered"));
         assert!(!registry.is_complete(b"\xff"));
+
+        // A capability with no class is as incomplete as the reverse.
+        let mut classless = Registry::default();
+        classless
+            .register_caps(rows(&[(EVENT, Capability::Read)]))
+            .expect("caps");
+        assert_eq!(classless.required(EVENT.as_bytes()), None);
     }
 
     /// The acknowledgement is complete and addressable with nothing
