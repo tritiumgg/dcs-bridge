@@ -30,11 +30,15 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use dcsbridge_broker::fanout::Writer;
+use dcsbridge_broker::fanout::{Capabilities, Writer};
 use dcsbridge_broker::ring::{Push, Ring};
 
 /// The record. Small and owned, so nothing about it is shared across threads.
 type Record = u64;
+
+/// The one capability every record needs and every consumer holds, so the
+/// filter passes everything and the figure is the fan-out's alone.
+const READ: u32 = 1;
 
 /// The consumer counts the table has a row for.
 const CONSUMERS: [usize; 5] = [0, 1, 2, 4, 8];
@@ -207,7 +211,7 @@ fn measure(consumers: usize, commit_capacity: usize, regime: Regime) -> Row {
     let drainers: Vec<_> = (0..consumers)
         .map(|_| {
             let (id, mut consumer) = connections.attach(CONNECTION_CAPACITY);
-            connections.authenticated(id);
+            connections.authenticated(id, Capabilities::NONE.with(READ));
             let stop = Arc::clone(&stop);
             thread::spawn(move || {
                 loop {
@@ -228,7 +232,7 @@ fn measure(consumers: usize, commit_capacity: usize, regime: Regime) -> Row {
         })
         .collect();
 
-    let row = time_pushes(regime, |record| commit.push(record));
+    let row = time_pushes(regime, |record| commit.push(READ, record));
 
     drop(writer);
     stop.store(true, Ordering::Release);

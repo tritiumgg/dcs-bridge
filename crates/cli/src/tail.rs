@@ -298,10 +298,23 @@ mod tests {
         );
     }
 
+    /// The capability number most records committed here need, which the
+    /// `tail` token grants, and the one it does not.
+    const READ: u32 = dcsbridge_broker::registry::Capability::Read as u32;
+    const COMMAND: u32 = dcsbridge_broker::registry::Capability::Command as u32;
+
+    /// A topic the `tail` token's capability does not cover.
+    const COMMAND_TOPIC: &str = "dcsbridge.builtin.sim.SetFlag";
+
     /// A record on [`TOPIC`] carrying `bytes` of string in field 1.
     fn record(bytes: usize) -> Record {
+        record_on(TOPIC, bytes)
+    }
+
+    /// A record on `topic` carrying `bytes` of string in field 1.
+    fn record_on(topic: &str, bytes: usize) -> Record {
         let mut e = Encoder::with_capacity(bytes + 128);
-        e.begin(TOPIC.as_bytes(), None);
+        e.begin(topic.as_bytes(), None);
         e.string(1, &vec![b'x'; bytes]).unwrap();
         Arc::from(e.commit().unwrap())
     }
@@ -365,7 +378,7 @@ mod tests {
         let mut length = [0u8; 4];
         loop {
             assert!(Instant::now() < deadline, "no frame arrived");
-            drop(commit.push(record(1)));
+            drop(commit.push(READ, record(1)));
             if matches!(client.peek(&mut length), Ok(4)) {
                 return;
             }
@@ -419,7 +432,7 @@ mod tests {
 
         let big = record(64 << 10);
         for _ in 0..512 {
-            drop(commit.push(Arc::clone(&big)));
+            drop(commit.push(READ, Arc::clone(&big)));
         }
 
         bytes.extend(drain(&mut client));
@@ -453,5 +466,55 @@ mod tests {
             seqs.windows(2).all(|pair| pair[0] < pair[1]),
             "seq did not rise strictly:\n{out}"
         );
+    }
+
+    /// The capability filter, observed the way an operator observes it: a
+    /// `read` token watches a stream in which every other record needs
+    /// `command`, and `tail` prints the records it may see, none it may
+    /// not, and no gap line, because a withheld record was never numbered
+    /// for the connection.
+    #[test]
+    fn a_filtered_consumer_sees_no_gap() {
+        let (writer, mut commit, connections) = Writer::spawn(4096);
+        let answers = Arc::new(dcsbridge_broker::state::Global);
+        let listener = Listener::spawn("127.0.0.1:0", connections, 64, answers).unwrap();
+        let mut client = client(listener.local_addr());
+        let mut bytes = take_frame(&mut client);
+        bytes.extend(take_frame(&mut client));
+        warm_up(&mut commit, &client);
+
+        for _ in 0..16 {
+            drop(commit.push(COMMAND, record_on(COMMAND_TOPIC, 16)));
+            drop(commit.push(READ, record(16)));
+        }
+
+        bytes.extend(drain(&mut client));
+        drop(listener);
+        drop(writer);
+
+        let mut out = Vec::new();
+        let summary = run(&bytes[..], &mut out).unwrap();
+        let out = String::from_utf8(out).unwrap();
+
+        assert!(!summary.refused, "the token was refused:\n{out}");
+        assert!(
+            summary.frames >= 2 + 16,
+            "the covered records were not all read:\n{out}"
+        );
+        assert_eq!(summary.gaps, 0, "a withheld record left a gap:\n{out}");
+        assert_eq!(
+            summary.dropped, 0,
+            "a withheld record counted as dropped:\n{out}"
+        );
+        assert!(!out.contains("gap: "), "a gap was printed:\n{out}");
+        assert!(
+            !out.contains(&format!(" topic={COMMAND_TOPIC} ")),
+            "a record the token does not cover was printed:\n{out}"
+        );
+        assert!(
+            out.contains(&format!(" topic={TOPIC} bytes=")),
+            "no covered record was printed:\n{out}"
+        );
+        assert!(!out.contains("out of order"), "seq went backwards:\n{out}");
     }
 }

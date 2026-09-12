@@ -37,7 +37,7 @@ use crate::handshake;
 use crate::inbound::{
     Answers, AuthError, Command, Delivery, Limits, Liveness, RejectedReason, Session, Window,
 };
-use crate::registry::{Capability, Conflict, RecordClass, Registry, Target, Topic};
+use crate::registry::{Capability, Conflict, Member, RecordClass, Registry, Target, Topic};
 use crate::ring::{Consumer, Producer, Push, Ring};
 use crate::transport::{Listener, Record};
 
@@ -205,6 +205,7 @@ impl fmt::Debug for Outbound {
             .field("listening", &self.listener.local_addr())
             .field("contended", &self.contended.load(Ordering::Relaxed))
             .field("unaddressed", &self.writer.unaddressed())
+            .field("filtered", &self.writer.filtered())
             .finish_non_exhaustive()
     }
 }
@@ -225,6 +226,12 @@ impl Outbound {
     /// gone by the time the writer thread reached them.
     pub fn unaddressed(&self) -> u64 {
         self.writer.unaddressed()
+    }
+
+    /// How many times a fanned-out record was withheld from a connection
+    /// whose token did not cover it, `records_filtered_total`.
+    pub fn filtered(&self) -> u64 {
+        self.writer.filtered()
     }
 
     /// The commit ring's producer, or why not.
@@ -429,8 +436,8 @@ impl Answers for Global {
         bridge().admit_total(now, cap)
     }
 
-    fn deliver(&self, command: Command) -> Delivery {
-        bridge().deliver(command)
+    fn deliver(&self, caps: &HashSet<Capability>, command: Command) -> Delivery {
+        bridge().deliver(caps, command)
     }
 }
 
@@ -659,19 +666,32 @@ impl Bridge {
         self.inbound.get()
     }
 
-    /// Put an inbound record on the ring its route names, or hand it back.
+    /// Put an inbound record from a session holding `caps` on the ring its
+    /// route names, or hand it back.
     ///
-    /// Called on a reader thread. The route is read under the registry's
-    /// read lock and the lock released before the ring's producer is taken,
-    /// so no thread holds both. A topic in no route map goes nowhere and is
-    /// counted, never defaulted to the sim driver: a command the sim driver
-    /// was not told to expect is not one it should run. A full ring turns
-    /// the newest record away and counts it; the reader thread answers the
-    /// sender with `Rejected` either way. Before the rings exist nothing can have
-    /// connected, so a record arriving then is a defect, and it is dropped
-    /// and counted as unrouted rather than held anywhere. ADR 0024.
-    pub fn deliver(&self, command: Command) -> Delivery {
-        let target = self.registry().routes().get(&command.topic).copied();
+    /// Called on a reader thread. The route and the capability are read
+    /// under the registry's read lock and the lock released before the
+    /// ring's producer is taken, so no thread holds both. A topic in no
+    /// route map goes nowhere and is counted, never defaulted to the sim
+    /// driver: a command the sim driver was not told to expect is not one
+    /// it should run. A routed topic the session's token does not cover
+    /// goes nowhere either, and so does one with no capability registered:
+    /// nothing says the token covers it, so the record fails closed the
+    /// way a `begin` on such a topic does. A full ring turns the newest
+    /// record away and counts it; the reader thread answers the sender
+    /// with `Rejected` in every case. Before the rings exist nothing can
+    /// have connected, so a record arriving then is a defect, and it is
+    /// dropped and counted as unrouted rather than held anywhere. ADR 0024.
+    pub fn deliver(&self, caps: &HashSet<Capability>, command: Command) -> Delivery {
+        let (target, covered) = {
+            let registry = self.registry();
+            let target = registry.routes().get(&command.topic).copied();
+            let covered = registry
+                .caps()
+                .get(&command.topic)
+                .is_some_and(|required| caps.contains(required));
+            (target, covered)
+        };
         let lane = match (target, self.inbound.get()) {
             (Some(target), Some(inbound)) => inbound.lane(target),
             _ => {
@@ -679,6 +699,9 @@ impl Bridge {
                 return Delivery::Unrouted(command);
             }
         };
+        if !covered {
+            return Delivery::Uncovered(command);
+        }
         let offered = lane
             .producer
             .lock()
@@ -1032,18 +1055,19 @@ impl Bridge {
         self.authenticated.load(Ordering::Relaxed)
     }
 
-    /// Queue an envelope tail for every connection.
+    /// Queue an envelope tail for every connection whose token covers
+    /// `need`, the capability its topic requires.
     ///
     /// The tail is copied once, into the allocation the rings share by
     /// reference; that is the one allocation on the commit path. A record the
     /// commit ring evicts to make room comes back here and is dropped on the
     /// calling thread. ADR 0014.
-    pub fn commit(&self, tail: &[u8]) -> Result<(), CommitError> {
+    pub fn commit(&self, need: Capability, tail: &[u8]) -> Result<(), CommitError> {
         let outbound = self.outbound.get().ok_or(CommitError::NotStarted)?;
         let record: Record = Arc::from(tail);
 
         let mut commit = outbound.producer()?;
-        drop(commit.push(record));
+        drop(commit.push(need.number(), record));
         Ok(())
     }
 
@@ -1112,18 +1136,21 @@ impl Bridge {
         self.misaddressed.load(Ordering::Relaxed)
     }
 
-    /// Whether `topic` has a class and a capability registered, counting a
-    /// refusal in `partial_registration_total`.
+    /// The capability `topic` requires, or `None` when it has no class or no
+    /// capability registered, counting a refusal in
+    /// `partial_registration_total`.
     ///
     /// Asked at every `begin` and `begin_to`, and answered the way
-    /// [`Bridge::addressable`] is: a plain boolean with no lock held, so the
-    /// raise the Lua side makes of `false` jumps past no guard.
-    pub fn registered(&self, topic: &[u8]) -> bool {
-        let complete = self.registry().is_complete(topic);
-        if !complete {
+    /// [`Bridge::addressable`] is: a plain value with no lock held, so the
+    /// raise the Lua side makes of `None` jumps past no guard. The value
+    /// travels with the record to [`Bridge::commit`], where the writer
+    /// thread withholds the record from a connection it does not cover.
+    pub fn registered(&self, topic: &[u8]) -> Option<Capability> {
+        let required = self.registry().required(topic);
+        if required.is_none() {
             self.partial_registration.fetch_add(1, Ordering::Relaxed);
         }
-        complete
+        required
     }
 
     /// How many records were refused at `begin` or `begin_to` for naming a
@@ -1601,27 +1628,35 @@ mod tests {
         const EVENT: &str = "dcsbridge.builtin.sim.UnitDestroyed";
         const REPLY: &str = "dcsbridge.builtin.sim.FlagValue";
 
-        assert!(!bridge.registered(EVENT.as_bytes()));
+        assert_eq!(bridge.registered(EVENT.as_bytes()), None);
         assert_eq!(bridge.partial_registration(), 1);
 
         bridge
             .register_classes([(EVENT.to_string(), RecordClass::Durable)])
             .expect("classes");
-        assert!(
-            !bridge.registered(EVENT.as_bytes()),
+        assert_eq!(
+            bridge.registered(EVENT.as_bytes()),
+            None,
             "a class alone made a topic registered"
         );
         bridge
             .register_caps([(EVENT.to_string(), Capability::Read)])
             .expect("caps");
-        assert!(bridge.registered(EVENT.as_bytes()));
+        assert_eq!(
+            bridge.registered(EVENT.as_bytes()),
+            Some(Capability::Read),
+            "a registered topic did not name its capability"
+        );
         assert_eq!(
             bridge.partial_registration(),
             2,
             "an allowed begin was counted"
         );
 
-        assert!(bridge.registered(dcsbridge_topic::COMMAND_ACK.as_bytes()));
+        assert_eq!(
+            bridge.registered(dcsbridge_topic::COMMAND_ACK.as_bytes()),
+            Some(Capability::Command)
+        );
 
         assert!(!bridge.addressable(REPLY.as_bytes()));
         assert_eq!(bridge.register_replies([REPLY.to_string()]), 1);
@@ -1730,7 +1765,9 @@ mod tests {
         // Authenticated is queued after the result, so a record committed
         // now reaches the connection, numbered after it.
         let tail = [0x22, 0x00];
-        bridge().commit(&tail).expect("the path is started");
+        bridge()
+            .commit(Capability::Read, &tail)
+            .expect("the path is started");
         client.read_exact(&mut length).expect("a frame arrives");
         assert_eq!(u32::from_le_bytes(length), 2 + tail.len() as u32);
         let mut frame = vec![0u8; u32::from_le_bytes(length) as usize];
@@ -1785,7 +1822,7 @@ mod tests {
             e.begin(topic, bridge().stamp());
             e.integer(1, 1).unwrap();
             bridge()
-                .commit(e.commit().unwrap())
+                .commit(Capability::Read, e.commit().unwrap())
                 .expect("the path is started");
         };
 
@@ -1813,13 +1850,17 @@ mod tests {
             "a record outside an epoch carried a stamp"
         );
 
-        // A record sent on a registered inbound topic reaches the ring its
-        // route names, through the shared bridge's own reader thread, and
-        // is polled with the sender's connection id and its bytes.
+        // A record sent on a registered inbound topic the token covers
+        // reaches the ring its route names, through the shared bridge's
+        // own reader thread, and is polled with the sender's connection id
+        // and its bytes.
         bridge().start_inbound(4, 4);
         bridge()
             .register_routes([(HOOK_COMMAND.to_string(), Target::HookDriver)])
             .expect("a new route merges");
+        bridge()
+            .register_caps([(HOOK_COMMAND.to_string(), Capability::Read)])
+            .expect("a new capability merges");
         let sent = {
             let body = crate::inbound::Envelope {
                 seq: 2,
@@ -2044,7 +2085,7 @@ mod tests {
         }
     }
 
-    /// Register the two commands' routes on `bridge`.
+    /// Register the two commands' routes and capabilities on `bridge`.
     fn route_both(bridge: &Bridge) {
         bridge
             .register_routes([
@@ -2052,6 +2093,57 @@ mod tests {
                 (HOOK_COMMAND.to_string(), Target::HookDriver),
             ])
             .expect("two new routes merge");
+        bridge
+            .register_caps([
+                (SIM_COMMAND.to_string(), Capability::Command),
+                (HOOK_COMMAND.to_string(), Capability::Command),
+            ])
+            .expect("two new capabilities merge");
+    }
+
+    /// The capability set that covers both commands.
+    fn commanding() -> HashSet<Capability> {
+        [Capability::Command].into_iter().collect()
+    }
+
+    /// A routed command from a token without its capability comes back
+    /// uncovered and reaches no ring, and so does one on a routed topic
+    /// with no capability registered: nothing says the token covers it.
+    /// The route is asked first, so an unrouted topic is unrouted whatever
+    /// the token holds.
+    #[test]
+    fn a_command_the_token_does_not_cover_is_handed_back() {
+        let bridge = Bridge::new(24);
+        bridge.start_inbound(4, 4);
+        route_both(&bridge);
+        const ROUTED_ONLY: &str = "dcsbridge.builtin.sim.Uncapped";
+        bridge
+            .register_routes([(ROUTED_ONLY.to_string(), Target::SimDriver)])
+            .unwrap();
+        let reading: HashSet<Capability> = [Capability::Read].into_iter().collect();
+
+        let sent = command(1, SIM_COMMAND, b"read-only");
+        assert_eq!(
+            bridge.deliver(&reading, sent.clone()),
+            Delivery::Uncovered(sent)
+        );
+        let uncapped = command(1, ROUTED_ONLY, b"");
+        assert_eq!(
+            bridge.deliver(&commanding(), uncapped.clone()),
+            Delivery::Uncovered(uncapped)
+        );
+        let stray = command(1, "dcsbridge.sim.Resync", b"");
+        assert_eq!(
+            bridge.deliver(&HashSet::new(), stray.clone()),
+            Delivery::Unrouted(stray)
+        );
+        assert_eq!(bridge.poll(Target::SimDriver), Ok(None));
+        assert_eq!(
+            bridge.unrouted_topic(),
+            1,
+            "an uncovered command was counted as unrouted"
+        );
+        assert_eq!(bridge.inbound_busy(Target::SimDriver), 0);
     }
 
     /// A delivered command is polled from the ring its route names and
@@ -2068,15 +2160,15 @@ mod tests {
         assert_eq!(bridge.poll(Target::HookDriver), Ok(None));
 
         assert_eq!(
-            bridge.deliver(command(7, SIM_COMMAND, b"first")),
+            bridge.deliver(&commanding(), command(7, SIM_COMMAND, b"first")),
             Delivery::Stored
         );
         assert_eq!(
-            bridge.deliver(command(8, HOOK_COMMAND, b"kick")),
+            bridge.deliver(&commanding(), command(8, HOOK_COMMAND, b"kick")),
             Delivery::Stored
         );
         assert_eq!(
-            bridge.deliver(command(9, SIM_COMMAND, b"second")),
+            bridge.deliver(&commanding(), command(9, SIM_COMMAND, b"second")),
             Delivery::Stored
         );
 
@@ -2128,10 +2220,13 @@ mod tests {
             .unwrap();
 
         let stray = command(3, "dcsbridge.sim.Resync", b"");
-        assert_eq!(bridge.deliver(stray.clone()), Delivery::Unrouted(stray));
+        assert_eq!(
+            bridge.deliver(&commanding(), stray.clone()),
+            Delivery::Unrouted(stray)
+        );
         let outbound_only = command(3, EVENT, b"");
         assert_eq!(
-            bridge.deliver(outbound_only.clone()),
+            bridge.deliver(&commanding(), outbound_only.clone()),
             Delivery::Unrouted(outbound_only)
         );
         assert_eq!(bridge.unrouted_topic(), 2);
@@ -2149,15 +2244,18 @@ mod tests {
         route_both(&bridge);
 
         assert_eq!(
-            bridge.deliver(command(1, SIM_COMMAND, b"a")),
+            bridge.deliver(&commanding(), command(1, SIM_COMMAND, b"a")),
             Delivery::Stored
         );
         assert_eq!(
-            bridge.deliver(command(1, SIM_COMMAND, b"b")),
+            bridge.deliver(&commanding(), command(1, SIM_COMMAND, b"b")),
             Delivery::Stored
         );
         let third = command(1, SIM_COMMAND, b"c");
-        assert_eq!(bridge.deliver(third.clone()), Delivery::Busy(third));
+        assert_eq!(
+            bridge.deliver(&commanding(), third.clone()),
+            Delivery::Busy(third)
+        );
         assert_eq!(bridge.inbound_busy(Target::SimDriver), 1);
         assert_eq!(bridge.inbound_busy(Target::HookDriver), 0);
         assert_eq!(
@@ -2172,7 +2270,7 @@ mod tests {
             "the oldest command was not kept"
         );
         assert_eq!(
-            bridge.deliver(command(1, SIM_COMMAND, b"d")),
+            bridge.deliver(&commanding(), command(1, SIM_COMMAND, b"d")),
             Delivery::Stored
         );
         assert_eq!(
@@ -2195,7 +2293,10 @@ mod tests {
         assert_eq!(bridge.poll(Target::SimDriver), Err(PollError::NotStarted));
         assert_eq!(bridge.poll(Target::HookDriver), Err(PollError::NotStarted));
         let early = command(1, SIM_COMMAND, b"");
-        assert_eq!(bridge.deliver(early.clone()), Delivery::Unrouted(early));
+        assert_eq!(
+            bridge.deliver(&commanding(), early.clone()),
+            Delivery::Unrouted(early)
+        );
         assert_eq!(bridge.unrouted_topic(), 1);
         assert_eq!(bridge.inbound_busy(Target::SimDriver), 0);
         assert_eq!(

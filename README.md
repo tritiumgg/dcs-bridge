@@ -91,9 +91,12 @@ prints on its first line; the bytes are served back to an authenticated
 consumer that asks, and `dcsb schema` is one.
 
 A consumer authenticates with a token: an id, a secret, and the capabilities
-the token grants, from `read`, `command` and `reload`. The `tokens` key holds
-one entry per consumer. Reading it from the file is not yet built; until then
-a hook script hands the table to the bridge with `shim.configure`.
+the token grants, from `read`, `command` and `reload`. Every topic names the
+capability it requires. A consumer receives only the records its token
+covers, with no gap in `seq` where the others were, and a record it sends on
+a topic its token does not cover is refused. The `tokens` key holds one entry
+per consumer. Reading it from the file is not yet built; until then a hook
+script hands the table to the bridge with `shim.configure`.
 
 The loader has an `ENABLED` flag. Set it to `false` to keep the bridge
 installed but inactive.

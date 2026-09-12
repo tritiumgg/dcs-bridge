@@ -377,6 +377,10 @@ mod tests {
         format!("{TYPE_URL_PREFIX}{topic}")
     }
 
+    /// The capability number every record committed here needs, which every
+    /// stub's token grants.
+    const READ: u32 = crate::registry::Capability::Read as u32;
+
     /// A record on [`TOPIC`] carrying `n` in field 1.
     fn record(n: i64) -> Record {
         let mut e = Encoder::with_capacity(256);
@@ -505,6 +509,19 @@ mod tests {
             assert!(answered);
             self.refused.fetch_add(1, Ordering::SeqCst);
         }
+        /// Every record for Lua needs `command`, and there is no ring: one
+        /// the token covers is reported stored and goes nowhere.
+        fn deliver(
+            &self,
+            caps: &std::collections::HashSet<crate::registry::Capability>,
+            command: inbound::Command,
+        ) -> inbound::Delivery {
+            if caps.contains(&crate::registry::Capability::Command) {
+                inbound::Delivery::Stored
+            } else {
+                inbound::Delivery::Uncovered(command)
+            }
+        }
     }
 
     fn listener(connections: crate::fanout::Connections<Record>) -> Listener {
@@ -573,7 +590,7 @@ mod tests {
             .expect("a read timeout is set");
         loop {
             assert!(Instant::now() < deadline, "no frame arrived");
-            commit.push(record(n));
+            commit.push(READ, record(n));
             n += 1;
             let mut length = [0u8; 4];
             if stream_peek(client, &mut length) {
@@ -621,7 +638,7 @@ mod tests {
 
         let start = value(&first);
         for n in 1..=2 {
-            commit.push(record(start + 100 + n));
+            commit.push(READ, record(start + 100 + n));
         }
         // Whatever the warm-up committed after the first frame arrives before
         // these two; skip to them.
@@ -662,7 +679,7 @@ mod tests {
 
         drop(first);
         let last = value(&on_second);
-        commit.push(record(last + 1000));
+        commit.push(READ, record(last + 1000));
         loop {
             let frame = read_frame(&mut second);
             if value(&frame) == last + 1000 {
@@ -693,7 +710,7 @@ mod tests {
         let on_second = first_frame(&mut commit, &mut second);
 
         commit.push_to(ConnectionId::from_raw(1), record(7_001));
-        commit.push(record(7_002));
+        commit.push(READ, record(7_002));
 
         // Whatever the warm-ups committed after each first frame arrives
         // before these; read through it, and every frame on the way numbers
@@ -1160,7 +1177,7 @@ mod tests {
             assert!(is_closed(&mut offender), "the offender was not closed");
         }
 
-        commit.push(record(9_001));
+        commit.push(READ, record(9_001));
         let frame = read_frame(&mut staying);
         assert_eq!(
             frame.seq,
@@ -1403,7 +1420,7 @@ mod tests {
 
         let mut pending = client(listener.local_addr());
         read_handshake(&mut pending);
-        commit.push(record(1));
+        commit.push(READ, record(1));
         pending
             .write_all(&inbound(1, topic::PING, &[]))
             .expect("the ping is sent");
@@ -1418,7 +1435,7 @@ mod tests {
         let (frame, result) = authenticate(&mut pending, SECRET);
         assert_eq!(frame.seq, 3);
         assert!(result.ok);
-        commit.push(record(2));
+        commit.push(READ, record(2));
         let frame = read_frame(&mut pending);
         assert_eq!(frame.seq, 4, "the first record did not follow the result");
         assert_eq!(value(&frame), 2);
@@ -1427,6 +1444,145 @@ mod tests {
             .write_all(&inbound(2, topic::AUTH, &[]))
             .expect("the second auth is sent");
         assert!(is_closed(&mut pending), "a second auth was accepted");
+
+        drop(listener);
+        drop(writer);
+    }
+
+    /// A record whose capability the token does not cover is withheld at
+    /// fan-out: the connection never reads it, its `seq` does not move, and
+    /// the next covered record follows with no gap. The pass-over is counted
+    /// as filtered and nowhere as dropped. A `Pong` in between is addressed
+    /// and reaches the connection whatever it needs.
+    #[test]
+    fn a_record_the_token_does_not_cover_is_withheld_without_a_gap() {
+        const COMMAND: u32 = crate::registry::Capability::Command as u32;
+        const WITHHELD: i64 = 999;
+        const LAST: i64 = 1000;
+        const TOPIC_STR: &str = "dcsbridge.builtin.sim.UnitDestroyed";
+        assert_eq!(TOPIC_STR.as_bytes(), TOPIC);
+
+        let (writer, mut commit, connections) = Writer::spawn(64);
+        let read_only = Arc::new(Switch {
+            reload: false,
+            enabled: Arc::new(AtomicBool::new(true)),
+            acked: Arc::new(AtomicU64::new(0)),
+            refused: Arc::new(AtomicU64::new(0)),
+        });
+        let listener = Listener::spawn("127.0.0.1:0", connections, 64, read_only).unwrap();
+
+        let mut client = client(listener.local_addr());
+        let first = first_frame(&mut commit, &mut client);
+        assert_eq!(first.seq, 3);
+
+        // Whatever `first_frame` committed past the first record arrives
+        // ahead of what follows, numbered in order, and the withheld one
+        // is nowhere. Reads until a frame satisfies `until`.
+        let mut last_seq = first.seq;
+        let mut read_until = |client: &mut TcpStream, until: &dyn Fn(&Envelope) -> bool| {
+            loop {
+                let frame = read_frame(client);
+                assert_eq!(
+                    frame.seq,
+                    last_seq + 1,
+                    "seq skipped: a withheld record was numbered"
+                );
+                last_seq = frame.seq;
+                if frame.payload.as_ref().unwrap().type_url == type_url(TOPIC_STR) {
+                    assert_ne!(
+                        value(&frame),
+                        WITHHELD,
+                        "the read-only connection received the command record"
+                    );
+                }
+                if until(&frame) {
+                    return;
+                }
+            }
+        };
+
+        // The pong crosses the reader thread and the control channel, so
+        // it is waited for before the next commit rather than raced.
+        commit.push(COMMAND, record(WITHHELD));
+        client
+            .write_all(&inbound(2, topic::PING, &[]))
+            .expect("the ping is sent");
+        read_until(&mut client, &|frame| {
+            frame.payload.as_ref().unwrap().type_url == type_url(topic::PONG)
+        });
+
+        commit.push(READ, record(LAST));
+        read_until(&mut client, &|frame| {
+            frame.payload.as_ref().unwrap().type_url == type_url(TOPIC_STR) && value(frame) == LAST
+        });
+        assert_eq!(
+            writer.filtered(),
+            1,
+            "one record withheld from one connection"
+        );
+        assert_eq!(commit.dropped(), 0, "a withheld record counted as dropped");
+
+        drop(listener);
+        drop(writer);
+    }
+
+    /// A record for Lua from a token without the capability its topic
+    /// requires is answered with `Rejected` reason `NO_CAPABILITY` carrying
+    /// the sender's `seq` and the topic, counted, and the connection is
+    /// kept: a `Ping` after it is answered. The same record from a token
+    /// that covers it is answered by nothing.
+    #[test]
+    fn a_record_the_token_does_not_cover_is_refused_inbound() {
+        const SIM_COMMAND: &str = "dcsbridge.builtin.sim.SetFlag";
+        let refused = Arc::new(AtomicU64::new(0));
+        let switch = |reload: bool| {
+            Arc::new(Switch {
+                reload,
+                enabled: Arc::new(AtomicBool::new(true)),
+                acked: Arc::new(AtomicU64::new(0)),
+                refused: Arc::clone(&refused),
+            })
+        };
+        let ping = |sender: &mut TcpStream, seq: u64| {
+            sender
+                .write_all(&inbound(seq, topic::PING, &[]))
+                .expect("the ping is sent");
+            let frame = read_frame(sender);
+            assert_eq!(
+                frame.payload.unwrap().type_url,
+                type_url(topic::PONG),
+                "the record was answered, or the connection closed"
+            );
+        };
+
+        let (writer, _commit, connections) = Writer::spawn(64);
+        let listener = Listener::spawn("127.0.0.1:0", connections, 64, switch(false)).unwrap();
+        let mut reader = client(listener.local_addr());
+        read_handshake(&mut reader);
+        assert!(authenticate(&mut reader, SECRET).1.ok);
+        reader
+            .write_all(&inbound(2, SIM_COMMAND, b"set"))
+            .expect("the record is sent");
+        assert_rejected(&mut reader, 2, SIM_COMMAND, RejectedReason::NoCapability);
+        assert_eq!(refused.load(Ordering::SeqCst), 1);
+        ping(&mut reader, 3);
+        drop(listener);
+        drop(writer);
+
+        let (writer, _commit, connections) = Writer::spawn(64);
+        let listener = Listener::spawn("127.0.0.1:0", connections, 64, switch(true)).unwrap();
+        let mut commander = client(listener.local_addr());
+        read_handshake(&mut commander);
+        assert!(authenticate(&mut commander, SECRET).1.ok);
+        commander
+            .write_all(&inbound(2, SIM_COMMAND, b"set"))
+            .expect("the record is sent");
+        ping(&mut commander, 3);
+        assert_eq!(
+            refused.load(Ordering::SeqCst),
+            1,
+            "a covered record was refused"
+        );
 
         drop(listener);
         drop(writer);
@@ -1564,9 +1720,10 @@ mod tests {
     #[test]
     fn a_record_reaches_the_ring_its_route_names_and_no_other() {
         use crate::inbound::{Command, Delivery};
-        use crate::registry::Target;
+        use crate::registry::{Capability, Target};
         use crate::ring::{Producer, Push, Ring};
         use std::collections::HashMap;
+        use std::collections::HashSet;
 
         /// The stub with two rings and a route map behind it.
         struct Routed {
@@ -1592,7 +1749,7 @@ mod tests {
             }
             fn seq_ack(&self, _: u64) {}
             fn set_enabled(&self, _: bool) {}
-            fn deliver(&self, command: Command) -> Delivery {
+            fn deliver(&self, _: &HashSet<Capability>, command: Command) -> Delivery {
                 let ring = match self.routes.get(command.topic.as_str()) {
                     Some(Target::SimDriver) => &self.sim,
                     Some(Target::HookDriver) => &self.hook,
@@ -1740,7 +1897,11 @@ mod tests {
                 self.suppressed.fetch_add(1, Ordering::SeqCst);
             }
         }
-        fn deliver(&self, command: inbound::Command) -> inbound::Delivery {
+        fn deliver(
+            &self,
+            _: &std::collections::HashSet<crate::registry::Capability>,
+            command: inbound::Command,
+        ) -> inbound::Delivery {
             if self.busy {
                 inbound::Delivery::Busy(command)
             } else {
@@ -1848,7 +2009,11 @@ mod tests {
         fn admit_total(&self, now: Instant, cap: u32) -> bool {
             self.total.lock().unwrap().admit(now, cap)
         }
-        fn deliver(&self, _: inbound::Command) -> inbound::Delivery {
+        fn deliver(
+            &self,
+            _: &std::collections::HashSet<crate::registry::Capability>,
+            _: inbound::Command,
+        ) -> inbound::Delivery {
             self.stored.fetch_add(1, Ordering::SeqCst);
             inbound::Delivery::Stored
         }
