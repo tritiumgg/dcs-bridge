@@ -1436,6 +1436,83 @@ mod tests {
         drop(writer);
     }
 
+    /// A record whose capability the token does not cover is withheld at
+    /// fan-out: the connection never reads it, its `seq` does not move, and
+    /// the next covered record follows with no gap. The pass-over is counted
+    /// as filtered and nowhere as dropped. A `Pong` in between is addressed
+    /// and reaches the connection whatever it needs.
+    #[test]
+    fn a_record_the_token_does_not_cover_is_withheld_without_a_gap() {
+        const COMMAND: u32 = crate::registry::Capability::Command as u32;
+        const WITHHELD: i64 = 999;
+        const LAST: i64 = 1000;
+        const TOPIC_STR: &str = "dcsbridge.builtin.sim.UnitDestroyed";
+        assert_eq!(TOPIC_STR.as_bytes(), TOPIC);
+
+        let (writer, mut commit, connections) = Writer::spawn(64);
+        let read_only = Arc::new(Switch {
+            reload: false,
+            enabled: Arc::new(AtomicBool::new(true)),
+            acked: Arc::new(AtomicU64::new(0)),
+            refused: Arc::new(AtomicU64::new(0)),
+        });
+        let listener = Listener::spawn("127.0.0.1:0", connections, 64, read_only).unwrap();
+
+        let mut client = client(listener.local_addr());
+        let first = first_frame(&mut commit, &mut client);
+        assert_eq!(first.seq, 3);
+
+        // Whatever `first_frame` committed past the first record arrives
+        // ahead of what follows, numbered in order, and the withheld one
+        // is nowhere. Reads until a frame satisfies `until`.
+        let mut last_seq = first.seq;
+        let mut read_until = |client: &mut TcpStream, until: &dyn Fn(&Envelope) -> bool| {
+            loop {
+                let frame = read_frame(client);
+                assert_eq!(
+                    frame.seq,
+                    last_seq + 1,
+                    "seq skipped: a withheld record was numbered"
+                );
+                last_seq = frame.seq;
+                if frame.payload.as_ref().unwrap().type_url == type_url(TOPIC_STR) {
+                    assert_ne!(
+                        value(&frame),
+                        WITHHELD,
+                        "the read-only connection received the command record"
+                    );
+                }
+                if until(&frame) {
+                    return;
+                }
+            }
+        };
+
+        // The pong crosses the reader thread and the control channel, so
+        // it is waited for before the next commit rather than raced.
+        commit.push(COMMAND, record(WITHHELD));
+        client
+            .write_all(&inbound(2, topic::PING, &[]))
+            .expect("the ping is sent");
+        read_until(&mut client, &|frame| {
+            frame.payload.as_ref().unwrap().type_url == type_url(topic::PONG)
+        });
+
+        commit.push(READ, record(LAST));
+        read_until(&mut client, &|frame| {
+            frame.payload.as_ref().unwrap().type_url == type_url(TOPIC_STR) && value(frame) == LAST
+        });
+        assert_eq!(
+            writer.filtered(),
+            1,
+            "one record withheld from one connection"
+        );
+        assert_eq!(commit.dropped(), 0, "a withheld record counted as dropped");
+
+        drop(listener);
+        drop(writer);
+    }
+
     /// A connection that sends nothing but `Ping` is closed once the
     /// handshake timeout passes, and one that sends nothing at all is too.
     #[test]
