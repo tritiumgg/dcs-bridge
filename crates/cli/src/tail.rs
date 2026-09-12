@@ -298,6 +298,10 @@ mod tests {
         );
     }
 
+    /// The capability number every record committed here needs, which the
+    /// `tail` token grants.
+    const READ: u32 = dcsbridge_broker::registry::Capability::Read as u32;
+
     /// A record on [`TOPIC`] carrying `bytes` of string in field 1.
     fn record(bytes: usize) -> Record {
         let mut e = Encoder::with_capacity(bytes + 128);
@@ -365,7 +369,7 @@ mod tests {
         let mut length = [0u8; 4];
         loop {
             assert!(Instant::now() < deadline, "no frame arrived");
-            drop(commit.push(record(1)));
+            drop(commit.push(READ, record(1)));
             if matches!(client.peek(&mut length), Ok(4)) {
                 return;
             }
@@ -419,7 +423,7 @@ mod tests {
 
         let big = record(64 << 10);
         for _ in 0..512 {
-            drop(commit.push(Arc::clone(&big)));
+            drop(commit.push(READ, Arc::clone(&big)));
         }
 
         bytes.extend(drain(&mut client));

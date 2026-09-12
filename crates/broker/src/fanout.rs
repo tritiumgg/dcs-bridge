@@ -80,11 +80,47 @@ impl ConnectionId {
     }
 }
 
+/// The capabilities one connection's token grants, as the writer thread
+/// holds them: bit `n` set for capability number `n`.
+///
+/// A mask rather than a set, because the writer thread asks it about every
+/// fanned-out record for every connection, and because this module is built
+/// under Loom, where the registry and its capability type are not. The
+/// bridge's numbers are 1 to 49 and fit. A number past 63 is neither added
+/// nor covered, so a record needing one is withheld from everyone rather
+/// than disclosed; nothing registers such a number today.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct Capabilities(u64);
+
+impl Capabilities {
+    /// No capability at all.
+    pub const NONE: Self = Self(0);
+
+    /// This set with capability `number` added.
+    #[must_use]
+    pub const fn with(self, number: u32) -> Self {
+        if number < u64::BITS {
+            Self(self.0 | 1 << number)
+        } else {
+            self
+        }
+    }
+
+    /// Whether a record needing capability `number` may be received.
+    pub const fn covers(self, number: u32) -> bool {
+        number < u64::BITS && self.0 & (1 << number) != 0
+    }
+}
+
 /// A record as the commit ring carries it: for every connection, or for one.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Addressed<T> {
     /// The one connection the record is for, or every connection.
     pub to: Option<ConnectionId>,
+    /// The number of the capability a connection needs to receive the
+    /// record. Consulted at fan-out and never for an addressed record: the
+    /// one connection it names sent the command it answers.
+    pub need: u32,
     /// The record itself.
     pub record: T,
 }
@@ -124,8 +160,9 @@ enum Control<T> {
     /// The broker answers this connection: push the record into its ring,
     /// numbered in its `seq`, whether or not it has authenticated.
     Answer(ConnectionId, T),
-    /// The connection has authenticated; fan out to it from here on.
-    Authenticated(ConnectionId),
+    /// The connection has authenticated under a token granting these
+    /// capabilities; fan out to it from here on what they cover.
+    Authenticated(ConnectionId, Capabilities),
     /// Return from the loop.
     Stop,
 }
@@ -237,15 +274,16 @@ pub struct Commit<T> {
 }
 
 impl<T> Commit<T> {
-    /// Commit a record for every connection.
+    /// Commit a record for every connection whose capabilities cover
+    /// capability number `need`.
     ///
     /// A full ring evicts its oldest record, which comes back here rather than
     /// being destroyed inside the ring. Dropping it is the caller's, and on the
     /// logic thread that is a deallocation per lost record under pressure;
     /// ADR 0011 accepts that until the record type is fixed and its drop cost
     /// is known.
-    pub fn push(&mut self, value: T) -> Push<T> {
-        self.push_addressed(None, value)
+    pub fn push(&mut self, need: u32, value: T) -> Push<T> {
+        self.push_addressed(None, need, value)
     }
 
     /// Commit a record for one connection and no other.
@@ -255,13 +293,14 @@ impl<T> Commit<T> {
     /// connection is gone. Nothing here looks the connection up, so the call
     /// costs the logic thread what `push` does.
     pub fn push_to(&mut self, to: ConnectionId, value: T) -> Push<T> {
-        self.push_addressed(Some(to), value)
+        // An addressed record is not filtered, so it needs nothing.
+        self.push_addressed(Some(to), 0, value)
     }
 
     /// Push with an address, and hand back what the ring turned away as the
     /// record alone: where it was going is nobody's concern once it is lost.
-    fn push_addressed(&mut self, to: Option<ConnectionId>, record: T) -> Push<T> {
-        let pushed = match self.producer.push(Addressed { to, record }) {
+    fn push_addressed(&mut self, to: Option<ConnectionId>, need: u32, record: T) -> Push<T> {
+        let pushed = match self.producer.push(Addressed { to, need, record }) {
             Push::Stored => Push::Stored,
             Push::Evicted(lost) => Push::Evicted(lost.record),
             Push::Refused(lost) => Push::Refused(lost.record),
@@ -385,13 +424,14 @@ impl<T> Connections<T> {
         self.send(Control::Answer(id, record));
     }
 
-    /// Report a connection authenticated. Records fanned out after the writer
-    /// thread takes this reach it; earlier ones passed it over.
+    /// Report a connection authenticated under a token granting `caps`.
+    /// Records fanned out after the writer thread takes this reach it when
+    /// the set covers them; earlier ones passed it over.
     ///
     /// Sent after the answer that says so, on the same channel, so the
     /// consumer reads its `AuthResult` before the first record.
-    pub fn authenticated(&self, id: ConnectionId) {
-        self.send(Control::Authenticated(id));
+    pub fn authenticated(&self, id: ConnectionId, caps: Capabilities) {
+        self.send(Control::Authenticated(id, caps));
     }
 
     fn send(&self, control: Control<T>) {
@@ -410,6 +450,9 @@ pub struct Writer<T> {
     /// Records addressed to a connection that was gone when the writer
     /// thread reached them.
     unaddressed: Arc<AtomicU64>,
+    /// Records withheld at fan-out from a connection whose capabilities did
+    /// not cover them, one per connection per record.
+    filtered: Arc<AtomicU64>,
 }
 
 impl<T: Clone + Send + 'static> Writer<T> {
@@ -431,12 +474,14 @@ impl<T: Clone + Send + 'static> Writer<T> {
         let (control, inbox) = mpsc::channel();
         let flag = Arc::new(ParkFlag::new());
         let unaddressed = Arc::new(AtomicU64::new(0));
+        let filtered = Arc::new(AtomicU64::new(0));
 
         let sleeping = Arc::clone(&flag);
         let counting = Arc::clone(&unaddressed);
+        let withholding = Arc::clone(&filtered);
         let handle = thread::Builder::new()
             .name("dcsbridge-writer".into())
-            .spawn(move || Self::run(consumer, inbox, sleeping, &counting))
+            .spawn(move || Self::run(consumer, inbox, sleeping, &counting, &withholding))
             .expect("the writer thread spawns");
         let thread = handle.thread().clone();
 
@@ -455,6 +500,7 @@ impl<T: Clone + Send + 'static> Writer<T> {
             control,
             thread,
             unaddressed,
+            filtered,
         };
 
         (writer, commit, connections)
@@ -471,6 +517,17 @@ impl<T: Clone + Send + 'static> Writer<T> {
         self.unaddressed.load(Ordering::Relaxed)
     }
 
+    /// How many times a fanned-out record was withheld from a connection
+    /// whose capabilities did not cover it.
+    ///
+    /// One per connection per record, so a record three connections may not
+    /// see counts three. A withheld record is not a dropped one: it was
+    /// never numbered for the connection, so the connection's `seq` shows
+    /// no gap, and no drop count moves.
+    pub fn filtered(&self) -> u64 {
+        self.filtered.load(Ordering::Relaxed)
+    }
+
     /// The writer thread's loop.
     ///
     /// Each pass takes every control message, then every record the commit ring
@@ -482,6 +539,7 @@ impl<T: Clone + Send + 'static> Writer<T> {
         inbox: mpsc::Receiver<Control<T>>,
         flag: Arc<ParkFlag>,
         unaddressed: &AtomicU64,
+        filtered: &AtomicU64,
     ) {
         let mut connections: Vec<Connection<T>> = Vec::new();
         let mut empty_passes = 0;
@@ -495,7 +553,7 @@ impl<T: Clone + Send + 'static> Writer<T> {
                             producer,
                             next_seq: 1,
                             waker,
-                            authenticated: false,
+                            caps: None,
                         };
                         if let Some(first) = first {
                             connection.push(first);
@@ -508,14 +566,16 @@ impl<T: Clone + Send + 'static> Writer<T> {
                             &mut connections,
                             Addressed {
                                 to: Some(id),
+                                need: 0,
                                 record,
                             },
                             unaddressed,
+                            filtered,
                         );
                     }
-                    Ok(Control::Authenticated(id)) => {
+                    Ok(Control::Authenticated(id, caps)) => {
                         if let Some(held) = connections.iter_mut().find(|held| held.id == id) {
-                            held.authenticated = true;
+                            held.caps = Some(caps);
                         }
                     }
                     Ok(Control::Stop) | Err(TryRecvError::Disconnected) => return,
@@ -531,7 +591,7 @@ impl<T: Clone + Send + 'static> Writer<T> {
                 let Some(record) = commit.pop() else {
                     break;
                 };
-                fan_out(&mut connections, record, unaddressed);
+                fan_out(&mut connections, record, unaddressed, filtered);
                 fanned = true;
             }
             if fanned {
@@ -603,8 +663,10 @@ struct Connection<T> {
     next_seq: u64,
     /// The thread draining the ring, if it sleeps on it.
     waker: Option<Waker>,
-    /// Whether a fanned-out record reaches it. An addressed one always does.
-    authenticated: bool,
+    /// What its token grants, once it has authenticated. A fanned-out
+    /// record reaches it when the set covers the record's need; an
+    /// addressed one always does.
+    caps: Option<Capabilities>,
 }
 
 impl<T> Connection<T> {
@@ -626,17 +688,21 @@ impl<T> Connection<T> {
 /// Push one record where it is addressed: into every connection's ring, or
 /// into one, numbered per connection either way.
 ///
-/// Fanned out, each authenticated connection but the last gets a clone, and
-/// the last gets the record itself, so a single connection costs no clone at
-/// all. An unauthenticated connection is passed over and its `seq` does not
-/// move, so once it has authenticated it sees no gap: nothing it was not
-/// entitled to was ever numbered for it. With no connection to receive the
-/// record it is dropped and counted nowhere: there was no one to lose it.
+/// Fanned out, each receiving connection but the last gets a clone, and the
+/// last gets the record itself, so a single connection costs no clone at
+/// all. A connection receives when it has authenticated under a token whose
+/// capabilities cover the record's need. One that has not authenticated is
+/// passed over, and one whose capabilities do not cover the record is
+/// withheld from and counted in `filtered`; either way its `seq` does not
+/// move, so it sees no gap: nothing it was not entitled to was ever
+/// numbered for it. With no connection to receive the record it is dropped
+/// and counted nowhere: there was no one to lose it.
 ///
-/// Addressed, the one connection gets the record, authenticated or not, and
-/// no other connection's `seq` moves. A connection that has detached, or a
-/// number that was never handed out, is a record with nowhere to go: dropped
-/// here and counted in `unaddressed`, because somebody sent it.
+/// Addressed, the one connection gets the record, authenticated or not,
+/// whatever its capabilities, and no other connection's `seq` moves. A
+/// connection that has detached, or a number that was never handed out, is
+/// a record with nowhere to go: dropped here and counted in `unaddressed`,
+/// because somebody sent it.
 ///
 /// A record a ring turns away is dropped here, on the writer thread, and the
 /// ring has already counted it against that connection.
@@ -644,8 +710,9 @@ fn fan_out<T: Clone>(
     connections: &mut [Connection<T>],
     addressed: Addressed<T>,
     unaddressed: &AtomicU64,
+    filtered: &AtomicU64,
 ) {
-    let Addressed { to, record } = addressed;
+    let Addressed { to, need, record } = addressed;
 
     if let Some(to) = to {
         match connections.iter_mut().find(|held| held.id == to) {
@@ -657,7 +724,18 @@ fn fan_out<T: Clone>(
         return;
     }
 
-    let mut receiving = connections.iter_mut().filter(|held| held.authenticated);
+    // The walk below visits every connection, so a count taken as each
+    // one is passed over is a count of every connection withheld from.
+    let mut receiving = connections.iter_mut().filter(|held| {
+        let Some(caps) = held.caps else {
+            return false;
+        };
+        let covered = caps.covers(need);
+        if !covered {
+            filtered.fetch_add(1, Ordering::Relaxed);
+        }
+        covered
+    });
     let Some(mut previous) = receiving.next() else {
         return;
     };
@@ -678,15 +756,21 @@ mod tests {
     /// rather than a ring evicted one.
     const ROOMY: usize = 4096;
 
-    /// Attach a connection and report it authenticated, which is the state
-    /// every test here but the gating one wants: a connection that receives
-    /// what is fanned out.
+    /// The capability number every record here needs, and the set that
+    /// covers it and one more, so a token can be narrowed to `READ` alone.
+    const READ: u32 = 1;
+    const COMMAND: u32 = 2;
+    const ALL: Capabilities = Capabilities::NONE.with(READ).with(COMMAND);
+
+    /// Attach a connection and report it authenticated with every
+    /// capability, which is the state every test here but the gating ones
+    /// wants: a connection that receives what is fanned out.
     fn attached<T>(
         connections: &Connections<T>,
         capacity: usize,
     ) -> (ConnectionId, Consumer<Numbered<T>>) {
         let (id, consumer) = connections.attach(capacity);
-        connections.authenticated(id);
+        connections.authenticated(id, ALL);
         (id, consumer)
     }
 
@@ -749,7 +833,11 @@ mod tests {
             .collect();
 
         for value in 0..pushes {
-            assert_eq!(commit.push(value), Push::Stored, "{value} found no room");
+            assert_eq!(
+                commit.push(READ, value),
+                Push::Stored,
+                "{value} found no room"
+            );
         }
 
         let expected: Vec<u32> = (0..pushes).collect();
@@ -773,7 +861,7 @@ mod tests {
         let (_, mut reading) = attached(&connections, ROOMY);
 
         for value in 0..10u32 {
-            commit.push(value);
+            commit.push(READ, value);
         }
 
         let arrived = drain_numbered(&mut reading, 10);
@@ -823,7 +911,7 @@ mod tests {
         let (first_id, mut first) = attached(&connections, ROOMY);
 
         for value in 0..5u32 {
-            commit.push(value);
+            commit.push(READ, value);
         }
         assert_eq!(drain_until(&mut first, 5), (0..5).collect::<Vec<_>>());
 
@@ -834,7 +922,7 @@ mod tests {
         );
 
         for value in 5..10u32 {
-            commit.push(value);
+            commit.push(READ, value);
         }
         let on_first = drain_numbered(&mut first, 5);
         let on_second = drain_numbered(&mut second, 5);
@@ -854,7 +942,7 @@ mod tests {
 
         connections.detach(second_id);
         for value in 10..15u32 {
-            commit.push(value);
+            commit.push(READ, value);
         }
         assert_eq!(drain_until(&mut first, 5), (10..15).collect::<Vec<_>>());
 
@@ -888,10 +976,10 @@ mod tests {
         let (first_id, mut first) = attached(&connections, ROOMY);
         let (_, mut second) = attached(&connections, ROOMY);
 
-        commit.push(0u32);
+        commit.push(READ, 0u32);
         commit.push_to(first_id, 1);
         commit.push_to(first_id, 2);
-        commit.push(3);
+        commit.push(READ, 3);
 
         let on_first = drain_numbered(&mut first, 4);
         let on_second = drain_numbered(&mut second, 2);
@@ -950,7 +1038,7 @@ mod tests {
                 let mut n = 1_000_000u32;
                 while !stop.load(Ordering::Relaxed) {
                     for _ in 0..16 {
-                        commit.push(n);
+                        commit.push(READ, n);
                         n = n.wrapping_add(1);
                     }
                     thread::sleep(Duration::from_micros(100));
@@ -988,7 +1076,7 @@ mod tests {
         let (pending_id, mut pending) = connections.attach(ROOMY);
         let (_, mut trusted) = attached(&connections, ROOMY);
 
-        commit.push(0u32);
+        commit.push(READ, 0u32);
         connections.answer(pending_id, 1);
         assert_eq!(
             drain_numbered(&mut pending, 1),
@@ -1000,8 +1088,8 @@ mod tests {
             vec![Numbered { seq: 1, record: 0 }]
         );
 
-        connections.authenticated(pending_id);
-        commit.push(2);
+        connections.authenticated(pending_id, ALL);
+        commit.push(READ, 2);
         assert_eq!(
             drain_numbered(&mut pending, 1),
             vec![Numbered { seq: 2, record: 2 }],
@@ -1011,8 +1099,105 @@ mod tests {
             drain_numbered(&mut trusted, 1),
             vec![Numbered { seq: 2, record: 2 }]
         );
+        assert_eq!(
+            writer.filtered(),
+            0,
+            "an unauthenticated connection was counted as filtered"
+        );
 
         drop(writer);
+    }
+
+    /// A fanned-out record a connection's capabilities do not cover is
+    /// withheld from it and counted, once per connection withheld from,
+    /// while a connection whose set covers it receives it. The withheld
+    /// connection's `seq` does not move, so the next record it may see
+    /// follows with no gap, and an answer reaches it whatever it needs.
+    #[test]
+    fn fan_out_withholds_a_record_the_capabilities_do_not_cover_without_a_gap() {
+        let (writer, mut commit, connections) = Writer::spawn(ROOMY);
+        let (reader_id, mut reader) = connections.attach(ROOMY);
+        connections.authenticated(reader_id, Capabilities::NONE.with(READ));
+        let (_, mut trusted) = attached(&connections, ROOMY);
+
+        // Each step is drained before the next, because an answer crosses
+        // the control channel and a record the ring, and the writer thread
+        // orders the two only within a pass.
+        commit.push(READ, 0u32);
+        commit.push(COMMAND, 1);
+        assert_eq!(
+            drain_numbered(&mut reader, 1),
+            vec![Numbered { seq: 1, record: 0 }]
+        );
+        connections.answer(reader_id, 2);
+        assert_eq!(
+            drain_numbered(&mut reader, 1),
+            vec![Numbered { seq: 2, record: 2 }],
+            "the read-only connection saw the command record, or a gap"
+        );
+        commit.push(READ, 3);
+        assert_eq!(
+            drain_numbered(&mut reader, 1),
+            vec![Numbered { seq: 3, record: 3 }],
+            "the record after the withheld one did not take the next number"
+        );
+        assert_eq!(
+            drain_numbered(&mut trusted, 3),
+            vec![
+                Numbered { seq: 1, record: 0 },
+                Numbered { seq: 2, record: 1 },
+                Numbered { seq: 3, record: 3 },
+            ],
+            "the trusted connection did not receive every record"
+        );
+        assert_eq!(
+            writer.filtered(),
+            1,
+            "one connection was withheld from once"
+        );
+        assert_eq!(reader.dropped(), 0, "a withheld record counted as dropped");
+        assert_eq!(commit.dropped(), 0, "a withheld record counted as dropped");
+
+        drop(writer);
+    }
+
+    /// An addressed record reaches its connection whether or not the
+    /// connection's capabilities cover anything, and is not counted as
+    /// filtered: the filter is for fan-out alone.
+    #[test]
+    fn an_addressed_record_is_not_filtered() {
+        let (writer, mut commit, connections) = Writer::spawn(ROOMY);
+        let (id, mut consumer) = connections.attach(ROOMY);
+        connections.authenticated(id, Capabilities::NONE);
+
+        commit.push(READ, 0u32);
+        commit.push_to(id, 1);
+        assert_eq!(
+            drain_numbered(&mut consumer, 1),
+            vec![Numbered { seq: 1, record: 1 }],
+            "the addressed record was withheld, or the fanned one was not"
+        );
+        assert_eq!(writer.filtered(), 1);
+
+        drop(writer);
+    }
+
+    /// The set is a mask by number: a number added is covered, one not
+    /// added is not, and a number past the mask is neither added nor
+    /// covered, so a record needing it is withheld rather than disclosed.
+    #[test]
+    fn a_capability_set_covers_what_was_added_and_nothing_past_the_mask() {
+        let set = Capabilities::NONE.with(1).with(49);
+        assert!(set.covers(1));
+        assert!(set.covers(49));
+        assert!(!set.covers(2));
+        assert!(!set.covers(0));
+        assert!(!Capabilities::NONE.covers(1));
+
+        let past = Capabilities::NONE.with(64).with(u32::MAX);
+        assert_eq!(past, Capabilities::NONE);
+        assert!(!past.covers(64));
+        assert!(!ALL.covers(64));
     }
 
     /// An answer from off the logic thread is numbered in its connection's
@@ -1025,7 +1210,7 @@ mod tests {
         let (first_id, mut first) = attached(&connections, ROOMY);
         let (_, mut second) = attached(&connections, ROOMY);
 
-        commit.push(0u32);
+        commit.push(READ, 0u32);
         assert_eq!(
             drain_numbered(&mut second, 1),
             vec![Numbered { seq: 1, record: 0 }]
@@ -1042,7 +1227,7 @@ mod tests {
             "the answer did not follow the record before it"
         );
 
-        commit.push(2);
+        commit.push(READ, 2);
         assert_eq!(
             drain_numbered(&mut first, 1),
             vec![Numbered { seq: 3, record: 2 }],
@@ -1075,7 +1260,7 @@ mod tests {
 
         commit.push_to(gone_id, 0u32);
         commit.push_to(ConnectionId::from_raw(u64::MAX), 1);
-        commit.push(2);
+        commit.push(READ, 2);
 
         assert_eq!(
             drain_numbered(&mut staying, 1),
@@ -1113,7 +1298,7 @@ mod tests {
         let (writer, mut commit, _connections) = Writer::<Counted>::spawn(ROOMY);
 
         for _ in 0..5 {
-            commit.push(Counted(Arc::clone(&drops)));
+            commit.push(READ, Counted(Arc::clone(&drops)));
         }
         wait_for(
             || drops.load(Ordering::Relaxed) == 5,
@@ -1131,7 +1316,7 @@ mod tests {
         let (_, mut consumer) = attached(&connections, ROOMY);
 
         for value in 0..3u32 {
-            commit.push(value);
+            commit.push(READ, value);
         }
         assert_eq!(drain_until(&mut consumer, 3), vec![0, 1, 2]);
 
@@ -1143,7 +1328,7 @@ mod tests {
             "a record arrived after the writer stopped"
         );
         assert_eq!(
-            commit.push(3),
+            commit.push(READ, 3),
             Push::Stored,
             "a commit after the writer stopped was refused"
         );
@@ -1169,6 +1354,10 @@ mod tests {
 mod loom_tests {
     use super::*;
 
+    /// The one capability the records here need and the set that grants it.
+    const READ: u32 = 1;
+    const ALL: Capabilities = Capabilities::NONE.with(READ);
+
     /// No schedule leaves a record in the commit ring with the writer parked:
     /// every record committed reaches the connection.
     ///
@@ -1185,10 +1374,10 @@ mod loom_tests {
         model.check(|| {
             let (writer, mut commit, connections) = Writer::spawn(2);
             let (id, mut consumer) = connections.attach(2);
-            connections.authenticated(id);
+            connections.authenticated(id, ALL);
 
             for value in 0..2u32 {
-                commit.push(value);
+                commit.push(READ, value);
             }
 
             let mut arrived = Vec::new();
@@ -1240,11 +1429,11 @@ mod loom_tests {
 
             let waker = Waker::new(flag, drainer.thread().clone());
             let (id, consumer) = connections.attach_with(2, waker, None);
-            connections.authenticated(id);
+            connections.authenticated(id, ALL);
             hand.send(consumer).expect("the drainer is waiting");
 
             for value in 0..2u32 {
-                commit.push(value);
+                commit.push(READ, value);
             }
 
             let arrived = drainer.join().expect("the drainer only pops");

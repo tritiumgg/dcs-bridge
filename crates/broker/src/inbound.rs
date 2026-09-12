@@ -67,8 +67,8 @@ use prost::Message;
 
 use crate::config::Config;
 use crate::encode::Encoder;
-use crate::fanout::{ConnectionId, Connections};
-use crate::registry::Capability;
+use crate::fanout::{Capabilities, ConnectionId, Connections};
+use crate::registry::{Capability, Member};
 use crate::transport::Record;
 
 /// The live keys the reader thread decides by, as of one moment.
@@ -491,6 +491,16 @@ pub struct Session {
     pub caps: HashSet<Capability>,
 }
 
+impl Session {
+    /// The capability set as the writer thread holds it, for the filter at
+    /// fan-out.
+    pub fn capabilities(&self) -> Capabilities {
+        self.caps
+            .iter()
+            .fold(Capabilities::NONE, |set, cap| set.with(cap.number()))
+    }
+}
+
 /// An inbound record as the rings carry it from the reader thread to Lua:
 /// who sent it, what topic it is on, and the payload's own bytes.
 ///
@@ -721,7 +731,7 @@ pub fn serve(
                         connections.answer(id, auth_result(Ok(())));
                         // After the answer, on the same channel: the
                         // consumer reads its result before any record.
-                        connections.authenticated(id);
+                        connections.authenticated(id, opened.capabilities());
                         // The deadline is lifted: an authenticated peer may
                         // be silent for as long as it likes.
                         stream.until = None;

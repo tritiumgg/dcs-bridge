@@ -37,7 +37,7 @@ use crate::handshake;
 use crate::inbound::{
     Answers, AuthError, Command, Delivery, Limits, Liveness, RejectedReason, Session, Window,
 };
-use crate::registry::{Capability, Conflict, RecordClass, Registry, Target, Topic};
+use crate::registry::{Capability, Conflict, Member, RecordClass, Registry, Target, Topic};
 use crate::ring::{Consumer, Producer, Push, Ring};
 use crate::transport::{Listener, Record};
 
@@ -205,6 +205,7 @@ impl fmt::Debug for Outbound {
             .field("listening", &self.listener.local_addr())
             .field("contended", &self.contended.load(Ordering::Relaxed))
             .field("unaddressed", &self.writer.unaddressed())
+            .field("filtered", &self.writer.filtered())
             .finish_non_exhaustive()
     }
 }
@@ -225,6 +226,12 @@ impl Outbound {
     /// gone by the time the writer thread reached them.
     pub fn unaddressed(&self) -> u64 {
         self.writer.unaddressed()
+    }
+
+    /// How many times a fanned-out record was withheld from a connection
+    /// whose token did not cover it, `records_filtered_total`.
+    pub fn filtered(&self) -> u64 {
+        self.writer.filtered()
     }
 
     /// The commit ring's producer, or why not.
@@ -1032,18 +1039,19 @@ impl Bridge {
         self.authenticated.load(Ordering::Relaxed)
     }
 
-    /// Queue an envelope tail for every connection.
+    /// Queue an envelope tail for every connection whose token covers
+    /// `need`, the capability its topic requires.
     ///
     /// The tail is copied once, into the allocation the rings share by
     /// reference; that is the one allocation on the commit path. A record the
     /// commit ring evicts to make room comes back here and is dropped on the
     /// calling thread. ADR 0014.
-    pub fn commit(&self, tail: &[u8]) -> Result<(), CommitError> {
+    pub fn commit(&self, need: Capability, tail: &[u8]) -> Result<(), CommitError> {
         let outbound = self.outbound.get().ok_or(CommitError::NotStarted)?;
         let record: Record = Arc::from(tail);
 
         let mut commit = outbound.producer()?;
-        drop(commit.push(record));
+        drop(commit.push(need.number(), record));
         Ok(())
     }
 
@@ -1741,7 +1749,9 @@ mod tests {
         // Authenticated is queued after the result, so a record committed
         // now reaches the connection, numbered after it.
         let tail = [0x22, 0x00];
-        bridge().commit(&tail).expect("the path is started");
+        bridge()
+            .commit(Capability::Read, &tail)
+            .expect("the path is started");
         client.read_exact(&mut length).expect("a frame arrives");
         assert_eq!(u32::from_le_bytes(length), 2 + tail.len() as u32);
         let mut frame = vec![0u8; u32::from_le_bytes(length) as usize];
@@ -1796,7 +1806,7 @@ mod tests {
             e.begin(topic, bridge().stamp());
             e.integer(1, 1).unwrap();
             bridge()
-                .commit(e.commit().unwrap())
+                .commit(Capability::Read, e.commit().unwrap())
                 .expect("the path is started");
         };
 

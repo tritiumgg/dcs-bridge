@@ -1613,7 +1613,7 @@ mod put {
             let queued = match encoder.commit() {
                 Ok(tail) => match to {
                     Some(to) => bridge.commit_to(to, tail).is_ok(),
-                    None => bridge.commit(tail).is_ok(),
+                    None => bridge.commit(pending.need, tail).is_ok(),
                 },
                 Err(Error::NotOpen) => raise(state, Error::NotOpen),
                 Err(_) => false,
