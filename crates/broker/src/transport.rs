@@ -509,6 +509,19 @@ mod tests {
             assert!(answered);
             self.refused.fetch_add(1, Ordering::SeqCst);
         }
+        /// Every record for Lua needs `command`, and there is no ring: one
+        /// the token covers is reported stored and goes nowhere.
+        fn deliver(
+            &self,
+            caps: &std::collections::HashSet<crate::registry::Capability>,
+            command: inbound::Command,
+        ) -> inbound::Delivery {
+            if caps.contains(&crate::registry::Capability::Command) {
+                inbound::Delivery::Stored
+            } else {
+                inbound::Delivery::Uncovered(command)
+            }
+        }
     }
 
     fn listener(connections: crate::fanout::Connections<Record>) -> Listener {
@@ -1513,6 +1526,68 @@ mod tests {
         drop(writer);
     }
 
+    /// A record for Lua from a token without the capability its topic
+    /// requires is answered with `Rejected` reason `NO_CAPABILITY` carrying
+    /// the sender's `seq` and the topic, counted, and the connection is
+    /// kept: a `Ping` after it is answered. The same record from a token
+    /// that covers it is answered by nothing.
+    #[test]
+    fn a_record_the_token_does_not_cover_is_refused_inbound() {
+        const SIM_COMMAND: &str = "dcsbridge.builtin.sim.SetFlag";
+        let refused = Arc::new(AtomicU64::new(0));
+        let switch = |reload: bool| {
+            Arc::new(Switch {
+                reload,
+                enabled: Arc::new(AtomicBool::new(true)),
+                acked: Arc::new(AtomicU64::new(0)),
+                refused: Arc::clone(&refused),
+            })
+        };
+        let ping = |sender: &mut TcpStream, seq: u64| {
+            sender
+                .write_all(&inbound(seq, topic::PING, &[]))
+                .expect("the ping is sent");
+            let frame = read_frame(sender);
+            assert_eq!(
+                frame.payload.unwrap().type_url,
+                type_url(topic::PONG),
+                "the record was answered, or the connection closed"
+            );
+        };
+
+        let (writer, _commit, connections) = Writer::spawn(64);
+        let listener = Listener::spawn("127.0.0.1:0", connections, 64, switch(false)).unwrap();
+        let mut reader = client(listener.local_addr());
+        read_handshake(&mut reader);
+        assert!(authenticate(&mut reader, SECRET).1.ok);
+        reader
+            .write_all(&inbound(2, SIM_COMMAND, b"set"))
+            .expect("the record is sent");
+        assert_rejected(&mut reader, 2, SIM_COMMAND, RejectedReason::NoCapability);
+        assert_eq!(refused.load(Ordering::SeqCst), 1);
+        ping(&mut reader, 3);
+        drop(listener);
+        drop(writer);
+
+        let (writer, _commit, connections) = Writer::spawn(64);
+        let listener = Listener::spawn("127.0.0.1:0", connections, 64, switch(true)).unwrap();
+        let mut commander = client(listener.local_addr());
+        read_handshake(&mut commander);
+        assert!(authenticate(&mut commander, SECRET).1.ok);
+        commander
+            .write_all(&inbound(2, SIM_COMMAND, b"set"))
+            .expect("the record is sent");
+        ping(&mut commander, 3);
+        assert_eq!(
+            refused.load(Ordering::SeqCst),
+            1,
+            "a covered record was refused"
+        );
+
+        drop(listener);
+        drop(writer);
+    }
+
     /// A connection that sends nothing but `Ping` is closed once the
     /// handshake timeout passes, and one that sends nothing at all is too.
     #[test]
@@ -1645,9 +1720,10 @@ mod tests {
     #[test]
     fn a_record_reaches_the_ring_its_route_names_and_no_other() {
         use crate::inbound::{Command, Delivery};
-        use crate::registry::Target;
+        use crate::registry::{Capability, Target};
         use crate::ring::{Producer, Push, Ring};
         use std::collections::HashMap;
+        use std::collections::HashSet;
 
         /// The stub with two rings and a route map behind it.
         struct Routed {
@@ -1673,7 +1749,7 @@ mod tests {
             }
             fn seq_ack(&self, _: u64) {}
             fn set_enabled(&self, _: bool) {}
-            fn deliver(&self, command: Command) -> Delivery {
+            fn deliver(&self, _: &HashSet<Capability>, command: Command) -> Delivery {
                 let ring = match self.routes.get(command.topic.as_str()) {
                     Some(Target::SimDriver) => &self.sim,
                     Some(Target::HookDriver) => &self.hook,
@@ -1821,7 +1897,11 @@ mod tests {
                 self.suppressed.fetch_add(1, Ordering::SeqCst);
             }
         }
-        fn deliver(&self, command: inbound::Command) -> inbound::Delivery {
+        fn deliver(
+            &self,
+            _: &std::collections::HashSet<crate::registry::Capability>,
+            command: inbound::Command,
+        ) -> inbound::Delivery {
             if self.busy {
                 inbound::Delivery::Busy(command)
             } else {
@@ -1929,7 +2009,11 @@ mod tests {
         fn admit_total(&self, now: Instant, cap: u32) -> bool {
             self.total.lock().unwrap().admit(now, cap)
         }
-        fn deliver(&self, _: inbound::Command) -> inbound::Delivery {
+        fn deliver(
+            &self,
+            _: &std::collections::HashSet<crate::registry::Capability>,
+            _: inbound::Command,
+        ) -> inbound::Delivery {
             self.stored.fetch_add(1, Ordering::SeqCst);
             inbound::Delivery::Stored
         }

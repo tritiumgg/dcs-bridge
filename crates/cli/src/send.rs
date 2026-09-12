@@ -307,6 +307,9 @@ mod tests {
         bridge
             .register_routes([(TOPIC.to_string(), Target::HookDriver)])
             .expect("a new route merges");
+        bridge
+            .register_caps([(TOPIC.to_string(), Capability::Command)])
+            .expect("a new capability merges");
 
         let (writer, commit, connections) = Writer::spawn(64);
         let answers = Arc::new(dcsbridge_broker::state::Global);

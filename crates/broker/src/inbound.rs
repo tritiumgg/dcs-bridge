@@ -247,10 +247,12 @@ pub trait Answers: Send + Sync + 'static {
         let _ = (now, cap);
         true
     }
-    /// A record for Lua: put it on the ring its route names, or hand it
-    /// back. With nothing behind the transport there is no ring, so
-    /// nothing is routed.
-    fn deliver(&self, command: Command) -> Delivery {
+    /// A record for Lua from a session holding `caps`: put it on the ring
+    /// its route names when the set covers its topic, or hand it back.
+    /// With nothing behind the transport there is no ring, so nothing is
+    /// routed.
+    fn deliver(&self, caps: &HashSet<Capability>, command: Command) -> Delivery {
+        let _ = caps;
         Delivery::Unrouted(command)
     }
 }
@@ -550,6 +552,10 @@ pub enum Delivery {
     /// No route map names its topic, so it went nowhere. Counted in
     /// `unrouted_topic_total`.
     Unrouted(Command),
+    /// The sender's token lacks the capability its topic requires, or the
+    /// topic has none registered, so it went nowhere. Counted by reason
+    /// with the other refusals.
+    Uncovered(Command),
     /// The ring its route names was full, so the newest record, this one,
     /// was turned away. Counted against that ring.
     Busy(Command),
@@ -774,10 +780,10 @@ pub fn serve(
                 }
             }
             // Every other topic is a record for Lua, on the ring its route
-            // names. What the rings hand back is refused here, on the
-            // thread that read it, with the sender's own `seq` so it can
-            // tell which record went nowhere.
-            (over, Some(_)) => {
+            // names, when the token covers it. What the rings hand back is
+            // refused here, on the thread that read it, with the sender's
+            // own `seq` so it can tell which record went nowhere.
+            (over, Some(opened)) => {
                 let seq = envelope.seq;
                 // The connection's own rate first, then everyone's: a
                 // record refused for the first is delivered nowhere, so it
@@ -800,9 +806,10 @@ pub fn serve(
                     return Err(Close::RateLimitedTotal);
                 }
                 let command = Command::from_envelope(id, envelope)?;
-                let (command, reason) = match answers.deliver(command) {
+                let (command, reason) = match answers.deliver(&opened.caps, command) {
                     Delivery::Stored => continue,
                     Delivery::Unrouted(command) => (command, RejectedReason::UnknownTopic),
+                    Delivery::Uncovered(command) => (command, RejectedReason::NoCapability),
                     Delivery::Busy(command) => (command, RejectedReason::Busy),
                 };
                 refuse(
