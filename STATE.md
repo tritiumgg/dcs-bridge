@@ -1,6 +1,6 @@
 # Working state
 
-**Last updated:** 2026-09-11
+**Last updated:** 2026-09-12
 
 The handoff between sessions. Read it first; update it before a session ends,
 not only when a task finishes. Stamp the date above each time; it carries a
@@ -18,7 +18,7 @@ is just deleted. Write entries as one or two lines, never paragraphs.
 
 ## In progress
 
-Nothing. 2.14 is closed; 3.1 is next.
+Nothing. 2.14 is closed; 2.18 is next.
 
 *One task at most. Say what is done, what is not, and where to resume. Say what
 is committed and what is only in the working tree. Say what is knowingly
@@ -35,22 +35,23 @@ broken. Empty this when the task closes.*
 
 ## Next
 
-**Task 3.1** — `protoc-gen-dcsbridge-lua`: emitters, send wrappers, the
-topics table, decoders, and the class, route and capability tables, split
-by target into `SimDriver.gen.lua` and `HookDriver.gen.lua`, each carrying
-the schema hash; `FEATURE_PROTO3_OPTIONAL` advertised. Done when golden
-files show all seven, split by target. The plan has no branch table for it
-yet; write one first, from the crate that `generator` already stubs.
+**Task 2.18** — the outbound drop rule on ADR 0009's ring per class: three
+rings per connection, the writer pushing by class, the drainer merging on
+`seq`; a full `LIFECYCLE` ring drops the connection. Done when `LOSSY` drops
+before `DURABLE`, an `EpochClosed` survives a `LOSSY` flood, and a consumer
+far enough behind is disconnected. Two branches, `task/2.18-1-ring-per-class`
+then `task/2.18-2-lifecycle-disconnect`; the plan has their tables. Opens M2.3.
 
-**An agent verifies** the golden files in CI. Sim-driver-side execution is
-5.9's, at a live install.
+**An agent verifies** over loopback that a `LOSSY` flood evicts no `DURABLE`
+and no `LIFECYCLE`; **the maintainer verifies** at a live install that a
+stalled `dcsb tail` is disconnected rather than shown a `LIFECYCLE` gap.
 
 ## After that
 
-- **M2.3** (2.18, 2.17, 2.20, 2.C5, 2.C6) stays in Phase 2. M2.2 is reached,
-  so its rows are re-measured against Phase 3 before either is started.
-- **Phase 3** reads the four message options this schema defines and splits
-  its output by `Target`, through `prost-types`; ADR 0016.
+- **M2.3**: 2.17, 2.20, 2.C5, 2.C6 after 2.18, in that order. Phase 2 ends
+  with it, and the rows ahead are re-measured there.
+- **Phase 3** opens on 3.1, `protoc-gen-dcsbridge-lua`, which the `generator`
+  crate stubs; ADR 0016.
 
 ## Carries forward
 
