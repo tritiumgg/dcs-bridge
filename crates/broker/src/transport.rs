@@ -31,7 +31,8 @@ use std::thread;
 
 use crate::encode::{varint_len, write_varint};
 use crate::fanout::{
-    Capacities, ConnectionId, Connections, Drain, LOOKS_BEFORE_PARK, Numbered, ParkFlag, Waker,
+    Capacities, Close, ConnectionId, Connections, Drain, LOOKS_BEFORE_PARK, Numbered, ParkFlag,
+    Waker,
 };
 use crate::inbound::{self, Answers};
 
@@ -171,9 +172,20 @@ fn accept_loop(
         // Two threads on one socket, one reading and one writing, each with
         // its own handle to it; the original stays with the listener so
         // that dropping it can close the socket under both.
-        let (Ok(mut writing), Ok(reading)) = (stream.try_clone(), stream.try_clone()) else {
+        let (Ok(mut writing), Ok(reading), Ok(ending)) =
+            (stream.try_clone(), stream.try_clone(), stream.try_clone())
+        else {
             continue;
         };
+        // A third handle, for the writer thread: a connection whose
+        // `LIFECYCLE` ring fills is closed from there, because the thread
+        // that owns the socket is blocked writing to a consumer that has
+        // stopped reading. The shutdown fails that write, `serve` returns,
+        // and the connection ends the way any failed socket does.
+        // ADR 0028.
+        let close: Close = Box::new(move || {
+            let _ = ending.shutdown(Shutdown::Both);
+        });
 
         // The draining thread parks on its ring, and the writer thread
         // wakes it, so the thread has to exist before the ring is attached:
@@ -213,7 +225,7 @@ fn accept_loop(
         // The handshake rides the attach, so the writer thread numbers it 1
         // as it attaches the ring and nothing fanned out can come first.
         let attached: (ConnectionId, Drain<Record>) =
-            connections.attach_with(capacities, waker, Some(answers.handshake()), None);
+            connections.attach_with(capacities, waker, Some(answers.handshake()), Some(close));
         let id = attached.0;
 
         // The reader: a second thread on the same socket, because a read
@@ -1475,6 +1487,148 @@ mod tests {
             .write_all(&inbound(2, topic::AUTH, &[]))
             .expect("the second auth is sent");
         assert!(is_closed(&mut pending), "a second auth was accepted");
+
+        drop(listener);
+        drop(writer);
+    }
+
+    /// A consumer that stops reading is disconnected before it can lose a
+    /// boundary record. Its connection's thread is blocked writing a burst
+    /// the loopback socket cannot buffer, so nothing but the writer thread
+    /// can end it: the boundary records pile up in a four-slot ring, the
+    /// one with no room closes the socket, and the blocked write returns.
+    ///
+    /// What the consumer finds when it reads again is a stream that ends,
+    /// and in it every boundary record from the first with none skipped:
+    /// the two sent before the stall at least. A consumer that kept reading
+    /// through all of it has every one and is still connected.
+    #[test]
+    fn a_consumer_that_stops_reading_is_disconnected_before_it_loses_a_boundary() {
+        // Numbered clear of what `first_frame` commits, which counts from 0.
+        const FIRST: i64 = 1_000;
+        const BOUNDARIES: i64 = 12;
+        const LAST: i64 = 9_000;
+        const BIG: i64 = -1;
+        let (writer, mut commit, connections) = Writer::spawn(4096);
+        let listener = Listener::spawn(
+            "127.0.0.1:0",
+            connections,
+            Capacities::each(4),
+            Arc::new(Stub),
+        )
+        .unwrap();
+        let mut stalled = client(listener.local_addr());
+        first_frame(&mut commit, &mut stalled);
+        let mut reading = client(listener.local_addr());
+        first_frame(&mut commit, &mut reading);
+        // How many records the reading consumer has read, which is the pace
+        // everything below is committed at: a ring of four holds a consumer
+        // that reads, and not a burst at one whose thread is busy. It is
+        // also what makes the stall certain. A burst committed at once is
+        // mostly evicted from the four-slot `LOSSY` ring and may never fill
+        // the stalled socket; one record at a time, each is written to it
+        // until the socket takes no more.
+        let read = Arc::new(AtomicU64::new(0));
+        let reader = {
+            let read = Arc::clone(&read);
+            thread::spawn(move || {
+                let mut boundaries = Vec::new();
+                loop {
+                    match value(&read_frame(&mut reading)) {
+                        LAST => return (reading, boundaries),
+                        n if (FIRST..FIRST + BOUNDARIES).contains(&n) => {
+                            boundaries.push(n);
+                            read.fetch_add(1, Ordering::SeqCst);
+                        }
+                        BIG => {
+                            read.fetch_add(1, Ordering::SeqCst);
+                        }
+                        _ => {}
+                    }
+                }
+            })
+        };
+
+        // Two boundary records the stalled consumer's socket can still
+        // take, then a burst of droppable ones that it cannot.
+        let paced = |commit: &mut crate::fanout::Commit<Record>, class, record, nth: u64| {
+            commit.push(READ, class, record);
+            let deadline = Instant::now() + Duration::from_secs(30);
+            while read.load(Ordering::SeqCst) < nth {
+                assert!(Instant::now() < deadline, "record {nth} was not read");
+                thread::yield_now();
+            }
+        };
+        let mut nth = 0;
+        for n in 0..2 {
+            nth += 1;
+            paced(&mut commit, Class::Lifecycle, record(FIRST + n), nth);
+        }
+        let big: Record = {
+            let mut e = Encoder::with_capacity((64 << 10) + 128);
+            e.begin(TOPIC, None);
+            e.integer(1, BIG).unwrap();
+            e.string(2, &vec![b'x'; 64 << 10]).unwrap();
+            Arc::from(e.commit().unwrap())
+        };
+        for _ in 0..512 {
+            nth += 1;
+            paced(&mut commit, Class::Lossy, Arc::clone(&big), nth);
+        }
+        for n in 2..BOUNDARIES {
+            nth += 1;
+            paced(&mut commit, Class::Lifecycle, record(FIRST + n), nth);
+        }
+        commit.push(READ, Class::Durable, record(LAST));
+
+        let (mut reading, kept_up) = reader.join().expect("the reading consumer reads");
+        assert_eq!(
+            kept_up,
+            (FIRST..FIRST + BOUNDARIES).collect::<Vec<_>>(),
+            "a consumer that kept reading lost a boundary record"
+        );
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while writer.lifecycle_disconnects() == 0 {
+            assert!(Instant::now() < deadline, "the stalled consumer was kept");
+            thread::yield_now();
+        }
+
+        // The stalled consumer reads again: frames until the stream ends,
+        // which a closed socket does with an end or with an error.
+        let mut received = Vec::new();
+        loop {
+            let mut length = [0u8; 4];
+            if stalled.read_exact(&mut length).is_err() {
+                break;
+            }
+            let mut body = vec![0u8; u32::from_le_bytes(length) as usize];
+            if stalled.read_exact(&mut body).is_err() {
+                break;
+            }
+            let frame = Envelope::decode(&body[..]).expect("a whole frame decodes");
+            let n = value(&frame);
+            if (FIRST..FIRST + BOUNDARIES).contains(&n) {
+                received.push(n);
+            }
+        }
+        assert!(received.len() >= 2, "the stream ended early: {received:?}");
+        assert!(
+            (received.len() as i64) < BOUNDARIES,
+            "every boundary record arrived, so nothing was closed"
+        );
+        assert_eq!(
+            received,
+            (FIRST..FIRST + received.len() as i64).collect::<Vec<_>>(),
+            "a boundary record was skipped"
+        );
+
+        assert_eq!(
+            writer.lifecycle_disconnects(),
+            1,
+            "the reader was closed too"
+        );
+        commit.push(READ, Class::Durable, record(LAST + 1));
+        assert_eq!(value(&read_frame(&mut reading)), LAST + 1);
 
         drop(listener);
         drop(writer);
