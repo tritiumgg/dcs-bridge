@@ -163,6 +163,12 @@ enum Control<T> {
     /// The connection has authenticated under a token granting these
     /// capabilities; fan out to it from here on what they cover.
     Authenticated(ConnectionId, Capabilities),
+    /// Say when the writer thread has taken every message sent before this
+    /// one. Only a test asks: [`Connections::attach`] promises nothing about
+    /// a record committed while the attach is in flight, and a test that
+    /// counts what a connection receives has to commit after it.
+    #[cfg(all(test, not(loom)))]
+    Barrier(std::sync::mpsc::Sender<()>),
     /// Return from the loop.
     Stop,
 }
@@ -434,6 +440,26 @@ impl<T> Connections<T> {
         self.send(Control::Authenticated(id, caps));
     }
 
+    /// Wait until the writer thread has taken every control message sent
+    /// before this call, so a record committed next is fanned out under
+    /// them. The channel keeps order, which is what makes one barrier enough.
+    ///
+    /// A writer thread that has returned drops the barrier unanswered, and
+    /// that settles too: it takes nothing further.
+    #[cfg(all(test, not(loom)))]
+    fn settle(&self) {
+        use std::sync::mpsc::RecvTimeoutError;
+
+        let (taken, wait) = std::sync::mpsc::channel();
+        self.send(Control::Barrier(taken));
+        match wait.recv_timeout(std::time::Duration::from_secs(30)) {
+            Ok(()) | Err(RecvTimeoutError::Disconnected) => {}
+            Err(RecvTimeoutError::Timeout) => {
+                panic!("the writer thread did not reach the barrier")
+            }
+        }
+    }
+
     fn send(&self, control: Control<T>) {
         // A send fails only when the receiver is gone, which means the writer
         // thread has returned and there is no one to tell.
@@ -577,6 +603,10 @@ impl<T: Clone + Send + 'static> Writer<T> {
                         if let Some(held) = connections.iter_mut().find(|held| held.id == id) {
                             held.caps = Some(caps);
                         }
+                    }
+                    #[cfg(all(test, not(loom)))]
+                    Ok(Control::Barrier(taken)) => {
+                        let _ = taken.send(());
                     }
                     Ok(Control::Stop) | Err(TryRecvError::Disconnected) => return,
                     Err(TryRecvError::Empty) => break,
@@ -765,12 +795,18 @@ mod tests {
     /// Attach a connection and report it authenticated with every
     /// capability, which is the state every test here but the gating ones
     /// wants: a connection that receives what is fanned out.
+    ///
+    /// Returns once the writer thread holds the connection. A record
+    /// committed while the attach is in flight may be fanned out before it,
+    /// and a test that counts what arrives would then wait for records the
+    /// connection was never sent.
     fn attached<T>(
         connections: &Connections<T>,
         capacity: usize,
     ) -> (ConnectionId, Consumer<Numbered<T>>) {
         let (id, consumer) = connections.attach(capacity);
         connections.authenticated(id, ALL);
+        connections.settle();
         (id, consumer)
     }
 
@@ -1089,6 +1125,7 @@ mod tests {
         );
 
         connections.authenticated(pending_id, ALL);
+        connections.settle();
         commit.push(READ, 2);
         assert_eq!(
             drain_numbered(&mut pending, 1),
@@ -1169,6 +1206,7 @@ mod tests {
         let (writer, mut commit, connections) = Writer::spawn(ROOMY);
         let (id, mut consumer) = connections.attach(ROOMY);
         connections.authenticated(id, Capabilities::NONE);
+        connections.settle();
 
         commit.push(READ, 0u32);
         commit.push_to(id, 1);
@@ -1256,6 +1294,7 @@ mod tests {
         let (gone_id, gone) = attached(&connections, ROOMY);
         let (_, mut staying) = attached(&connections, ROOMY);
         connections.detach(gone_id);
+        connections.settle();
         drop(gone);
 
         commit.push_to(gone_id, 0u32);
