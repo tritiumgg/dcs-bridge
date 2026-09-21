@@ -44,8 +44,11 @@ Run the `task-brief` workflow with `{task: "<id>"}`.
 Show the maintainer what it returns, in this order: the ordered commit list
 with each estimate, who verifies each clause, the live-install steps, the
 README paragraphs and decision records the task owes, the risks, the critic's
-problems that still stand, and the questions. Say when the plan was revised,
-when the critic returned nothing, and which readers returned nothing.
+problems, and the questions. The workflow returns every problem the critic
+raised and revises once for the blocking ones, with no second critique: check
+each blocking problem against the revised plan yourself and say which the
+revision answers and which still stand. Say when the plan was revised, when
+the critic returned nothing, and which readers returned nothing.
 
 Wait for the maintainer to agree to the commit list before creating the
 branch. A question in the brief is asked, not guessed at.
