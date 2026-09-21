@@ -22,7 +22,8 @@
 #                                     line, in place of asking GitHub
 #   tools/nexttask.sh --plan FILE     a plan other than docs/plan/plan.md
 #
-# Exit 0 with the row, 1 when no row is left to start, 2 on a usage error, 3 when
+# Exit 0 with the row, 1 when no row is left to start, 2 on a usage error or a
+# plan whose rows cannot be read, 3 when
 # GitHub cannot be asked.
 #
 # POSIX sh and awk only.
@@ -75,10 +76,21 @@ awk '
     /^### Phase /  { phase = $0; sub(/^### /, "", phase); in_tasks = 1; next }
     /^## /         { in_tasks = 0 }
     in_tasks && /^\| *[0-9]+\.C?[0-9]+ *\|/ {
-        n = split($0, cell, "|")
+        # A table cell writes a literal pipe as \|, which is set aside for
+        # the split and put back after it. A bare one makes a fourth cell,
+        # and a row read wrong is worse than a row refused.
+        row = $0
+        gsub(/\\\|/, "\001", row)
+        n = split(row, cell, "|")
         id = cell[2];   gsub(/^ +| +$/, "", id)
-        task = cell[3]; gsub(/^ +| +$/, "", task)
-        done = cell[4]; gsub(/^ +| +$/, "", done)
+        if (n != 5) {
+            printf "row %s has %d cells and a task row has three; write a literal | as \\|\n", id, n - 2 | "cat 1>&2"
+            bad = 1
+            exit
+        }
+        task = cell[3]; gsub(/^ +| +$/, "", task); gsub(/\001/, "|", task)
+        done = cell[4]; gsub(/^ +| +$/, "", done); gsub(/\001/, "|", done)
+        rows++
         if (id in seen) next
         seen[id] = 1
         if (id in closed) next
@@ -89,6 +101,9 @@ awk '
         exit
     }
     END {
+        if (bad) exit 2
+        # POSIX awk promises no /dev/stderr, and every awk can pipe to cat.
+        if (!rows) { print "no task row under a Phase heading in the plan" | "cat 1>&2"; exit 2 }
         if (waiting != "") printf "\nPassed over, waiting: %s\n", waiting
         if (!found) { print "every row in the plan is closed or waiting"; exit 1 }
     }

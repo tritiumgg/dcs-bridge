@@ -120,6 +120,31 @@ fi
 printf '1.1\n1.2\n2.1\n2.C1\n2.10\n2.2\n' >"$DIR/all"
 expect_exit 1 --plan "$DIR/plan.md" --closed "$DIR/all"
 
+# A literal pipe written \| stays inside its cell, in both cells.
+cat >"$DIR/pipes.md" <<'EOF'
+### Phase 1 — Pipes
+
+| ID | Task | Done when |
+|---|---|---|
+| 1.1 | Run `a\|b` in the configuration. | It prints `x\|y`. |
+| 1.2 | Run `a|b` with the pipe bare. | It prints. |
+EOF
+n=$((n + 1))
+: >"$DIR/closed"
+out=$(sh "$NEXT" --plan "$DIR/pipes.md" --closed "$DIR/closed" 2>/dev/null)
+case $out in
+    *'Run `a|b` in the configuration.'*'Done when: It prints `x|y`.'*) ;;
+    *) printf 'FAIL an escaped pipe moved a cell: %s\n' "$out" >&2; fail=1 ;;
+esac
+
+# A bare one makes a fourth cell, and the row is refused and not misread.
+printf '1.1\n' >"$DIR/one"
+expect_exit 2 --plan "$DIR/pipes.md" --closed "$DIR/one"
+
+# A plan with no task row under a Phase heading is not a plan all closed.
+printf '# A plan\n\n| ID | Task | Done when |\n|---|---|---|\n| 1.1 | A row. | Never. |\n' >"$DIR/nophase.md"
+expect_exit 2 --plan "$DIR/nophase.md" --closed "$DIR/closed"
+
 # Usage errors.
 expect_exit 2 --plan "$DIR/missing.md" --closed "$DIR/all"
 expect_exit 2 --plan "$DIR/plan.md" --closed "$DIR/missing"
