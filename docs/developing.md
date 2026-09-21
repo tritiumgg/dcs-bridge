@@ -218,6 +218,59 @@ prints a permission decision, which prompts the person at the keyboard.
 `tools/hooktest.sh` feeds each hook the payloads it must refuse and the ones
 it must pass, and `mise run docs` runs it.
 
+## Workflows
+
+`.claude/workflows/` holds two scripts the harness runs as many agents, and
+`.claude/skills/task/SKILL.md` is the `/task` command that runs them for one
+plan task. A workflow starts only on the maintainer's word, and invoking
+`/task` is that word. The hooks above fire for a workflow's agents as they do
+for the session.
+
+| Command | Does |
+|---|---|
+| `/task` | takes the row `tools/nexttask.sh` names |
+| `/task <id>` | takes that plan task |
+| `/task <branch>` | reviews a branch that is no plan task, with no brief |
+
+`tools/nexttask.sh` reads the order from the plan and the closed set from the
+merged pull requests' `task/<id>-` branches. A row with no pull request says
+its own state in the first words of its task cell: "Landed" is closed, and
+"Waits on" is passed over and named. `tools/nexttasktest.sh` runs it over a
+fixture plan, and `mise run docs` runs that.
+
+**`task-brief`** runs before the branch exists and returns the ordered commit
+list, who verifies each clause, the live-install steps, and the README
+paragraphs and decision records the task owes. **`task-review`** runs on the
+finished branch beside `mise run ci` and returns the findings that stand, the
+ones refuted with the reason, and any side that went unreviewed. The build
+between them stays in the session, because each commit needs its signature
+approved at the keyboard and the commits land in order on one branch.
+
+Every agent's model and effort is pinned in the script, so a run costs and
+behaves the same whatever the session is set to.
+
+| Workflow | Agent | Model | Effort | Why |
+|---|---|---|---|---|
+| `task-brief` | scout | Sonnet | low | Extracts a work list; an error here reaches every reader, so not Haiku |
+| | decision records, README | Sonnet | low | Read and report |
+| | specification, code | Sonnet | medium | Drives the ledger and quotes anchors verbatim; names the seams a commit can be cut at |
+| | planner | Fable | high | Ordering and sizing the commits is the one judgment in the brief |
+| | critic | Opus | high | A different model from the planner's does not repeat its mistakes |
+| `task-review` | claim, test quality | Sonnet | high | Holds the branch to its claim; judges whether a test proves what it says |
+| | project rules | Sonnet | low | Mostly what `nospecrefs.sh` and `statecheck.sh` already check |
+| | concurrency and `unsafe` | Fable | xhigh | A wrong "no findings" on a wake or an ownership argument costs the most |
+| | refuters | Opus | high | A refuter decides what survives, so it is not the finder's model |
+| | concurrency refuter | Fable | xhigh | A refuter weaker than the finder throws true findings away |
+
+These tiers are a starting judgment and not a measurement. A run's journal, at
+the path the Workflow tool prints, records what each agent returned: after a
+task, read which reviewers found something real and which refuter argued a
+true finding away, and move a tier on that.
+
+Nothing in CI parses the scripts, because the repository assumes no Node. With
+Node present, wrap a script's body in an `async function` and run
+`node --check` on it; without, a syntax error shows when the workflow runs.
+
 ## Two portability limits
 
 **`sh` on Windows.** The tools and the hooks are POSIX `sh`, resolved
