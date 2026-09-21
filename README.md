@@ -82,7 +82,9 @@ The hook script reads the file and hands the bridge its settings with
 address and sizes the queues. A later call, on `ReloadConfig`, changes the
 keys marked live, such as the timeouts and the tokens; a change to the
 address, the port, the connection cap or a queue size waits for a DCS
-restart, and the call reports it as pending.
+restart, and the call reports it as pending. Each connection has a queue per
+record class, so a flood of records a consumer can afford to lose pushes out
+none of the others.
 
 After that first call the hook script hands the bridge the bytes of
 `Mods\services\DCSBridge\schema.pb` once, with `shim.schema`. From then on
@@ -236,6 +238,13 @@ the `DCSB_TOKEN` environment variable, or from the first line of the file
 `--token-file` names. It is never taken from the command line, where every
 process on the machine can read it. A refused token prints the bridge's
 answer and exits 1.
+
+A consumer that reads too slowly loses records in a fixed order. Records it
+can afford to lose, such as unit positions, are dropped first, oldest first,
+and show as a gap. Events are dropped only by other events. Records that mark
+a mission boundary are never dropped: a consumer that has fallen behind by
+enough that one would be lost is disconnected, and reconnects into a fresh
+sequence.
 
 `ping` needs no token. It prints one line, such as `dcs_alive=true
 dcs_last_heard_ms=312 bridge_enabled=true`, and exits 1 when the sim is not
