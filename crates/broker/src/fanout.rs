@@ -171,26 +171,74 @@ pub struct Numbered<T> {
 /// record with its class, and the connection's thread pops from the
 /// [`Drain`] made with it.
 struct Outbox<T> {
-    lossy: Producer<Numbered<T>>,
-    durable: Producer<Numbered<T>>,
-    lifecycle: Producer<Numbered<T>>,
+    lossy: Producer<Queued<T>>,
+    durable: Producer<Queued<T>>,
+    lifecycle: Producer<Queued<T>>,
+}
+
+/// A numbered record as a connection's ring holds it.
+///
+/// A ring hands back the record it evicts and nothing about it. Which ring
+/// it came from says its class, and the one thing that does not say is
+/// whether a record from the `DURABLE` ring was a broker answer, which is
+/// counted apart. So that, and only that, is carried. ADR 0028.
+struct Queued<T> {
+    answer: bool,
+    numbered: Numbered<T>,
+}
+
+/// What a push cost the connection it was for.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Lost {
+    /// Nothing: the ring had room.
+    Nothing,
+    /// A `LOSSY` record.
+    Lossy,
+    /// A `DURABLE` record that was not a broker answer.
+    Durable,
+    /// A broker answer, or the handshake.
+    BrokerAnswer,
+    /// Nothing yet, and everything: a boundary record found its ring full,
+    /// and the connection is to be closed and not counted against.
+    Boundary,
 }
 
 impl<T> Outbox<T> {
-    /// Queue a numbered record in its class's ring, and hand back what the
-    /// ring turned away.
+    /// Queue a numbered record in its class's ring, and say what the ring
+    /// turned away to do it. What is turned away is dropped here, on the
+    /// writer thread. `answer` marks a broker answer, which is `Durable`.
     ///
     /// The drop rule is which ring a record is in. A `Lossy` record evicts
     /// the oldest `Lossy` and a `Durable` one the oldest `Durable`, so a
     /// flood in one class costs the others nothing. The `Lifecycle` ring
-    /// never evicts: a full one refuses the record, and [`Push::Refused`]
-    /// of a `Lifecycle` record means the consumer is past saving.
-    /// ADR 0009.
-    fn push(&mut self, class: Class, record: Numbered<T>) -> Push<Numbered<T>> {
+    /// never evicts: a full one refuses the record, which means the
+    /// consumer is past saving. ADR 0009.
+    ///
+    /// An eviction is counted as what the evicted record was. A refusal,
+    /// which the other two rings give only while their oldest record is
+    /// being read, is counted as what the refused record was.
+    fn push(&mut self, class: Class, answer: bool, numbered: Numbered<T>) -> Lost {
+        let queued = Queued { answer, numbered };
+        let durable = |lost: &Queued<T>| {
+            if lost.answer {
+                Lost::BrokerAnswer
+            } else {
+                Lost::Durable
+            }
+        };
         match class {
-            Class::Lossy => self.lossy.push(record),
-            Class::Durable => self.durable.push(record),
-            Class::Lifecycle => self.lifecycle.offer(record),
+            Class::Lossy => match self.lossy.push(queued) {
+                Push::Stored => Lost::Nothing,
+                Push::Evicted(_) | Push::Refused(_) => Lost::Lossy,
+            },
+            Class::Durable => match self.durable.push(queued) {
+                Push::Stored => Lost::Nothing,
+                Push::Evicted(lost) | Push::Refused(lost) => durable(&lost),
+            },
+            Class::Lifecycle => match self.lifecycle.offer(queued) {
+                Push::Stored => Lost::Nothing,
+                Push::Evicted(_) | Push::Refused(_) => Lost::Boundary,
+            },
         }
     }
 }
@@ -204,7 +252,7 @@ impl<T> Outbox<T> {
 /// has been looked at late enough. [`Drain::pop`] has what late enough is.
 /// ADR 0028.
 pub struct Drain<T> {
-    rings: [Consumer<Numbered<T>>; 3],
+    rings: [Consumer<Queued<T>>; 3],
     /// The record popped from each ring and not yet handed on. A record
     /// held here is out of its ring, so nothing evicts it.
     held: [Option<Numbered<T>>; 3],
@@ -227,7 +275,7 @@ impl<T> Drain<T> {
             let mut popped = false;
             for (ring, held) in self.rings.iter_mut().zip(&mut self.held) {
                 if held.is_none() {
-                    *held = ring.pop();
+                    *held = ring.pop().map(|queued| queued.numbered);
                     popped |= held.is_some();
                 }
             }
@@ -682,6 +730,27 @@ struct Counts {
     filtered: AtomicU64,
     /// Connections closed because their `LIFECYCLE` ring was full.
     lifecycle_disconnects: AtomicU64,
+    /// Records a connection's ring turned away, by what was lost.
+    dropped_lossy: AtomicU64,
+    dropped_durable: AtomicU64,
+    dropped_broker_answer: AtomicU64,
+}
+
+/// `records_dropped_total` across every connection, by label.
+///
+/// The classes fill and drop independently, so a `lossy` count says
+/// nothing about `durable`. A boundary record is never dropped: the
+/// connection it had no room in is closed, and counted in
+/// `lifecycle_disconnects_total`.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct Dropped {
+    /// `LOSSY` records evicted by newer ones.
+    pub lossy: u64,
+    /// `DURABLE` records evicted by newer ones, broker answers apart.
+    pub durable: u64,
+    /// Broker answers and handshakes lost from the `DURABLE` ring: a
+    /// `BUSY` or a `Pong` a consumer was owed and did not get.
+    pub broker_answer: u64,
 }
 
 impl<T: Clone + Send + 'static> Writer<T> {
@@ -706,6 +775,9 @@ impl<T: Clone + Send + 'static> Writer<T> {
             unaddressed: AtomicU64::new(0),
             filtered: AtomicU64::new(0),
             lifecycle_disconnects: AtomicU64::new(0),
+            dropped_lossy: AtomicU64::new(0),
+            dropped_durable: AtomicU64::new(0),
+            dropped_broker_answer: AtomicU64::new(0),
         });
 
         let sleeping = Arc::clone(&flag);
@@ -768,6 +840,15 @@ impl<T: Clone + Send + 'static> Writer<T> {
         self.counts.lifecycle_disconnects.load(Ordering::Relaxed)
     }
 
+    /// How many records the connections' rings have turned away, by label.
+    pub fn dropped(&self) -> Dropped {
+        Dropped {
+            lossy: self.counts.dropped_lossy.load(Ordering::Relaxed),
+            durable: self.counts.dropped_durable.load(Ordering::Relaxed),
+            broker_answer: self.counts.dropped_broker_answer.load(Ordering::Relaxed),
+        }
+    }
+
     /// The writer thread's loop.
     ///
     /// Each pass takes every control message, then every record the commit ring
@@ -799,7 +880,7 @@ impl<T: Clone + Send + 'static> Writer<T> {
                         if let Some(first) = first {
                             // The handshake is the broker's own record, and
                             // durable as its answers are. ADR 0028.
-                            connection.push(Class::Durable, first, counts);
+                            connection.push(Class::Durable, true, first, counts);
                         }
                         connections.push(connection);
                     }
@@ -814,6 +895,7 @@ impl<T: Clone + Send + 'static> Writer<T> {
                                 class: Class::Durable,
                                 record,
                             },
+                            true,
                             counts,
                         );
                     }
@@ -839,7 +921,7 @@ impl<T: Clone + Send + 'static> Writer<T> {
                 let Some(record) = commit.pop() else {
                     break;
                 };
-                fan_out(&mut connections, record, counts);
+                fan_out(&mut connections, record, false, counts);
                 fanned = true;
             }
             if fanned {
@@ -934,15 +1016,22 @@ impl<T> Connection<T> {
     /// boundaries, and a stream with one missing would tell it a world
     /// still stands that does not, so the connection is closed instead
     /// and the consumer starts again from the retained set. ADR 0009.
-    fn push(&mut self, class: Class, record: T, counts: &Counts) {
+    fn push(&mut self, class: Class, answer: bool, record: T, counts: &Counts) {
         let seq = self.next_seq;
         self.next_seq += 1;
-        let pushed = self.outbox.push(class, Numbered { seq, record });
-        if class == Class::Lifecycle && matches!(pushed, Push::Refused(_)) {
-            self.close(counts);
-            return;
+        let dropped = match self.outbox.push(class, answer, Numbered { seq, record }) {
+            Lost::Nothing => None,
+            Lost::Lossy => Some(&counts.dropped_lossy),
+            Lost::Durable => Some(&counts.dropped_durable),
+            Lost::BrokerAnswer => Some(&counts.dropped_broker_answer),
+            Lost::Boundary => {
+                self.close(counts);
+                return;
+            }
+        };
+        if let Some(dropped) = dropped {
+            dropped.fetch_add(1, Ordering::Relaxed);
         }
-        drop(pushed);
         if let Some(waker) = &self.waker {
             waker.wake_if_parked();
         }
@@ -990,14 +1079,20 @@ impl<T> Connection<T> {
 fn fan_out<T: Clone>(
     connections: &mut Vec<Connection<T>>,
     addressed: Addressed<T>,
+    answer: bool,
     counts: &Counts,
 ) {
-    deliver(connections, addressed, counts);
+    deliver(connections, addressed, answer, counts);
     connections.retain(|held| !held.closed);
 }
 
 /// [`fan_out`]'s pushes, which forget nobody.
-fn deliver<T: Clone>(connections: &mut [Connection<T>], addressed: Addressed<T>, counts: &Counts) {
+fn deliver<T: Clone>(
+    connections: &mut [Connection<T>],
+    addressed: Addressed<T>,
+    answer: bool,
+    counts: &Counts,
+) {
     let Addressed {
         to,
         need,
@@ -1007,7 +1102,7 @@ fn deliver<T: Clone>(connections: &mut [Connection<T>], addressed: Addressed<T>,
 
     if let Some(to) = to {
         match connections.iter_mut().find(|held| held.id == to) {
-            Some(connection) => connection.push(class, record, counts),
+            Some(connection) => connection.push(class, answer, record, counts),
             None => {
                 counts.unaddressed.fetch_add(1, Ordering::Relaxed);
             }
@@ -1031,10 +1126,10 @@ fn deliver<T: Clone>(connections: &mut [Connection<T>], addressed: Addressed<T>,
         return;
     };
     for connection in receiving {
-        previous.push(class, record.clone(), counts);
+        previous.push(class, answer, record.clone(), counts);
         previous = connection;
     }
-    previous.push(class, record, counts);
+    previous.push(class, answer, record, counts);
 }
 
 #[cfg(all(test, not(loom)))]
@@ -1589,6 +1684,13 @@ mod tests {
         assert_eq!(drain_numbered(&mut stalled, kept.len()), kept);
         assert_eq!(stalled.pop(), None);
         assert_eq!(stalled.dropped(), 96, "something but the flood was lost");
+        assert_eq!(
+            writer.dropped(),
+            Dropped {
+                lossy: 96,
+                ..Dropped::default()
+            }
+        );
 
         drop(writer);
     }
@@ -1614,6 +1716,53 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(drain_numbered(&mut stalled, kept.len()), kept);
         assert_eq!(stalled.dropped(), 6);
+        assert_eq!(
+            writer.dropped(),
+            Dropped {
+                durable: 6,
+                ..Dropped::default()
+            }
+        );
+
+        drop(writer);
+    }
+
+    /// A broker answer evicted from the `DURABLE` ring is counted as one,
+    /// apart from the `DURABLE` records around it: a consumer that was owed
+    /// a `Pong` or a `BUSY` and did not get it is a different fault from
+    /// one that fell behind on events.
+    #[test]
+    fn an_evicted_broker_answer_is_counted_apart() {
+        const PONG: u32 = 3000;
+        let (writer, mut commit, connections) = Writer::spawn(ROOMY);
+        let (id, mut stalled) = attached(&connections, 4);
+
+        connections.answer(id, PONG);
+        connections.settle();
+        for value in 0..4 {
+            commit.push(READ, Class::Durable, value);
+        }
+        fanned(&commit, &connections);
+        assert_eq!(
+            writer.dropped(),
+            Dropped {
+                broker_answer: 1,
+                ..Dropped::default()
+            },
+            "the fourth record evicts the answer"
+        );
+
+        commit.push(READ, Class::Durable, 4);
+        fanned(&commit, &connections);
+        assert_eq!(
+            writer.dropped(),
+            Dropped {
+                durable: 1,
+                broker_answer: 1,
+                ..Dropped::default()
+            }
+        );
+        assert_eq!(drain_until(&mut stalled, 4), [1, 2, 3, 4]);
 
         drop(writer);
     }
@@ -1691,6 +1840,14 @@ mod tests {
         assert_eq!(closes.load(Ordering::SeqCst), 0);
         assert_eq!(writer.lifecycle_disconnects(), 0);
         assert_eq!(stalled.dropped(), 92);
+        assert_eq!(
+            writer.dropped(),
+            Dropped {
+                lossy: 46,
+                durable: 46,
+                broker_answer: 0,
+            }
+        );
 
         drop(writer);
     }
@@ -1797,8 +1954,8 @@ mod tests {
 
     /// Push `seq` into the ring `class` names, as the writer thread would
     /// have numbered it.
-    fn numbered(outbox: &mut Outbox<u64>, class: Class, seq: u64) -> Push<Numbered<u64>> {
-        outbox.push(class, Numbered { seq, record: seq })
+    fn numbered(outbox: &mut Outbox<u64>, class: Class, seq: u64) -> Lost {
+        outbox.push(class, false, Numbered { seq, record: seq })
     }
 
     /// Everything the drain holds, as the `seq` of each record in the
@@ -1824,7 +1981,7 @@ mod tests {
             Class::Lossy,
         ];
         for (seq, class) in (1..).zip(classes) {
-            assert_eq!(numbered(&mut outbox, class, seq), Push::Stored);
+            assert_eq!(numbered(&mut outbox, class, seq), Lost::Nothing);
         }
 
         assert!(!drain.is_empty());
@@ -1837,14 +1994,11 @@ mod tests {
     #[test]
     fn an_eviction_leaves_a_gap_and_no_reorder() {
         let (mut outbox, mut drain) = outbound(Capacities::each(2));
-        assert_eq!(numbered(&mut outbox, Class::Lossy, 1), Push::Stored);
-        assert_eq!(numbered(&mut outbox, Class::Durable, 2), Push::Stored);
-        assert_eq!(numbered(&mut outbox, Class::Lossy, 3), Push::Stored);
-        assert_eq!(numbered(&mut outbox, Class::Lifecycle, 4), Push::Stored);
-        assert_eq!(
-            numbered(&mut outbox, Class::Lossy, 5),
-            Push::Evicted(Numbered { seq: 1, record: 1 })
-        );
+        assert_eq!(numbered(&mut outbox, Class::Lossy, 1), Lost::Nothing);
+        assert_eq!(numbered(&mut outbox, Class::Durable, 2), Lost::Nothing);
+        assert_eq!(numbered(&mut outbox, Class::Lossy, 3), Lost::Nothing);
+        assert_eq!(numbered(&mut outbox, Class::Lifecycle, 4), Lost::Nothing);
+        assert_eq!(numbered(&mut outbox, Class::Lossy, 5), Lost::Lossy);
 
         assert_eq!(drained(&mut drain), [2, 3, 4, 5]);
         assert_eq!(drain.dropped(), 1);
@@ -1857,8 +2011,8 @@ mod tests {
     #[test]
     fn a_held_record_survives_a_flood_of_its_ring() {
         let (mut outbox, mut drain) = outbound(Capacities::each(2));
-        assert_eq!(numbered(&mut outbox, Class::Durable, 1), Push::Stored);
-        assert_eq!(numbered(&mut outbox, Class::Lossy, 2), Push::Stored);
+        assert_eq!(numbered(&mut outbox, Class::Durable, 1), Lost::Nothing);
+        assert_eq!(numbered(&mut outbox, Class::Lossy, 2), Lost::Nothing);
 
         // Popping 1 looks at every ring, and leaves 2 held.
         assert_eq!(drain.pop().map(|record| record.seq), Some(1));
@@ -1875,12 +2029,9 @@ mod tests {
     #[test]
     fn the_lifecycle_ring_refuses_and_never_evicts() {
         let (mut outbox, mut drain) = outbound(Capacities::each(2));
-        assert_eq!(numbered(&mut outbox, Class::Lifecycle, 1), Push::Stored);
-        assert_eq!(numbered(&mut outbox, Class::Lifecycle, 2), Push::Stored);
-        assert_eq!(
-            numbered(&mut outbox, Class::Lifecycle, 3),
-            Push::Refused(Numbered { seq: 3, record: 3 })
-        );
+        assert_eq!(numbered(&mut outbox, Class::Lifecycle, 1), Lost::Nothing);
+        assert_eq!(numbered(&mut outbox, Class::Lifecycle, 2), Lost::Nothing);
+        assert_eq!(numbered(&mut outbox, Class::Lifecycle, 3), Lost::Boundary);
 
         assert_eq!(drained(&mut drain), [1, 2]);
     }
@@ -2015,9 +2166,9 @@ mod loom_tests {
             });
             let waker = Waker::new(flag, drainer.thread().clone());
 
-            let _ = outbox.push(Class::Lossy, Numbered { seq: 1, record: 0 });
+            let _ = outbox.push(Class::Lossy, false, Numbered { seq: 1, record: 0 });
             waker.wake_if_parked();
-            let _ = outbox.push(Class::Lifecycle, Numbered { seq: 2, record: 0 });
+            let _ = outbox.push(Class::Lifecycle, false, Numbered { seq: 2, record: 0 });
             waker.wake_if_parked();
 
             let arrived = drainer.join().expect("the drainer only pops");

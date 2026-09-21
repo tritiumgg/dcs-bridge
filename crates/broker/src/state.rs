@@ -32,7 +32,7 @@ use std::time::Instant;
 
 use crate::config::{self, Applied, Config, Value};
 use crate::encode::Stamp;
-use crate::fanout::{Capacities, Class, Commit, ConnectionId, Writer};
+use crate::fanout::{Capacities, Class, Commit, ConnectionId, Dropped, Writer};
 use crate::handshake;
 use crate::inbound::{
     Answers, AuthError, Command, Delivery, Limits, Liveness, RejectedReason, Session, Window,
@@ -238,6 +238,12 @@ impl Outbound {
     /// full, `lifecycle_disconnects_total`.
     pub fn lifecycle_disconnects(&self) -> u64 {
         self.writer.lifecycle_disconnects()
+    }
+
+    /// How many records the connections' rings have turned away, by label,
+    /// `records_dropped_total`.
+    pub fn dropped(&self) -> Dropped {
+        self.writer.dropped()
     }
 
     /// The commit ring's producer, or why not.
