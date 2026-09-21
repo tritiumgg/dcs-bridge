@@ -32,7 +32,7 @@ use std::time::Instant;
 
 use crate::config::{self, Applied, Config, Value};
 use crate::encode::Stamp;
-use crate::fanout::{Class, Commit, ConnectionId, Writer};
+use crate::fanout::{Capacities, Class, Commit, ConnectionId, Writer};
 use crate::handshake;
 use crate::inbound::{
     Answers, AuthError, Command, Delivery, Limits, Liveness, RejectedReason, Session, Window,
@@ -561,14 +561,16 @@ impl Bridge {
         } else {
             let applied = Config::first(table)?;
             let addr = SocketAddr::new(applied.config.bind_address, applied.config.port);
-            let ring = applied.config.ring_out_lossy_records as usize
-                + applied.config.ring_out_durable_records as usize
-                + applied.config.ring_out_lifecycle_records as usize;
+            let capacities = Capacities {
+                lossy: applied.config.ring_out_lossy_records as usize,
+                durable: applied.config.ring_out_durable_records as usize,
+                lifecycle: applied.config.ring_out_lifecycle_records as usize,
+            };
             self.start_inbound(
                 applied.config.ring_in_sim_driver_records as usize,
                 applied.config.ring_in_hook_driver_records as usize,
             );
-            self.start_outbound(addr, ring, ring)
+            self.start_outbound(addr, capacities)
                 .map_err(|error| ConfigureError::Bind { addr, error })?;
             applied
         };
@@ -605,9 +607,9 @@ impl Bridge {
     }
 
     /// Start the outbound path, or return the address it is already bound
-    /// to: the writer thread over a commit ring of `commit_capacity` records,
-    /// and a listener on `addr` giving each connection a ring of
-    /// `ring_capacity` records.
+    /// to: the writer thread over a commit ring of `capacities`' total, and
+    /// a listener on `addr` giving each connection a ring per class of
+    /// those sizes.
     ///
     /// The bind is what fails, and it fails with nothing started. A second
     /// call, from the other Lua state or a racing thread, changes nothing
@@ -615,18 +617,17 @@ impl Bridge {
     pub fn start_outbound(
         &self,
         addr: impl ToSocketAddrs,
-        commit_capacity: usize,
-        ring_capacity: usize,
+        capacities: Capacities,
     ) -> io::Result<SocketAddr> {
         let _starting = self.starting.lock().unwrap_or_else(PoisonError::into_inner);
         if let Some(outbound) = self.outbound.get() {
             return Ok(outbound.local_addr());
         }
 
-        let (writer, commit, connections) = Writer::spawn(commit_capacity);
+        let (writer, commit, connections) = Writer::spawn(capacities.total());
         // Answered through the global, so a handshake field that arrives
         // after the listener is up is in the next connection's.
-        let listener = Listener::spawn(addr, connections, ring_capacity, Arc::new(Global))?;
+        let listener = Listener::spawn(addr, connections, capacities, Arc::new(Global))?;
         let addr = listener.local_addr();
         // The lock above makes this the only setter.
         let _ = self.outbound.set(Outbound {
@@ -1689,10 +1690,12 @@ mod tests {
         use std::time::Duration;
 
         let addr = bridge()
-            .start_outbound("127.0.0.1:0", 64, 64)
+            .start_outbound("127.0.0.1:0", Capacities::each(64))
             .expect("loopback binds");
         assert_eq!(
-            bridge().start_outbound("127.0.0.1:0", 64, 64).unwrap(),
+            bridge()
+                .start_outbound("127.0.0.1:0", Capacities::each(64))
+                .unwrap(),
             addr,
             "a second start bound a second listener"
         );

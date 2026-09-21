@@ -14,6 +14,12 @@
 //! taking bytes fills its own ring, which evicts and counts, and stalls nothing
 //! else. ADR 0011.
 //!
+//! A connection's ring is three, one per class, so that what a record may
+//! evict is decided by which ring it is in: `LOSSY` evicts `LOSSY`, `DURABLE`
+//! evicts `DURABLE`, and `LIFECYCLE` evicts nothing. The writer thread is the
+//! one producer of all three and the connection's thread the one consumer,
+//! merging them back into `seq` order. ADR 0009, ADR 0028.
+//!
 //! A record is fanned out to every connection, or addressed to one. A reply
 //! or an acknowledgement answers the connection that sent the command, and
 //! goes to that connection's ring and no other; the writer thread pushes it
@@ -165,49 +171,140 @@ pub struct Numbered<T> {
 /// record with its class, and the connection's thread pops from the
 /// [`Drain`] made with it.
 struct Outbox<T> {
-    ring: Producer<Numbered<T>>,
+    lossy: Producer<Numbered<T>>,
+    durable: Producer<Numbered<T>>,
+    lifecycle: Producer<Numbered<T>>,
 }
 
 impl<T> Outbox<T> {
-    /// Queue a numbered record, and hand back what the queue turned away.
-    fn push(&mut self, _class: Class, record: Numbered<T>) -> Push<Numbered<T>> {
-        self.ring.push(record)
+    /// Queue a numbered record in its class's ring, and hand back what the
+    /// ring turned away.
+    ///
+    /// The drop rule is which ring a record is in. A `Lossy` record evicts
+    /// the oldest `Lossy` and a `Durable` one the oldest `Durable`, so a
+    /// flood in one class costs the others nothing. The `Lifecycle` ring
+    /// never evicts: a full one refuses the record, and [`Push::Refused`]
+    /// of a `Lifecycle` record means the consumer is past saving.
+    /// ADR 0009.
+    fn push(&mut self, class: Class, record: Numbered<T>) -> Push<Numbered<T>> {
+        match class {
+            Class::Lossy => self.lossy.push(record),
+            Class::Durable => self.durable.push(record),
+            Class::Lifecycle => self.lifecycle.offer(record),
+        }
     }
 }
 
 /// The connection's end of its outbound queue: what its thread pops and
 /// writes to the socket, in `seq` order.
+///
+/// Three rings, merged here. The writer thread numbers a record before it
+/// pushes it, and pushes a connection's records in `seq` order, so the
+/// lowest `seq` at the head of any ring is the next record, once every ring
+/// has been looked at late enough. [`Drain::pop`] has what late enough is.
+/// ADR 0028.
 pub struct Drain<T> {
-    ring: Consumer<Numbered<T>>,
+    rings: [Consumer<Numbered<T>>; 3],
+    /// The record popped from each ring and not yet handed on. A record
+    /// held here is out of its ring, so nothing evicts it.
+    held: [Option<Numbered<T>>; 3],
 }
 
 impl<T> Drain<T> {
     /// The next record in `seq` order, or `None` when nothing is queued.
+    ///
+    /// Each pass pops every ring nothing is held from, and the passes
+    /// repeat until one pops nothing. Only then is the lowest held `seq`
+    /// trusted. One pass is not enough: it may find the first ring empty,
+    /// the writer thread may then push `seq` 9 there and `seq` 10 into the
+    /// second, and the pass goes on to pop 10. After a pass that pops
+    /// nothing, every record numbered below the lowest held was pushed
+    /// before that pass began, so it is held, or its ring evicted it, which
+    /// is a gap and not a reorder. A pass that pops fills one of three
+    /// places, so this is four passes at most.
     pub fn pop(&mut self) -> Option<Numbered<T>> {
-        self.ring.pop()
+        loop {
+            let mut popped = false;
+            for (ring, held) in self.rings.iter_mut().zip(&mut self.held) {
+                if held.is_none() {
+                    *held = ring.pop();
+                    popped |= held.is_some();
+                }
+            }
+            if !popped {
+                break;
+            }
+        }
+
+        self.held
+            .iter_mut()
+            .filter(|held| held.is_some())
+            .min_by_key(|held| held.as_ref().map(|record| record.seq))
+            .and_then(Option::take)
     }
 
-    /// Whether nothing is queued. What a draining thread asks before it
-    /// parks.
+    /// Whether nothing is queued or held. What a draining thread asks
+    /// before it parks.
     pub fn is_empty(&self) -> bool {
-        self.ring.is_empty()
+        self.held.iter().all(Option::is_none) && self.rings.iter().all(Consumer::is_empty)
     }
 
-    /// How many records the queue has turned away.
+    /// How many records the three rings have turned away.
     pub fn dropped(&self) -> u64 {
-        self.ring.dropped()
+        self.rings.iter().map(Consumer::dropped).sum()
     }
 }
 
-/// An outbound queue of `capacity` records, as its two ends.
+/// How many records each of a connection's three rings holds.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Capacities {
+    /// The `LOSSY` ring.
+    pub lossy: usize,
+    /// The `DURABLE` ring, which broker answers share.
+    pub durable: usize,
+    /// The `LIFECYCLE` ring. Filling it closes the connection, so this is
+    /// how many boundary records a consumer may fall behind by.
+    pub lifecycle: usize,
+}
+
+impl Capacities {
+    /// Every ring at `records`. A test's sizes; the product's come from the
+    /// configuration.
+    pub const fn each(records: usize) -> Self {
+        Self {
+            lossy: records,
+            durable: records,
+            lifecycle: records,
+        }
+    }
+
+    /// The three together.
+    pub const fn total(self) -> usize {
+        self.lossy + self.durable + self.lifecycle
+    }
+}
+
+/// An outbound queue, as its two ends.
 ///
 /// # Panics
 ///
-/// If `capacity` is zero, for the reason [`Ring::split`] gives.
-fn outbound<T>(capacity: usize) -> (Outbox<T>, Drain<T>) {
-    let (producer, consumer) = Ring::split(capacity);
+/// If any capacity is zero, for the reason [`Ring::split`] gives.
+fn outbound<T>(capacities: Capacities) -> (Outbox<T>, Drain<T>) {
+    let (lossy, from_lossy) = Ring::split(capacities.lossy);
+    let (durable, from_durable) = Ring::split(capacities.durable);
+    let (lifecycle, from_lifecycle) = Ring::split(capacities.lifecycle);
 
-    (Outbox { ring: producer }, Drain { ring: consumer })
+    (
+        Outbox {
+            lossy,
+            durable,
+            lifecycle,
+        },
+        Drain {
+            rings: [from_lossy, from_durable, from_lifecycle],
+            held: [None, None, None],
+        },
+    )
 }
 
 /// What the attach side tells the writer thread.
@@ -432,10 +529,10 @@ impl<T> Clone for Connections<T> {
 }
 
 impl<T> Connections<T> {
-    /// Add a connection with a ring of `capacity` records, and hand back the
-    /// end its socket thread drains.
+    /// Add a connection with a ring per class, sized by `capacities`, and
+    /// hand back the end its socket thread drains.
     ///
-    /// The ring is allocated here, on the attaching thread, so the writer
+    /// The rings are allocated here, on the attaching thread, so the writer
     /// thread allocates nothing. Records committed after the writer thread
     /// receives the attachment reach the new ring; a record in flight before
     /// it may or may not.
@@ -446,9 +543,9 @@ impl<T> Connections<T> {
     ///
     /// # Panics
     ///
-    /// If `capacity` is zero, for the reason [`Ring::split`] gives.
-    pub fn attach(&self, capacity: usize) -> (ConnectionId, Drain<T>) {
-        self.attach_inner(capacity, None, None)
+    /// If a capacity is zero, for the reason [`Ring::split`] gives.
+    pub fn attach(&self, capacities: Capacities) -> (ConnectionId, Drain<T>) {
+        self.attach_inner(capacities, None, None)
     }
 
     /// [`attach`](Self::attach), with a thread to wake and a first record.
@@ -463,20 +560,20 @@ impl<T> Connections<T> {
     /// here. ADR 0018.
     pub fn attach_with(
         &self,
-        capacity: usize,
+        capacities: Capacities,
         waker: Waker,
         first: Option<T>,
     ) -> (ConnectionId, Drain<T>) {
-        self.attach_inner(capacity, Some(waker), first)
+        self.attach_inner(capacities, Some(waker), first)
     }
 
     fn attach_inner(
         &self,
-        capacity: usize,
+        capacities: Capacities,
         waker: Option<Waker>,
         first: Option<T>,
     ) -> (ConnectionId, Drain<T>) {
-        let (outbox, drain) = outbound(capacity);
+        let (outbox, drain) = outbound(capacities);
         let id = ConnectionId(self.last_id.fetch_add(1, Ordering::Relaxed) + 1);
         self.send(Control::Attach(id, outbox, waker, first));
 
@@ -887,7 +984,7 @@ mod tests {
     /// and a test that counts what arrives would then wait for records the
     /// connection was never sent.
     fn attached<T>(connections: &Connections<T>, capacity: usize) -> (ConnectionId, Drain<T>) {
-        let (id, consumer) = connections.attach(capacity);
+        let (id, consumer) = connections.attach(Capacities::each(capacity));
         connections.authenticated(id, ALL);
         connections.settle();
         (id, consumer)
@@ -1168,7 +1265,8 @@ mod tests {
         for greeting in 0..attaches {
             let flag = Arc::new(ParkFlag::new());
             let waker = Waker::new(Arc::clone(&flag), thread::current());
-            let (_, mut consumer) = connections.attach_with(1 << 16, waker, Some(greeting));
+            let (_, mut consumer) =
+                connections.attach_with(Capacities::each(1 << 16), waker, Some(greeting));
             let first = drain_numbered(&mut consumer, 1);
             assert_eq!(
                 first,
@@ -1192,7 +1290,7 @@ mod tests {
     #[test]
     fn fan_out_withholds_from_an_unauthenticated_connection_without_a_gap() {
         let (writer, mut commit, connections) = Writer::spawn(ROOMY);
-        let (pending_id, mut pending) = connections.attach(ROOMY);
+        let (pending_id, mut pending) = connections.attach(Capacities::each(ROOMY));
         let (_, mut trusted) = attached(&connections, ROOMY);
 
         commit.push(READ, Class::Durable, 0u32);
@@ -1236,7 +1334,7 @@ mod tests {
     #[test]
     fn fan_out_withholds_a_record_the_capabilities_do_not_cover_without_a_gap() {
         let (writer, mut commit, connections) = Writer::spawn(ROOMY);
-        let (reader_id, mut reader) = connections.attach(ROOMY);
+        let (reader_id, mut reader) = connections.attach(Capacities::each(ROOMY));
         connections.authenticated(reader_id, Capabilities::NONE.with(READ));
         let (_, mut trusted) = attached(&connections, ROOMY);
 
@@ -1287,7 +1385,7 @@ mod tests {
     #[test]
     fn an_addressed_record_is_not_filtered() {
         let (writer, mut commit, connections) = Writer::spawn(ROOMY);
-        let (id, mut consumer) = connections.attach(ROOMY);
+        let (id, mut consumer) = connections.attach(Capacities::each(ROOMY));
         connections.authenticated(id, Capabilities::NONE);
         connections.settle();
 
@@ -1467,6 +1565,96 @@ mod tests {
             "an attachment after the writer stopped received"
         );
     }
+
+    /// Push `seq` into the ring `class` names, as the writer thread would
+    /// have numbered it.
+    fn numbered(outbox: &mut Outbox<u64>, class: Class, seq: u64) -> Push<Numbered<u64>> {
+        outbox.push(class, Numbered { seq, record: seq })
+    }
+
+    /// Everything the drain holds, as the `seq` of each record in the
+    /// order it came out.
+    fn drained(drain: &mut Drain<u64>) -> Vec<u64> {
+        std::iter::from_fn(|| drain.pop())
+            .map(|record| record.seq)
+            .collect()
+    }
+
+    /// Records spread over the three rings come out in `seq` order, whatever
+    /// ring each is in.
+    #[test]
+    fn the_drain_merges_three_rings_on_seq() {
+        let (mut outbox, mut drain) = outbound(Capacities::each(8));
+        let classes = [
+            Class::Durable,
+            Class::Lossy,
+            Class::Lossy,
+            Class::Lifecycle,
+            Class::Durable,
+            Class::Lifecycle,
+            Class::Lossy,
+        ];
+        for (seq, class) in (1..).zip(classes) {
+            assert_eq!(numbered(&mut outbox, class, seq), Push::Stored);
+        }
+
+        assert!(!drain.is_empty());
+        assert_eq!(drained(&mut drain), [1, 2, 3, 4, 5, 6, 7]);
+        assert!(drain.is_empty());
+    }
+
+    /// A record evicted from one ring leaves a gap in the merged stream and
+    /// moves nothing else: what is left still comes out in order.
+    #[test]
+    fn an_eviction_leaves_a_gap_and_no_reorder() {
+        let (mut outbox, mut drain) = outbound(Capacities::each(2));
+        assert_eq!(numbered(&mut outbox, Class::Lossy, 1), Push::Stored);
+        assert_eq!(numbered(&mut outbox, Class::Durable, 2), Push::Stored);
+        assert_eq!(numbered(&mut outbox, Class::Lossy, 3), Push::Stored);
+        assert_eq!(numbered(&mut outbox, Class::Lifecycle, 4), Push::Stored);
+        assert_eq!(
+            numbered(&mut outbox, Class::Lossy, 5),
+            Push::Evicted(Numbered { seq: 1, record: 1 })
+        );
+
+        assert_eq!(drained(&mut drain), [2, 3, 4, 5]);
+        assert_eq!(drain.dropped(), 1);
+    }
+
+    /// A record the drain has popped and not yet handed on is out of its
+    /// ring: a flood of that class evicts what is behind it and not it.
+    /// The drain is not empty while it holds one, so its thread does not
+    /// park on it.
+    #[test]
+    fn a_held_record_survives_a_flood_of_its_ring() {
+        let (mut outbox, mut drain) = outbound(Capacities::each(2));
+        assert_eq!(numbered(&mut outbox, Class::Durable, 1), Push::Stored);
+        assert_eq!(numbered(&mut outbox, Class::Lossy, 2), Push::Stored);
+
+        // Popping 1 looks at every ring, and leaves 2 held.
+        assert_eq!(drain.pop().map(|record| record.seq), Some(1));
+        assert!(!drain.is_empty(), "a held record read as nothing to do");
+
+        for seq in 3..=6 {
+            let _ = numbered(&mut outbox, Class::Lossy, seq);
+        }
+        assert_eq!(drained(&mut drain), [2, 5, 6]);
+    }
+
+    /// A full `LIFECYCLE` ring refuses the newest record and keeps what it
+    /// holds, where the other two evict their oldest.
+    #[test]
+    fn the_lifecycle_ring_refuses_and_never_evicts() {
+        let (mut outbox, mut drain) = outbound(Capacities::each(2));
+        assert_eq!(numbered(&mut outbox, Class::Lifecycle, 1), Push::Stored);
+        assert_eq!(numbered(&mut outbox, Class::Lifecycle, 2), Push::Stored);
+        assert_eq!(
+            numbered(&mut outbox, Class::Lifecycle, 3),
+            Push::Refused(Numbered { seq: 3, record: 3 })
+        );
+
+        assert_eq!(drained(&mut drain), [1, 2]);
+    }
 }
 
 /// Loom drives the wake protocol over every interleaving of a committer and a
@@ -1495,7 +1683,7 @@ mod loom_tests {
 
         model.check(|| {
             let (writer, mut commit, connections) = Writer::spawn(2);
-            let (id, mut consumer) = connections.attach(2);
+            let (id, mut consumer) = connections.attach(Capacities::each(2));
             connections.authenticated(id, ALL);
 
             for value in 0..2u32 {
@@ -1550,7 +1738,7 @@ mod loom_tests {
             });
 
             let waker = Waker::new(flag, drainer.thread().clone());
-            let (id, consumer) = connections.attach_with(2, waker, None);
+            let (id, consumer) = connections.attach_with(Capacities::each(2), waker, None);
             connections.authenticated(id, ALL);
             hand.send(consumer).expect("the drainer is waiting");
 
@@ -1562,6 +1750,49 @@ mod loom_tests {
             assert_eq!(arrived, vec![1, 2], "records arrived out of order");
 
             drop(writer);
+        });
+    }
+
+    /// No schedule has the drain hand on `seq` 2 ahead of `seq` 1 when the
+    /// two are pushed into different rings, and none leaves either in its
+    /// ring with the drainer parked. The drain looks at the `LOSSY` ring
+    /// first and the `LIFECYCLE` ring last, so 1 goes into the first and 2
+    /// into the last: a drain that trusted one pass finds `LOSSY` empty,
+    /// both pushes land, and the same pass pops 2.
+    ///
+    /// The pushing side is the two rings' producer directly. The writer
+    /// thread's loop adds schedules and nothing to the claim, which is
+    /// about two pushes in `seq` order against one merge.
+    #[test]
+    fn the_drain_never_hands_on_a_record_ahead_of_a_lower_seq() {
+        let mut model = loom::model::Builder::new();
+        model.max_branches = 100_000;
+        model.preemption_bound = Some(3);
+
+        model.check(|| {
+            let (mut outbox, mut drain) = outbound::<u32>(Capacities::each(2));
+
+            let flag = Arc::new(ParkFlag::new());
+            let sleeping = Arc::clone(&flag);
+            let drainer = thread::spawn(move || {
+                let mut arrived = Vec::new();
+                while arrived.len() < 2 {
+                    match drain.pop() {
+                        Some(record) => arrived.push(record.seq),
+                        None => sleeping.park_unless(|| !drain.is_empty()),
+                    }
+                }
+                arrived
+            });
+            let waker = Waker::new(flag, drainer.thread().clone());
+
+            let _ = outbox.push(Class::Lossy, Numbered { seq: 1, record: 0 });
+            waker.wake_if_parked();
+            let _ = outbox.push(Class::Lifecycle, Numbered { seq: 2, record: 0 });
+            waker.wake_if_parked();
+
+            let arrived = drainer.join().expect("the drainer only pops");
+            assert_eq!(arrived, vec![1, 2], "the merge reordered two records");
         });
     }
 }

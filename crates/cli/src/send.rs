@@ -274,7 +274,7 @@ mod tests {
     /// on its deadline with nothing printed.
     #[test]
     fn a_record_sent_over_loopback_is_polled_from_its_ring_and_no_other() {
-        use dcsbridge_broker::fanout::{ConnectionId, Writer};
+        use dcsbridge_broker::fanout::{Capacities, ConnectionId, Writer};
         use dcsbridge_broker::registry::{Capability, Target};
         use dcsbridge_broker::state::Token;
         use dcsbridge_broker::transport::Listener;
@@ -313,7 +313,8 @@ mod tests {
 
         let (writer, commit, connections) = Writer::spawn(64);
         let answers = Arc::new(dcsbridge_broker::state::Global);
-        let listener = Listener::spawn("127.0.0.1:0", connections, 4, answers).unwrap();
+        let listener =
+            Listener::spawn("127.0.0.1:0", connections, Capacities::each(4), answers).unwrap();
 
         // A `Ping` behind the record, answered after it, is how the reader
         // is known to have got through the record before the ring is read.

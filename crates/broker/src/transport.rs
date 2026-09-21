@@ -31,7 +31,7 @@ use std::thread;
 
 use crate::encode::{varint_len, write_varint};
 use crate::fanout::{
-    ConnectionId, Connections, Drain, LOOKS_BEFORE_PARK, Numbered, ParkFlag, Waker,
+    Capacities, ConnectionId, Connections, Drain, LOOKS_BEFORE_PARK, Numbered, ParkFlag, Waker,
 };
 use crate::inbound::{self, Answers};
 
@@ -69,9 +69,9 @@ struct Open {
 impl Listener {
     /// Bind `addr` and start accepting.
     ///
-    /// Each connection accepted is attached to `connections` with a ring of
-    /// `ring_capacity` records, sent the handshake `answers` gives as its
-    /// first record, and given two threads: one to drain the ring and one
+    /// Each connection accepted is attached to `connections` with a ring per
+    /// class sized by `capacities`, sent the handshake `answers` gives as its
+    /// first record, and given two threads: one to drain the rings and one
     /// to read the socket, which answers through `answers`. The handshake is
     /// asked for per connection, on the listener thread, because what it
     /// carries can change between two accepts: the schema hash arrives after
@@ -80,11 +80,11 @@ impl Listener {
     ///
     /// # Panics
     ///
-    /// If `ring_capacity` is zero, or if a thread cannot be spawned.
+    /// If a capacity is zero, or if a thread cannot be spawned.
     pub fn spawn(
         addr: impl ToSocketAddrs,
         connections: Connections<Record>,
-        ring_capacity: usize,
+        capacities: Capacities,
         answers: Arc<dyn Answers>,
     ) -> io::Result<Self> {
         let listener = TcpListener::bind(addr)?;
@@ -98,7 +98,7 @@ impl Listener {
             thread::Builder::new()
                 .name("dcsbridge-listener".into())
                 .spawn(move || {
-                    accept_loop(listener, connections, ring_capacity, answers, stop, open);
+                    accept_loop(listener, connections, capacities, answers, stop, open);
                 })
                 .expect("the listener thread spawns")
         };
@@ -147,7 +147,7 @@ impl Drop for Listener {
 fn accept_loop(
     listener: TcpListener,
     connections: Connections<Record>,
-    ring_capacity: usize,
+    capacities: Capacities,
     answers: Arc<dyn Answers>,
     stop: Arc<AtomicBool>,
     open: Arc<Mutex<Vec<Open>>>,
@@ -213,7 +213,7 @@ fn accept_loop(
         // The handshake rides the attach, so the writer thread numbers it 1
         // as it attaches the ring and nothing fanned out can come first.
         let attached: (ConnectionId, Drain<Record>) =
-            connections.attach_with(ring_capacity, waker, Some(answers.handshake()));
+            connections.attach_with(capacities, waker, Some(answers.handshake()));
         let id = attached.0;
 
         // The reader: a second thread on the same socket, because a read
@@ -526,7 +526,13 @@ mod tests {
     }
 
     fn listener(connections: crate::fanout::Connections<Record>) -> Listener {
-        Listener::spawn("127.0.0.1:0", connections, 64, Arc::new(Stub)).unwrap()
+        Listener::spawn(
+            "127.0.0.1:0",
+            connections,
+            Capacities::each(64),
+            Arc::new(Stub),
+        )
+        .unwrap()
     }
 
     /// `dcsbridge.broker.AuthResult` as a consumer decodes it.
@@ -908,7 +914,13 @@ mod tests {
         };
 
         let (writer, commit, connections) = Writer::spawn(64);
-        let listener = Listener::spawn("127.0.0.1:0", connections, 64, switch(true)).unwrap();
+        let listener = Listener::spawn(
+            "127.0.0.1:0",
+            connections,
+            Capacities::each(64),
+            switch(true),
+        )
+        .unwrap();
 
         for early in [topic::GET_SCHEMA, topic::SEQ_ACK, topic::SET_ENABLED] {
             let mut offender = client(listener.local_addr());
@@ -960,7 +972,13 @@ mod tests {
         // have to turn it off to show.
         enabled.store(true, Ordering::SeqCst);
         let (writer, _commit, connections) = Writer::spawn(64);
-        let listener = Listener::spawn("127.0.0.1:0", connections, 64, switch(false)).unwrap();
+        let listener = Listener::spawn(
+            "127.0.0.1:0",
+            connections,
+            Capacities::each(64),
+            switch(false),
+        )
+        .unwrap();
         let mut reader = client(listener.local_addr());
         read_handshake(&mut reader);
         assert!(authenticate(&mut reader, SECRET).1.ok);
@@ -1048,7 +1066,13 @@ mod tests {
         };
 
         let (writer, commit, connections) = Writer::spawn(64);
-        let listener = Listener::spawn("127.0.0.1:0", connections, 64, Arc::new(held)).unwrap();
+        let listener = Listener::spawn(
+            "127.0.0.1:0",
+            connections,
+            Capacities::each(64),
+            Arc::new(held),
+        )
+        .unwrap();
 
         let mut scanner = client(listener.local_addr());
         let greeting = read_handshake(&mut scanner);
@@ -1258,7 +1282,13 @@ mod tests {
             fn set_enabled(&self, _: bool) {}
         }
         let (writer, _commit, connections) = Writer::spawn(64);
-        let listener = Listener::spawn("127.0.0.1:0", connections, 64, Arc::new(Quick)).unwrap();
+        let listener = Listener::spawn(
+            "127.0.0.1:0",
+            connections,
+            Capacities::each(64),
+            Arc::new(Quick),
+        )
+        .unwrap();
         let mut trickling = client(listener.local_addr());
         read_handshake(&mut trickling);
 
@@ -1326,7 +1356,7 @@ mod tests {
         let listener = Listener::spawn(
             "127.0.0.1:0",
             connections,
-            64,
+            Capacities::each(64),
             Arc::new(Counting {
                 opened: Arc::clone(&opened),
                 closed: Arc::clone(&closed),
@@ -1470,7 +1500,8 @@ mod tests {
             acked: Arc::new(AtomicU64::new(0)),
             refused: Arc::new(AtomicU64::new(0)),
         });
-        let listener = Listener::spawn("127.0.0.1:0", connections, 64, read_only).unwrap();
+        let listener =
+            Listener::spawn("127.0.0.1:0", connections, Capacities::each(64), read_only).unwrap();
 
         let mut client = client(listener.local_addr());
         let first = first_frame(&mut commit, &mut client);
@@ -1557,7 +1588,13 @@ mod tests {
         };
 
         let (writer, _commit, connections) = Writer::spawn(64);
-        let listener = Listener::spawn("127.0.0.1:0", connections, 64, switch(false)).unwrap();
+        let listener = Listener::spawn(
+            "127.0.0.1:0",
+            connections,
+            Capacities::each(64),
+            switch(false),
+        )
+        .unwrap();
         let mut reader = client(listener.local_addr());
         read_handshake(&mut reader);
         assert!(authenticate(&mut reader, SECRET).1.ok);
@@ -1571,7 +1608,13 @@ mod tests {
         drop(writer);
 
         let (writer, _commit, connections) = Writer::spawn(64);
-        let listener = Listener::spawn("127.0.0.1:0", connections, 64, switch(true)).unwrap();
+        let listener = Listener::spawn(
+            "127.0.0.1:0",
+            connections,
+            Capacities::each(64),
+            switch(true),
+        )
+        .unwrap();
         let mut commander = client(listener.local_addr());
         read_handshake(&mut commander);
         assert!(authenticate(&mut commander, SECRET).1.ok);
@@ -1618,7 +1661,13 @@ mod tests {
             fn set_enabled(&self, _: bool) {}
         }
         let (writer, _commit, connections) = Writer::spawn(64);
-        let listener = Listener::spawn("127.0.0.1:0", connections, 64, Arc::new(Quick)).unwrap();
+        let listener = Listener::spawn(
+            "127.0.0.1:0",
+            connections,
+            Capacities::each(64),
+            Arc::new(Quick),
+        )
+        .unwrap();
 
         let mut silent = client(listener.local_addr());
         let mut pinging = client(listener.local_addr());
@@ -1681,7 +1730,7 @@ mod tests {
         let listener = Listener::spawn(
             "127.0.0.1:0",
             connections,
-            64,
+            Capacities::each(64),
             Arc::new(Live(Arc::clone(&limits))),
         )
         .unwrap();
@@ -1787,7 +1836,8 @@ mod tests {
         });
         let (writer, _commit, connections) = Writer::spawn(64);
         let answers: Arc<dyn Answers> = routed.clone();
-        let listener = Listener::spawn("127.0.0.1:0", connections, 64, answers).unwrap();
+        let listener =
+            Listener::spawn("127.0.0.1:0", connections, Capacities::each(64), answers).unwrap();
 
         // Two senders, so the id polled is shown to be the sender's rather
         // than the only one there is.
@@ -1931,7 +1981,8 @@ mod tests {
             });
             let (writer, _commit, connections) = Writer::spawn(64);
             let answers: Arc<dyn Answers> = refusing.clone();
-            let listener = Listener::spawn("127.0.0.1:0", connections, 64, answers).unwrap();
+            let listener =
+                Listener::spawn("127.0.0.1:0", connections, Capacities::each(64), answers).unwrap();
             let mut sender = client(listener.local_addr());
             read_handshake(&mut sender);
             assert!(authenticate(&mut sender, SECRET).1.ok);
@@ -2032,7 +2083,8 @@ mod tests {
         });
         let (writer, _commit, connections) = Writer::spawn(64);
         let answers: Arc<dyn Answers> = limited.clone();
-        let listener = Listener::spawn("127.0.0.1:0", connections, 64, answers).unwrap();
+        let listener =
+            Listener::spawn("127.0.0.1:0", connections, Capacities::each(64), answers).unwrap();
         (limited, listener, writer)
     }
 

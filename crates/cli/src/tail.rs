@@ -128,7 +128,7 @@ mod tests {
     use super::*;
     use crate::wire::{self, Auth, AuthResult, Rejected, auth_frame};
     use dcsbridge_broker::encode::Encoder;
-    use dcsbridge_broker::fanout::{Class, Commit, Writer};
+    use dcsbridge_broker::fanout::{Capacities, Class, Commit, Writer};
     use dcsbridge_broker::transport::{Listener, Record};
     use prost::Message;
     use std::net::{SocketAddr, TcpStream};
@@ -421,7 +421,8 @@ mod tests {
     fn a_stalled_consumer_sees_its_evictions_as_a_gap() {
         let (writer, mut commit, connections) = Writer::spawn(4096);
         let answers = Arc::new(dcsbridge_broker::state::Global);
-        let listener = Listener::spawn("127.0.0.1:0", connections, 4, answers).unwrap();
+        let listener =
+            Listener::spawn("127.0.0.1:0", connections, Capacities::each(4), answers).unwrap();
         let mut client = client(listener.local_addr());
         // The handshake and the auth result, kept so `tail` reads the
         // stream from seq 1; nothing fans out to the connection before the
@@ -477,7 +478,8 @@ mod tests {
     fn a_filtered_consumer_sees_no_gap() {
         let (writer, mut commit, connections) = Writer::spawn(4096);
         let answers = Arc::new(dcsbridge_broker::state::Global);
-        let listener = Listener::spawn("127.0.0.1:0", connections, 64, answers).unwrap();
+        let listener =
+            Listener::spawn("127.0.0.1:0", connections, Capacities::each(64), answers).unwrap();
         let mut client = client(listener.local_addr());
         let mut bytes = take_frame(&mut client);
         bytes.extend(take_frame(&mut client));

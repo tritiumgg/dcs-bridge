@@ -64,7 +64,7 @@ pub fn run(mut reader: impl Read, mut out: impl Write) -> io::Result<Option<Pong
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dcsbridge_broker::fanout::Writer;
+    use dcsbridge_broker::fanout::{Capacities, Writer};
     use dcsbridge_broker::transport::Listener;
     use std::net::TcpStream;
     use std::sync::Arc;
@@ -145,7 +145,8 @@ mod tests {
     fn a_live_bridge_answers_without_a_token_or_a_heartbeat() {
         let (writer, commit, connections) = Writer::spawn(64);
         let answers = Arc::new(dcsbridge_broker::state::Global);
-        let listener = Listener::spawn("127.0.0.1:0", connections, 4, answers).unwrap();
+        let listener =
+            Listener::spawn("127.0.0.1:0", connections, Capacities::each(4), answers).unwrap();
         let mut client = TcpStream::connect(listener.local_addr()).expect("the listener accepts");
         client
             .set_read_timeout(Some(Duration::from_secs(30)))

@@ -30,7 +30,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use dcsbridge_broker::fanout::{Capabilities, Class, Writer};
+use dcsbridge_broker::fanout::{Capabilities, Capacities, Class, Writer};
 use dcsbridge_broker::ring::{Push, Ring};
 
 /// The record. Small and owned, so nothing about it is shared across threads.
@@ -210,7 +210,7 @@ fn measure(consumers: usize, commit_capacity: usize, regime: Regime) -> Row {
 
     let drainers: Vec<_> = (0..consumers)
         .map(|_| {
-            let (id, mut consumer) = connections.attach(CONNECTION_CAPACITY);
+            let (id, mut consumer) = connections.attach(Capacities::each(CONNECTION_CAPACITY));
             connections.authenticated(id, Capabilities::NONE.with(READ));
             let stop = Arc::clone(&stop);
             thread::spawn(move || {

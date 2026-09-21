@@ -226,7 +226,7 @@ mod tests {
     /// thread.
     #[test]
     fn a_live_bridge_serves_the_set_it_holds_to_a_session() {
-        use dcsbridge_broker::fanout::Writer;
+        use dcsbridge_broker::fanout::{Capacities, Writer};
         use dcsbridge_broker::inbound::{Answers, AuthError, Liveness, Session};
         use dcsbridge_broker::transport::{Listener, Record};
         use std::io::Write;
@@ -287,7 +287,8 @@ mod tests {
         });
 
         let (writer, commit, connections) = Writer::spawn(64);
-        let listener = Listener::spawn("127.0.0.1:0", connections, 4, held).unwrap();
+        let listener =
+            Listener::spawn("127.0.0.1:0", connections, Capacities::each(4), held).unwrap();
         let connect = |secret: &str| {
             let mut client =
                 TcpStream::connect(listener.local_addr()).expect("the listener accepts");
