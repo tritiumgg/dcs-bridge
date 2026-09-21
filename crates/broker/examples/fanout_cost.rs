@@ -30,7 +30,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use dcsbridge_broker::fanout::{Capabilities, Writer};
+use dcsbridge_broker::fanout::{Capabilities, Class, Writer};
 use dcsbridge_broker::ring::{Push, Ring};
 
 /// The record. Small and owned, so nothing about it is shared across threads.
@@ -232,7 +232,7 @@ fn measure(consumers: usize, commit_capacity: usize, regime: Regime) -> Row {
         })
         .collect();
 
-    let row = time_pushes(regime, |record| commit.push(READ, record));
+    let row = time_pushes(regime, |record| commit.push(READ, Class::Durable, record));
 
     drop(writer);
     stop.store(true, Ordering::Release);

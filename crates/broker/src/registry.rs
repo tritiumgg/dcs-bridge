@@ -15,6 +15,8 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 
+use crate::fanout::Class;
+
 /// A topic: the fully-qualified protobuf type name of a record's payload.
 ///
 /// Package names partition the topic space, so the name is the identity and
@@ -80,6 +82,22 @@ impl Member for RecordClass {
 
     fn number(self) -> u32 {
         self as u32
+    }
+}
+
+impl RecordClass {
+    /// The ring a record of this class takes outbound.
+    ///
+    /// `Command` is an inbound class, and a topic registered under it may
+    /// still be committed outbound. Such a record is not to be lost
+    /// silently and marks no boundary, so it goes with `Durable`. This is
+    /// the one place that says so. ADR 0028.
+    pub const fn outbound(self) -> Class {
+        match self {
+            Self::Lossy => Class::Lossy,
+            Self::Durable | Self::Command => Class::Durable,
+            Self::Lifecycle => Class::Lifecycle,
+        }
     }
 }
 
@@ -292,24 +310,23 @@ impl Registry {
         self.required(topic).is_some()
     }
 
-    /// The capability a connection needs to receive a record on `topic`, or
-    /// `None` when the topic is incomplete by [`is_complete`](Self::is_complete)'s
-    /// rule.
+    /// The capability a connection needs to receive a record on `topic` and
+    /// the ring the record takes on its way there, or `None` when the topic
+    /// is incomplete by [`is_complete`](Self::is_complete)'s rule.
     ///
     /// Looked up once, when the record is opened, and carried with it to
     /// fan-out: the writer thread holds no registry. The acknowledgement
     /// answers `command`, so that is what covers it; it is addressed to the
     /// one connection that sent the command, and an addressed record is
-    /// never filtered, so the value is not consulted on that path.
-    pub fn required(&self, topic: &[u8]) -> Option<Capability> {
+    /// never filtered, so the value is not consulted on that path. It is
+    /// `DURABLE` in the schema. ADR 0028.
+    pub fn required(&self, topic: &[u8]) -> Option<(Capability, Class)> {
         if topic == dcsbridge_topic::COMMAND_ACK.as_bytes() {
-            return Some(Capability::Command);
+            return Some((Capability::Command, Class::Durable));
         }
         let topic = std::str::from_utf8(topic).ok()?;
-        if !self.classes.contains_key(topic) {
-            return None;
-        }
-        self.caps.get(topic).copied()
+        let class = self.classes.get(topic)?.outbound();
+        Some((self.caps.get(topic).copied()?, class))
     }
 }
 
@@ -446,7 +463,10 @@ mod tests {
             .expect("routes");
 
         assert!(registry.is_complete(EVENT.as_bytes()));
-        assert_eq!(registry.required(EVENT.as_bytes()), Some(Capability::Read));
+        assert_eq!(
+            registry.required(EVENT.as_bytes()),
+            Some((Capability::Read, Class::Durable))
+        );
         assert!(
             !registry.is_complete(COMMAND.as_bytes()),
             "a class and a route made a topic complete without a capability"
@@ -460,6 +480,41 @@ mod tests {
             .register_caps(rows(&[(EVENT, Capability::Read)]))
             .expect("caps");
         assert_eq!(classless.required(EVENT.as_bytes()), None);
+    }
+
+    /// Each class names its own ring, and a command-class topic committed
+    /// outbound takes the durable one.
+    #[test]
+    fn a_topic_takes_the_ring_of_its_class_and_a_command_the_durable_one() {
+        const GAUGE: &str = "dcsbridge.builtin.sim.Gauge";
+        const EDGE: &str = "dcsbridge.builtin.hook.Edge";
+        let all = [
+            (GAUGE, RecordClass::Lossy, Class::Lossy),
+            (EVENT, RecordClass::Durable, Class::Durable),
+            (EDGE, RecordClass::Lifecycle, Class::Lifecycle),
+            (COMMAND, RecordClass::Command, Class::Durable),
+        ];
+        let mut registry = Registry::default();
+        for (topic, class, _) in all {
+            registry
+                .register_classes(rows(&[(topic, class)]))
+                .expect("classes");
+            registry
+                .register_caps(rows(&[(topic, Capability::Read)]))
+                .expect("caps");
+        }
+
+        for (topic, _, ring) in all {
+            assert_eq!(
+                registry.required(topic.as_bytes()),
+                Some((Capability::Read, ring)),
+                "{topic}"
+            );
+        }
+        assert_eq!(
+            registry.required(dcsbridge_topic::COMMAND_ACK.as_bytes()),
+            Some((Capability::Command, Class::Durable))
+        );
     }
 
     /// The acknowledgement is complete and addressable with nothing

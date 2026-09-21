@@ -112,6 +112,23 @@ impl Capabilities {
     }
 }
 
+/// Which of a connection's rings a record belongs in, and so what it may
+/// evict and what may evict it.
+///
+/// Three members and not the schema's four, because this is the outbound
+/// path: whatever has no outbound class of its own is `Durable` here. The
+/// type lives in this module for the reason [`Capabilities`] does: it is
+/// built under Loom, where the registry's types are not. ADR 0028.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Class {
+    /// Discarded freely under pressure, oldest first.
+    Lossy,
+    /// Evicted only by another `Durable` record.
+    Durable,
+    /// Never evicted. A connection with no room for one is closed.
+    Lifecycle,
+}
+
 /// A record as the commit ring carries it: for every connection, or for one.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Addressed<T> {
@@ -121,6 +138,8 @@ pub struct Addressed<T> {
     /// record. Consulted at fan-out and never for an addressed record: the
     /// one connection it names sent the command it answers.
     pub need: u32,
+    /// The ring the record takes in each connection it reaches.
+    pub class: Class,
     /// The record itself.
     pub record: T,
 }
@@ -288,8 +307,8 @@ impl<T> Commit<T> {
     /// logic thread that is a deallocation per lost record under pressure;
     /// ADR 0011 accepts that until the record type is fixed and its drop cost
     /// is known.
-    pub fn push(&mut self, need: u32, value: T) -> Push<T> {
-        self.push_addressed(None, need, value)
+    pub fn push(&mut self, need: u32, class: Class, value: T) -> Push<T> {
+        self.push_addressed(None, need, class, value)
     }
 
     /// Commit a record for one connection and no other.
@@ -298,15 +317,26 @@ impl<T> Commit<T> {
     /// thread is the one that knows, and it drops and counts a record whose
     /// connection is gone. Nothing here looks the connection up, so the call
     /// costs the logic thread what `push` does.
-    pub fn push_to(&mut self, to: ConnectionId, value: T) -> Push<T> {
+    pub fn push_to(&mut self, to: ConnectionId, class: Class, value: T) -> Push<T> {
         // An addressed record is not filtered, so it needs nothing.
-        self.push_addressed(Some(to), 0, value)
+        self.push_addressed(Some(to), 0, class, value)
     }
 
     /// Push with an address, and hand back what the ring turned away as the
     /// record alone: where it was going is nobody's concern once it is lost.
-    fn push_addressed(&mut self, to: Option<ConnectionId>, need: u32, record: T) -> Push<T> {
-        let pushed = match self.producer.push(Addressed { to, need, record }) {
+    fn push_addressed(
+        &mut self,
+        to: Option<ConnectionId>,
+        need: u32,
+        class: Class,
+        record: T,
+    ) -> Push<T> {
+        let pushed = match self.producer.push(Addressed {
+            to,
+            need,
+            class,
+            record,
+        }) {
             Push::Stored => Push::Stored,
             Push::Evicted(lost) => Push::Evicted(lost.record),
             Push::Refused(lost) => Push::Refused(lost.record),
@@ -593,6 +623,8 @@ impl<T: Clone + Send + 'static> Writer<T> {
                             Addressed {
                                 to: Some(id),
                                 need: 0,
+                                // A broker answer is durable. ADR 0028.
+                                class: Class::Durable,
                                 record,
                             },
                             unaddressed,
@@ -742,7 +774,9 @@ fn fan_out<T: Clone>(
     unaddressed: &AtomicU64,
     filtered: &AtomicU64,
 ) {
-    let Addressed { to, need, record } = addressed;
+    let Addressed {
+        to, need, record, ..
+    } = addressed;
 
     if let Some(to) = to {
         match connections.iter_mut().find(|held| held.id == to) {
@@ -870,7 +904,7 @@ mod tests {
 
         for value in 0..pushes {
             assert_eq!(
-                commit.push(READ, value),
+                commit.push(READ, Class::Durable, value),
                 Push::Stored,
                 "{value} found no room"
             );
@@ -897,7 +931,7 @@ mod tests {
         let (_, mut reading) = attached(&connections, ROOMY);
 
         for value in 0..10u32 {
-            commit.push(READ, value);
+            commit.push(READ, Class::Durable, value);
         }
 
         let arrived = drain_numbered(&mut reading, 10);
@@ -947,7 +981,7 @@ mod tests {
         let (first_id, mut first) = attached(&connections, ROOMY);
 
         for value in 0..5u32 {
-            commit.push(READ, value);
+            commit.push(READ, Class::Durable, value);
         }
         assert_eq!(drain_until(&mut first, 5), (0..5).collect::<Vec<_>>());
 
@@ -958,7 +992,7 @@ mod tests {
         );
 
         for value in 5..10u32 {
-            commit.push(READ, value);
+            commit.push(READ, Class::Durable, value);
         }
         let on_first = drain_numbered(&mut first, 5);
         let on_second = drain_numbered(&mut second, 5);
@@ -978,7 +1012,7 @@ mod tests {
 
         connections.detach(second_id);
         for value in 10..15u32 {
-            commit.push(READ, value);
+            commit.push(READ, Class::Durable, value);
         }
         assert_eq!(drain_until(&mut first, 5), (10..15).collect::<Vec<_>>());
 
@@ -1012,10 +1046,10 @@ mod tests {
         let (first_id, mut first) = attached(&connections, ROOMY);
         let (_, mut second) = attached(&connections, ROOMY);
 
-        commit.push(READ, 0u32);
-        commit.push_to(first_id, 1);
-        commit.push_to(first_id, 2);
-        commit.push(READ, 3);
+        commit.push(READ, Class::Durable, 0u32);
+        commit.push_to(first_id, Class::Durable, 1);
+        commit.push_to(first_id, Class::Durable, 2);
+        commit.push(READ, Class::Durable, 3);
 
         let on_first = drain_numbered(&mut first, 4);
         let on_second = drain_numbered(&mut second, 2);
@@ -1074,7 +1108,7 @@ mod tests {
                 let mut n = 1_000_000u32;
                 while !stop.load(Ordering::Relaxed) {
                     for _ in 0..16 {
-                        commit.push(READ, n);
+                        commit.push(READ, Class::Durable, n);
                         n = n.wrapping_add(1);
                     }
                     thread::sleep(Duration::from_micros(100));
@@ -1112,7 +1146,7 @@ mod tests {
         let (pending_id, mut pending) = connections.attach(ROOMY);
         let (_, mut trusted) = attached(&connections, ROOMY);
 
-        commit.push(READ, 0u32);
+        commit.push(READ, Class::Durable, 0u32);
         connections.answer(pending_id, 1);
         assert_eq!(
             drain_numbered(&mut pending, 1),
@@ -1126,7 +1160,7 @@ mod tests {
 
         connections.authenticated(pending_id, ALL);
         connections.settle();
-        commit.push(READ, 2);
+        commit.push(READ, Class::Durable, 2);
         assert_eq!(
             drain_numbered(&mut pending, 1),
             vec![Numbered { seq: 2, record: 2 }],
@@ -1160,8 +1194,8 @@ mod tests {
         // Each step is drained before the next, because an answer crosses
         // the control channel and a record the ring, and the writer thread
         // orders the two only within a pass.
-        commit.push(READ, 0u32);
-        commit.push(COMMAND, 1);
+        commit.push(READ, Class::Durable, 0u32);
+        commit.push(COMMAND, Class::Durable, 1);
         assert_eq!(
             drain_numbered(&mut reader, 1),
             vec![Numbered { seq: 1, record: 0 }]
@@ -1172,7 +1206,7 @@ mod tests {
             vec![Numbered { seq: 2, record: 2 }],
             "the read-only connection saw the command record, or a gap"
         );
-        commit.push(READ, 3);
+        commit.push(READ, Class::Durable, 3);
         assert_eq!(
             drain_numbered(&mut reader, 1),
             vec![Numbered { seq: 3, record: 3 }],
@@ -1208,8 +1242,8 @@ mod tests {
         connections.authenticated(id, Capabilities::NONE);
         connections.settle();
 
-        commit.push(READ, 0u32);
-        commit.push_to(id, 1);
+        commit.push(READ, Class::Durable, 0u32);
+        commit.push_to(id, Class::Durable, 1);
         assert_eq!(
             drain_numbered(&mut consumer, 1),
             vec![Numbered { seq: 1, record: 1 }],
@@ -1248,7 +1282,7 @@ mod tests {
         let (first_id, mut first) = attached(&connections, ROOMY);
         let (_, mut second) = attached(&connections, ROOMY);
 
-        commit.push(READ, 0u32);
+        commit.push(READ, Class::Durable, 0u32);
         assert_eq!(
             drain_numbered(&mut second, 1),
             vec![Numbered { seq: 1, record: 0 }]
@@ -1265,7 +1299,7 @@ mod tests {
             "the answer did not follow the record before it"
         );
 
-        commit.push(READ, 2);
+        commit.push(READ, Class::Durable, 2);
         assert_eq!(
             drain_numbered(&mut first, 1),
             vec![Numbered { seq: 3, record: 2 }],
@@ -1297,9 +1331,9 @@ mod tests {
         connections.settle();
         drop(gone);
 
-        commit.push_to(gone_id, 0u32);
-        commit.push_to(ConnectionId::from_raw(u64::MAX), 1);
-        commit.push(READ, 2);
+        commit.push_to(gone_id, Class::Durable, 0u32);
+        commit.push_to(ConnectionId::from_raw(u64::MAX), Class::Durable, 1);
+        commit.push(READ, Class::Durable, 2);
 
         assert_eq!(
             drain_numbered(&mut staying, 1),
@@ -1337,7 +1371,7 @@ mod tests {
         let (writer, mut commit, _connections) = Writer::<Counted>::spawn(ROOMY);
 
         for _ in 0..5 {
-            commit.push(READ, Counted(Arc::clone(&drops)));
+            commit.push(READ, Class::Durable, Counted(Arc::clone(&drops)));
         }
         wait_for(
             || drops.load(Ordering::Relaxed) == 5,
@@ -1355,7 +1389,7 @@ mod tests {
         let (_, mut consumer) = attached(&connections, ROOMY);
 
         for value in 0..3u32 {
-            commit.push(READ, value);
+            commit.push(READ, Class::Durable, value);
         }
         assert_eq!(drain_until(&mut consumer, 3), vec![0, 1, 2]);
 
@@ -1367,7 +1401,7 @@ mod tests {
             "a record arrived after the writer stopped"
         );
         assert_eq!(
-            commit.push(READ, 3),
+            commit.push(READ, Class::Durable, 3),
             Push::Stored,
             "a commit after the writer stopped was refused"
         );
@@ -1416,7 +1450,7 @@ mod loom_tests {
             connections.authenticated(id, ALL);
 
             for value in 0..2u32 {
-                commit.push(READ, value);
+                commit.push(READ, Class::Durable, value);
             }
 
             let mut arrived = Vec::new();
@@ -1472,7 +1506,7 @@ mod loom_tests {
             hand.send(consumer).expect("the drainer is waiting");
 
             for value in 0..2u32 {
-                commit.push(READ, value);
+                commit.push(READ, Class::Durable, value);
             }
 
             let arrived = drainer.join().expect("the drainer only pops");

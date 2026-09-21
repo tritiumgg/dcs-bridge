@@ -32,7 +32,7 @@ use std::time::Instant;
 
 use crate::config::{self, Applied, Config, Value};
 use crate::encode::Stamp;
-use crate::fanout::{Commit, ConnectionId, Writer};
+use crate::fanout::{Class, Commit, ConnectionId, Writer};
 use crate::handshake;
 use crate::inbound::{
     Answers, AuthError, Command, Delivery, Limits, Liveness, RejectedReason, Session, Window,
@@ -1056,18 +1056,19 @@ impl Bridge {
     }
 
     /// Queue an envelope tail for every connection whose token covers
-    /// `need`, the capability its topic requires.
+    /// `need`, the capability its topic requires, into the ring `class`
+    /// names in each. Both come from [`Bridge::registered`].
     ///
     /// The tail is copied once, into the allocation the rings share by
     /// reference; that is the one allocation on the commit path. A record the
     /// commit ring evicts to make room comes back here and is dropped on the
     /// calling thread. ADR 0014.
-    pub fn commit(&self, need: Capability, tail: &[u8]) -> Result<(), CommitError> {
+    pub fn commit(&self, need: Capability, class: Class, tail: &[u8]) -> Result<(), CommitError> {
         let outbound = self.outbound.get().ok_or(CommitError::NotStarted)?;
         let record: Record = Arc::from(tail);
 
         let mut commit = outbound.producer()?;
-        drop(commit.push(need.number(), record));
+        drop(commit.push(need.number(), class, record));
         Ok(())
     }
 
@@ -1078,12 +1079,17 @@ impl Bridge {
     /// the writer thread is the one that knows, and it drops and counts a
     /// record whose connection has gone, which [`Outbound::unaddressed`]
     /// reports. So a record addressed to a closed connection returns `Ok`.
-    pub fn commit_to(&self, to: ConnectionId, tail: &[u8]) -> Result<(), CommitError> {
+    pub fn commit_to(
+        &self,
+        to: ConnectionId,
+        class: Class,
+        tail: &[u8],
+    ) -> Result<(), CommitError> {
         let outbound = self.outbound.get().ok_or(CommitError::NotStarted)?;
         let record: Record = Arc::from(tail);
 
         let mut commit = outbound.producer()?;
-        drop(commit.push_to(to, record));
+        drop(commit.push_to(to, class, record));
         Ok(())
     }
 
@@ -1136,16 +1142,17 @@ impl Bridge {
         self.misaddressed.load(Ordering::Relaxed)
     }
 
-    /// The capability `topic` requires, or `None` when it has no class or no
-    /// capability registered, counting a refusal in
-    /// `partial_registration_total`.
+    /// The capability `topic` requires and the ring its class names, or
+    /// `None` when it has no class or no capability registered, counting a
+    /// refusal in `partial_registration_total`.
     ///
     /// Asked at every `begin` and `begin_to`, and answered the way
     /// [`Bridge::addressable`] is: a plain value with no lock held, so the
-    /// raise the Lua side makes of `None` jumps past no guard. The value
+    /// raise the Lua side makes of `None` jumps past no guard. The pair
     /// travels with the record to [`Bridge::commit`], where the writer
-    /// thread withholds the record from a connection it does not cover.
-    pub fn registered(&self, topic: &[u8]) -> Option<Capability> {
+    /// thread withholds the record from a connection the capability does
+    /// not cover.
+    pub fn registered(&self, topic: &[u8]) -> Option<(Capability, Class)> {
         let required = self.registry().required(topic);
         if required.is_none() {
             self.partial_registration.fetch_add(1, Ordering::Relaxed);
@@ -1644,8 +1651,8 @@ mod tests {
             .expect("caps");
         assert_eq!(
             bridge.registered(EVENT.as_bytes()),
-            Some(Capability::Read),
-            "a registered topic did not name its capability"
+            Some((Capability::Read, Class::Durable)),
+            "a registered topic did not name its capability and its ring"
         );
         assert_eq!(
             bridge.partial_registration(),
@@ -1655,7 +1662,7 @@ mod tests {
 
         assert_eq!(
             bridge.registered(dcsbridge_topic::COMMAND_ACK.as_bytes()),
-            Some(Capability::Command)
+            Some((Capability::Command, Class::Durable))
         );
 
         assert!(!bridge.addressable(REPLY.as_bytes()));
@@ -1766,7 +1773,7 @@ mod tests {
         // now reaches the connection, numbered after it.
         let tail = [0x22, 0x00];
         bridge()
-            .commit(Capability::Read, &tail)
+            .commit(Capability::Read, Class::Durable, &tail)
             .expect("the path is started");
         client.read_exact(&mut length).expect("a frame arrives");
         assert_eq!(u32::from_le_bytes(length), 2 + tail.len() as u32);
@@ -1781,7 +1788,7 @@ mod tests {
         // and the writer thread is where it is dropped and counted. This is
         // the one addressed commit in the binary against the shared bridge.
         bridge()
-            .commit_to(ConnectionId::from_raw(u64::MAX), &tail)
+            .commit_to(ConnectionId::from_raw(u64::MAX), Class::Durable, &tail)
             .expect("an address is not checked at commit");
         let deadline = std::time::Instant::now() + Duration::from_secs(30);
         while bridge().outbound().unwrap().unaddressed() < 1 {
@@ -1822,7 +1829,7 @@ mod tests {
             e.begin(topic, bridge().stamp());
             e.integer(1, 1).unwrap();
             bridge()
-                .commit(Capability::Read, e.commit().unwrap())
+                .commit(Capability::Read, Class::Durable, e.commit().unwrap())
                 .expect("the path is started");
         };
 

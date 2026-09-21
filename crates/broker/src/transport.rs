@@ -347,7 +347,7 @@ fn write_all_vectored(stream: &mut TcpStream, first: &[u8], second: &[u8]) -> io
 mod tests {
     use super::*;
     use crate::encode::Encoder;
-    use crate::fanout::Writer;
+    use crate::fanout::{Class, Writer};
     use crate::inbound::{AuthError, RejectedReason, Session};
     use dcsbridge_topic::{self as topic, TYPE_URL_PREFIX};
     use prost::Message;
@@ -590,7 +590,7 @@ mod tests {
             .expect("a read timeout is set");
         loop {
             assert!(Instant::now() < deadline, "no frame arrived");
-            commit.push(READ, record(n));
+            commit.push(READ, Class::Durable, record(n));
             n += 1;
             let mut length = [0u8; 4];
             if stream_peek(client, &mut length) {
@@ -638,7 +638,7 @@ mod tests {
 
         let start = value(&first);
         for n in 1..=2 {
-            commit.push(READ, record(start + 100 + n));
+            commit.push(READ, Class::Durable, record(start + 100 + n));
         }
         // Whatever the warm-up committed after the first frame arrives before
         // these two; skip to them.
@@ -679,7 +679,7 @@ mod tests {
 
         drop(first);
         let last = value(&on_second);
-        commit.push(READ, record(last + 1000));
+        commit.push(READ, Class::Durable, record(last + 1000));
         loop {
             let frame = read_frame(&mut second);
             if value(&frame) == last + 1000 {
@@ -709,8 +709,8 @@ mod tests {
         let mut second = client(listener.local_addr());
         let on_second = first_frame(&mut commit, &mut second);
 
-        commit.push_to(ConnectionId::from_raw(1), record(7_001));
-        commit.push(READ, record(7_002));
+        commit.push_to(ConnectionId::from_raw(1), Class::Durable, record(7_001));
+        commit.push(READ, Class::Durable, record(7_002));
 
         // Whatever the warm-ups committed after each first frame arrives
         // before these; read through it, and every frame on the way numbers
@@ -1177,7 +1177,7 @@ mod tests {
             assert!(is_closed(&mut offender), "the offender was not closed");
         }
 
-        commit.push(READ, record(9_001));
+        commit.push(READ, Class::Durable, record(9_001));
         let frame = read_frame(&mut staying);
         assert_eq!(
             frame.seq,
@@ -1420,7 +1420,7 @@ mod tests {
 
         let mut pending = client(listener.local_addr());
         read_handshake(&mut pending);
-        commit.push(READ, record(1));
+        commit.push(READ, Class::Durable, record(1));
         pending
             .write_all(&inbound(1, topic::PING, &[]))
             .expect("the ping is sent");
@@ -1435,7 +1435,7 @@ mod tests {
         let (frame, result) = authenticate(&mut pending, SECRET);
         assert_eq!(frame.seq, 3);
         assert!(result.ok);
-        commit.push(READ, record(2));
+        commit.push(READ, Class::Durable, record(2));
         let frame = read_frame(&mut pending);
         assert_eq!(frame.seq, 4, "the first record did not follow the result");
         assert_eq!(value(&frame), 2);
@@ -1503,7 +1503,7 @@ mod tests {
 
         // The pong crosses the reader thread and the control channel, so
         // it is waited for before the next commit rather than raced.
-        commit.push(COMMAND, record(WITHHELD));
+        commit.push(COMMAND, Class::Durable, record(WITHHELD));
         client
             .write_all(&inbound(2, topic::PING, &[]))
             .expect("the ping is sent");
@@ -1511,7 +1511,7 @@ mod tests {
             frame.payload.as_ref().unwrap().type_url == type_url(topic::PONG)
         });
 
-        commit.push(READ, record(LAST));
+        commit.push(READ, Class::Durable, record(LAST));
         read_until(&mut client, &|frame| {
             frame.payload.as_ref().unwrap().type_url == type_url(TOPIC_STR) && value(frame) == LAST
         });

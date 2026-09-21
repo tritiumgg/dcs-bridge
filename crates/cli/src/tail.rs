@@ -128,7 +128,7 @@ mod tests {
     use super::*;
     use crate::wire::{self, Auth, AuthResult, Rejected, auth_frame};
     use dcsbridge_broker::encode::Encoder;
-    use dcsbridge_broker::fanout::{Commit, Writer};
+    use dcsbridge_broker::fanout::{Class, Commit, Writer};
     use dcsbridge_broker::transport::{Listener, Record};
     use prost::Message;
     use std::net::{SocketAddr, TcpStream};
@@ -378,7 +378,7 @@ mod tests {
         let mut length = [0u8; 4];
         loop {
             assert!(Instant::now() < deadline, "no frame arrived");
-            drop(commit.push(READ, record(1)));
+            drop(commit.push(READ, Class::Durable, record(1)));
             if matches!(client.peek(&mut length), Ok(4)) {
                 return;
             }
@@ -432,7 +432,7 @@ mod tests {
 
         let big = record(64 << 10);
         for _ in 0..512 {
-            drop(commit.push(READ, Arc::clone(&big)));
+            drop(commit.push(READ, Class::Durable, Arc::clone(&big)));
         }
 
         bytes.extend(drain(&mut client));
@@ -484,8 +484,8 @@ mod tests {
         warm_up(&mut commit, &client);
 
         for _ in 0..16 {
-            drop(commit.push(COMMAND, record_on(COMMAND_TOPIC, 16)));
-            drop(commit.push(READ, record(16)));
+            drop(commit.push(COMMAND, Class::Durable, record_on(COMMAND_TOPIC, 16)));
+            drop(commit.push(READ, Class::Durable, record(16)));
         }
 
         bytes.extend(drain(&mut client));
