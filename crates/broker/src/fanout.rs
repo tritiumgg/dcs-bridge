@@ -10,7 +10,7 @@
 //! producer is the logic thread, through [`Commit`], and its consumer is the
 //! writer thread. A connection's ring has the writer thread as its producer and
 //! the connection's own socket thread as its consumer, reached through the
-//! [`Consumer`] that [`Connections::attach`] hands back. A socket that stops
+//! [`Drain`] that [`Connections::attach`] hands back. A socket that stops
 //! taking bytes fills its own ring, which evicts and counts, and stalls nothing
 //! else. ADR 0011.
 //!
@@ -158,6 +158,58 @@ pub struct Numbered<T> {
     pub record: T,
 }
 
+/// The writer thread's end of one connection's outbound queue.
+///
+/// A type of its own so that what a connection's queue is made of is
+/// decided here and nowhere else: the writer thread pushes a numbered
+/// record with its class, and the connection's thread pops from the
+/// [`Drain`] made with it.
+struct Outbox<T> {
+    ring: Producer<Numbered<T>>,
+}
+
+impl<T> Outbox<T> {
+    /// Queue a numbered record, and hand back what the queue turned away.
+    fn push(&mut self, _class: Class, record: Numbered<T>) -> Push<Numbered<T>> {
+        self.ring.push(record)
+    }
+}
+
+/// The connection's end of its outbound queue: what its thread pops and
+/// writes to the socket, in `seq` order.
+pub struct Drain<T> {
+    ring: Consumer<Numbered<T>>,
+}
+
+impl<T> Drain<T> {
+    /// The next record in `seq` order, or `None` when nothing is queued.
+    pub fn pop(&mut self) -> Option<Numbered<T>> {
+        self.ring.pop()
+    }
+
+    /// Whether nothing is queued. What a draining thread asks before it
+    /// parks.
+    pub fn is_empty(&self) -> bool {
+        self.ring.is_empty()
+    }
+
+    /// How many records the queue has turned away.
+    pub fn dropped(&self) -> u64 {
+        self.ring.dropped()
+    }
+}
+
+/// An outbound queue of `capacity` records, as its two ends.
+///
+/// # Panics
+///
+/// If `capacity` is zero, for the reason [`Ring::split`] gives.
+fn outbound<T>(capacity: usize) -> (Outbox<T>, Drain<T>) {
+    let (producer, consumer) = Ring::split(capacity);
+
+    (Outbox { ring: producer }, Drain { ring: consumer })
+}
+
 /// What the attach side tells the writer thread.
 ///
 /// These cross a channel rather than a ring because none of them is sent from
@@ -168,12 +220,7 @@ enum Control<T> {
     /// and wake the thread draining it if it sleeps. The record carried,
     /// if any, is the connection's first: it rides the attach so nothing
     /// fanned out between two control messages can be numbered ahead of it.
-    Attach(
-        ConnectionId,
-        Producer<Numbered<T>>,
-        Option<Waker>,
-        Option<T>,
-    ),
+    Attach(ConnectionId, Outbox<T>, Option<Waker>, Option<T>),
     /// A connection is gone; drop its ring's producer.
     Detach(ConnectionId),
     /// The broker answers this connection: push the record into its ring,
@@ -400,7 +447,7 @@ impl<T> Connections<T> {
     /// # Panics
     ///
     /// If `capacity` is zero, for the reason [`Ring::split`] gives.
-    pub fn attach(&self, capacity: usize) -> (ConnectionId, Consumer<Numbered<T>>) {
+    pub fn attach(&self, capacity: usize) -> (ConnectionId, Drain<T>) {
         self.attach_inner(capacity, None, None)
     }
 
@@ -419,7 +466,7 @@ impl<T> Connections<T> {
         capacity: usize,
         waker: Waker,
         first: Option<T>,
-    ) -> (ConnectionId, Consumer<Numbered<T>>) {
+    ) -> (ConnectionId, Drain<T>) {
         self.attach_inner(capacity, Some(waker), first)
     }
 
@@ -428,12 +475,12 @@ impl<T> Connections<T> {
         capacity: usize,
         waker: Option<Waker>,
         first: Option<T>,
-    ) -> (ConnectionId, Consumer<Numbered<T>>) {
-        let (producer, consumer) = Ring::split(capacity);
+    ) -> (ConnectionId, Drain<T>) {
+        let (outbox, drain) = outbound(capacity);
         let id = ConnectionId(self.last_id.fetch_add(1, Ordering::Relaxed) + 1);
-        self.send(Control::Attach(id, producer, waker, first));
+        self.send(Control::Attach(id, outbox, waker, first));
 
-        (id, consumer)
+        (id, drain)
     }
 
     /// Remove a connection. Records already in its ring stay for its consumer
@@ -603,16 +650,18 @@ impl<T: Clone + Send + 'static> Writer<T> {
         loop {
             loop {
                 match inbox.try_recv() {
-                    Ok(Control::Attach(id, producer, waker, first)) => {
+                    Ok(Control::Attach(id, outbox, waker, first)) => {
                         let mut connection = Connection {
                             id,
-                            producer,
+                            outbox,
                             next_seq: 1,
                             waker,
                             caps: None,
                         };
                         if let Some(first) = first {
-                            connection.push(first);
+                            // The handshake is the broker's own record, and
+                            // durable as its answers are. ADR 0028.
+                            connection.push(Class::Durable, first);
                         }
                         connections.push(connection);
                     }
@@ -720,7 +769,7 @@ impl<T> Drop for Writer<T> {
 /// One connection, as the writer thread holds it.
 struct Connection<T> {
     id: ConnectionId,
-    producer: Producer<Numbered<T>>,
+    outbox: Outbox<T>,
     /// The `seq` the next record pushed here takes.
     next_seq: u64,
     /// The thread draining the ring, if it sleeps on it.
@@ -737,10 +786,10 @@ impl<T> Connection<T> {
     ///
     /// The number is taken before the push, so an evicted record leaves the
     /// gap that tells its consumer it was lost.
-    fn push(&mut self, record: T) {
+    fn push(&mut self, class: Class, record: T) {
         let seq = self.next_seq;
         self.next_seq += 1;
-        drop(self.producer.push(Numbered { seq, record }));
+        drop(self.outbox.push(class, Numbered { seq, record }));
         if let Some(waker) = &self.waker {
             waker.wake_if_parked();
         }
@@ -775,12 +824,15 @@ fn fan_out<T: Clone>(
     filtered: &AtomicU64,
 ) {
     let Addressed {
-        to, need, record, ..
+        to,
+        need,
+        class,
+        record,
     } = addressed;
 
     if let Some(to) = to {
         match connections.iter_mut().find(|held| held.id == to) {
-            Some(connection) => connection.push(record),
+            Some(connection) => connection.push(class, record),
             None => {
                 unaddressed.fetch_add(1, Ordering::Relaxed);
             }
@@ -804,10 +856,10 @@ fn fan_out<T: Clone>(
         return;
     };
     for connection in receiving {
-        previous.push(record.clone());
+        previous.push(class, record.clone());
         previous = connection;
     }
-    previous.push(record);
+    previous.push(class, record);
 }
 
 #[cfg(all(test, not(loom)))]
@@ -834,10 +886,7 @@ mod tests {
     /// committed while the attach is in flight may be fanned out before it,
     /// and a test that counts what arrives would then wait for records the
     /// connection was never sent.
-    fn attached<T>(
-        connections: &Connections<T>,
-        capacity: usize,
-    ) -> (ConnectionId, Consumer<Numbered<T>>) {
+    fn attached<T>(connections: &Connections<T>, capacity: usize) -> (ConnectionId, Drain<T>) {
         let (id, consumer) = connections.attach(capacity);
         connections.authenticated(id, ALL);
         connections.settle();
@@ -847,7 +896,7 @@ mod tests {
     /// Pop until `count` records have arrived, or fail after a while rather
     /// than hang the suite. The records alone, for the tests that are not
     /// about numbering.
-    fn drain_until<T>(consumer: &mut Consumer<Numbered<T>>, count: usize) -> Vec<T> {
+    fn drain_until<T>(consumer: &mut Drain<T>, count: usize) -> Vec<T> {
         drain_numbered(consumer, count)
             .into_iter()
             .map(|numbered| numbered.record)
@@ -855,7 +904,7 @@ mod tests {
     }
 
     /// Pop until `count` records have arrived, with their numbers.
-    fn drain_numbered<T>(consumer: &mut Consumer<Numbered<T>>, count: usize) -> Vec<Numbered<T>> {
+    fn drain_numbered<T>(consumer: &mut Drain<T>, count: usize) -> Vec<Numbered<T>> {
         let deadline = Instant::now() + Duration::from_secs(30);
         let mut arrived = Vec::with_capacity(count);
 
@@ -1487,7 +1536,7 @@ mod loom_tests {
 
             let flag = Arc::new(ParkFlag::new());
             let sleeping = Arc::clone(&flag);
-            let (hand, take) = mpsc::channel::<Consumer<Numbered<u32>>>();
+            let (hand, take) = mpsc::channel::<Drain<u32>>();
             let drainer = thread::spawn(move || {
                 let mut consumer = take.recv().expect("the consumer is handed over");
                 let mut arrived = Vec::new();

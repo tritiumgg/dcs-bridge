@@ -30,9 +30,10 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::thread;
 
 use crate::encode::{varint_len, write_varint};
-use crate::fanout::{ConnectionId, Connections, LOOKS_BEFORE_PARK, Numbered, ParkFlag, Waker};
+use crate::fanout::{
+    ConnectionId, Connections, Drain, LOOKS_BEFORE_PARK, Numbered, ParkFlag, Waker,
+};
 use crate::inbound::{self, Answers};
-use crate::ring::Consumer;
 
 /// A committed record as the rings carry it: the envelope tail, shared by
 /// every connection it is fanned out to.
@@ -211,7 +212,7 @@ fn accept_loop(
         let waker = Waker::new(Arc::clone(&flag), handle.thread().clone());
         // The handshake rides the attach, so the writer thread numbers it 1
         // as it attaches the ring and nothing fanned out can come first.
-        let attached: (ConnectionId, Consumer<Numbered<Record>>) =
+        let attached: (ConnectionId, Drain<Record>) =
             connections.attach_with(ring_capacity, waker, Some(answers.handshake()));
         let id = attached.0;
 
@@ -259,7 +260,7 @@ fn accept_loop(
 /// or the listener stops.
 fn serve(
     stream: &mut TcpStream,
-    mut consumer: Consumer<Numbered<Record>>,
+    mut consumer: Drain<Record>,
     flag: &ParkFlag,
     stop: &AtomicBool,
     closing: &AtomicBool,
