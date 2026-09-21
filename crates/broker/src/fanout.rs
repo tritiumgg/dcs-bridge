@@ -1466,6 +1466,80 @@ mod tests {
         drop(writer);
     }
 
+    /// Wait until the writer thread has fanned out everything committed and
+    /// taken every control message, so a connection nobody drains holds
+    /// what it is going to hold.
+    fn fanned<T>(commit: &Commit<T>, connections: &Connections<T>) {
+        wait_for(|| commit.is_empty(), "the commit ring to empty");
+        // The barrier is taken at the top of a pass, so it is answered
+        // after the fan-out of the last record popped has returned.
+        connections.settle();
+    }
+
+    /// A `LOSSY` flood at a connection nobody drains evicts `LOSSY` and
+    /// nothing else: the handshake, a `DURABLE` record, a boundary record
+    /// and a broker answer queued before it are all still there, in order,
+    /// and the gap in `seq` is exactly the flood's lost records.
+    #[test]
+    fn a_lossy_flood_evicts_no_durable_no_lifecycle_and_no_answer() {
+        const HANDSHAKE: u32 = 1000;
+        const PONG: u32 = 3000;
+        let (writer, mut commit, connections) = Writer::spawn(ROOMY);
+        let waker = Waker::new(Arc::new(ParkFlag::new()), thread::current());
+        let (id, mut stalled) =
+            connections.attach_with(Capacities::each(4), waker, Some(HANDSHAKE));
+        connections.authenticated(id, ALL);
+        connections.settle();
+
+        commit.push(READ, Class::Durable, 10);
+        commit.push(READ, Class::Lifecycle, 20);
+        fanned(&commit, &connections);
+        connections.answer(id, PONG);
+        connections.settle();
+        for value in 0..100 {
+            commit.push(READ, Class::Lossy, value);
+        }
+        commit.push(READ, Class::Lifecycle, 21);
+        fanned(&commit, &connections);
+
+        let kept = [(1, HANDSHAKE), (2, 10), (3, 20), (4, PONG)]
+            .into_iter()
+            .chain((101..=104).zip(96..100))
+            .chain([(105, 21)])
+            .map(|(seq, record)| Numbered { seq, record })
+            .collect::<Vec<_>>();
+        assert_eq!(drain_numbered(&mut stalled, kept.len()), kept);
+        assert_eq!(stalled.pop(), None);
+        assert_eq!(stalled.dropped(), 96, "something but the flood was lost");
+
+        drop(writer);
+    }
+
+    /// A `DURABLE` flood evicts `DURABLE`, oldest first, and leaves the
+    /// other two rings as they were.
+    #[test]
+    fn a_durable_flood_evicts_only_durable() {
+        let (writer, mut commit, connections) = Writer::spawn(ROOMY);
+        let (_, mut stalled) = attached(&connections, 4);
+
+        commit.push(READ, Class::Lossy, 100u32);
+        commit.push(READ, Class::Lifecycle, 200);
+        for value in 0..10 {
+            commit.push(READ, Class::Durable, value);
+        }
+        fanned(&commit, &connections);
+
+        let kept = [(1, 100), (2, 200)]
+            .into_iter()
+            .chain((9..=12).zip(6..10))
+            .map(|(seq, record)| Numbered { seq, record })
+            .collect::<Vec<_>>();
+        assert_eq!(drain_numbered(&mut stalled, kept.len()), kept);
+        assert_eq!(stalled.dropped(), 6);
+
+        drop(writer);
+    }
+
     /// A record addressed to a connection that has detached, or to a number
     /// never handed out, is dropped on the writer thread and counted, and
     /// reaches nobody else.
