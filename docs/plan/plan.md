@@ -52,8 +52,8 @@ states which hosts build what.
 
 | ID | Task | Done when |
 |---|---|---|
-| 1.1 | Cargo workspace with three crates — module, CLI, generator — each a stub that builds. Licence, README, `rustfmt` and `clippy` configuration. | `cargo build` succeeds on Linux, macOS and Windows. |
-| 1.2 | GitHub Actions: build, test, `rustfmt --check` and `clippy -D warnings` on all three hosts against host-native targets. | A pull request is gated on all three. |
+| 1.1 | Landed on `main` with no pull request of its own: Cargo workspace with three crates — module, CLI, generator — each a stub that builds. Licence, README, `rustfmt` and `clippy` configuration. | `cargo build` succeeds on Linux, macOS and Windows. |
+| 1.2 | Waits on the maintainer for the gate, which a private repository on GitHub Free cannot set; the jobs themselves run. GitHub Actions: build, test, `rustfmt --check` and `clippy -D warnings` on all three hosts against host-native targets. | A pull request is gated on all three. |
 | 1.3 | A checked-in `.def` naming `lua.dll` and the Lua symbols the broker uses, with the import library generated at build time (SPEC §5.1.1). | The broker stub links against DCS's Lua from a host with no DCS installed. |
 | 1.4 | Windows cross-build in CI: `x86_64-pc-windows-msvc` through `cargo-xwin`, the only Windows target (ADR 0003). The broker is never built with `panic = "abort"` (SPEC §14.2). | `lua-dcsbridge.dll` and `dcsb.exe` are produced from a Linux runner. |
 | 1.5 | Release workflow: tag-triggered, builds the write-directory zip, attaches the broker, the CLI and the zip, and publishes checksums. A prerelease channel carries development builds. | A tag produces a downloadable build with no manual step. |
