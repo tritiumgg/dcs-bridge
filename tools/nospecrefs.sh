@@ -30,9 +30,18 @@ cd "$ROOT"
 PATTERN='(SPEC|SIM|HOOK|PLAN)[[:space:]]*§?[[:space:]]*[0-9]|§[0-9]|Section[[:space:]]+[0-9]|[Dd]one-when|[Tt]ask [0-9]+\.[0-9]+'
 
 # git ls-files rather than find, so an untracked scratch file is not the thing
-# that fails somebody's build.
+# that fails somebody's build. --untracked adds the untracked files that are
+# not ignored, for the commit hook: it runs before a command that stages and
+# commits at once, when the new files that commit records are not tracked yet.
 # This script names the patterns it refuses, so it skips itself.
-FILES=$(git ls-files | grep -vE '^(docs/|README\.md$|STATE\.md$|CLAUDE\.md$|tools/nospecrefs\.sh$)')
+OTHERS=
+case ${1:-} in
+    '') ;;
+    --untracked) OTHERS=--others ;;
+    *) printf 'usage: nospecrefs.sh [--untracked]\n' >&2; exit 2 ;;
+esac
+FILES=$(git ls-files --cached $OTHERS --exclude-standard \
+    | sort -u | grep -vE '^(docs/|README\.md$|STATE\.md$|CLAUDE\.md$|tools/nospecrefs\.sh$)')
 [ -n "$FILES" ] || { printf 'no files to check. Is this a checkout?\n' >&2; exit 2; }
 
 # grep exits 1 when it matches nothing, which is the passing case here.

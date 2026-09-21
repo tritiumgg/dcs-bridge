@@ -208,7 +208,7 @@ calls, wired in `.claude/settings.json`. Each is POSIX `sh` with no `jq`;
 | `guard-spec-reads.sh` | before `Read` | refuses an unbounded read of a specification |
 | `guard-frozen-writes.sh` | before `Edit`, `Write` | refuses a write to a frozen document or `.gitattributes` |
 | `guard-bash.sh` | before `Bash` | refuses `sed -i`, `grep -P`, a bare toolchain command, `rustup`, a merge without `--ff-only`, a force push without a lease, a shell write to a frozen document, a pull request without the template's headings; asks before a push to `main`, a tag, a release, a merge |
-| `precommit.sh` | before `Bash` | before `git commit`, runs `nospecrefs.sh`, `statecheck.sh` and a portability scan of changed `.sh` files |
+| `precommit.sh` | before `Bash` | before `git commit`, runs `nospecrefs.sh` over the tracked files, and over every untracked one too when the command also runs `git add`, `statecheck.sh`, and a portability scan of changed `.sh` files |
 | `postcommit.sh` | after `Bash` | after `git commit`, checks the message at `HEAD` against Conventional Commits |
 | `session-start.sh` | session start | prints `STATE.md`, the README's open claims and the working tree into context |
 | `check-state-stamp.sh` | stop | refuses to end a turn that changed the tree without stamping `STATE.md` today, once |

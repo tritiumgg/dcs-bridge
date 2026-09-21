@@ -28,7 +28,25 @@ report() {
     fail=1
 }
 
-out=$(sh tools/nospecrefs.sh 2>&1) || report "$out"
+# This runs before the command does, so a new file that the same command
+# stages and commits is still untracked here, and nospecrefs.sh lists tracked
+# files. So when the command also runs git add, every untracked file that is
+# not ignored is checked beside them.
+#
+# Every one, and not the ones the command names: which paths a shell command
+# adds cannot be read off its text. A glob, a quoted space, the directory
+# given to -C and a word in the commit message each defeat a guess, some by
+# letting a new file through and some by blocking on a file nobody added.
+# The superset lets nothing through. What it costs is a block on an untracked
+# file that holds a citation and is not part of the commit, and the message
+# names that file: move it out of the checkout, or stage in one command and
+# commit in the next, which checks tracked files alone.
+untracked=
+if printf '%s\n' "$cmd" | grep -Eq '(^|[[:space:];&|(])git[[:space:]]([^;&|]*[[:space:]])?add([[:space:]]|$)'; then
+    untracked=--untracked
+fi
+
+out=$(sh tools/nospecrefs.sh $untracked 2>&1) || report "$out"
 
 changed=$( { git diff --name-only HEAD; git ls-files --others --exclude-standard; } 2>/dev/null | sort -u)
 

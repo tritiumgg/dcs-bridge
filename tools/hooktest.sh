@@ -124,6 +124,34 @@ expect_ask guard-bash.sh "$(bash_payload 'gh pr merge 12 --squash')"
 # precommit and postcommit ignore everything but a commit
 expect 0 precommit.sh "$(bash_payload 'git status')"
 expect 0 postcommit.sh "$(bash_payload 'git status')"
+
+# precommit runs before the command, so a new file staged and committed in
+# one command is untracked when it looks. A command that adds anything has
+# every untracked file checked, however it spells the add, because the paths
+# a shell command adds cannot be read off its text. A commit with no add in
+# it checks tracked files alone. What that gets depends on this checkout's
+# state, so the case is held to a plain commit's code and not to zero.
+scratch_dir=hooktest-scratch-$$
+scratch=$scratch_dir/note.txt
+printf '{"tool_name":"Bash","tool_input":{"command":"git commit -m x"}}' | sh "$HOOKS/precommit.sh" >/dev/null 2>&1
+plain=$?
+mkdir "$scratch_dir"
+# Written in two pieces, so this script does not hold the citation it plants.
+printf 'See SPEC %s5.1 for why.\n' '§' >"$scratch"
+expect "$plain" precommit.sh "$(bash_payload 'git commit -m x')"
+expect "$plain" precommit.sh "$(bash_payload 'git commit -m x && git push')"
+expect 2 precommit.sh "$(bash_payload "git add $scratch && git commit -m x")"
+expect 2 precommit.sh "$(bash_payload "git add ./$scratch; git commit -m x")"
+expect 2 precommit.sh "$(bash_payload "git add $scratch_dir/*.txt && git commit -m x")"
+expect 2 precommit.sh "$(bash_payload "git -C . add $scratch_dir && git commit -m x")"
+expect 2 precommit.sh "$(bash_payload 'git add -A && git commit -m x')"
+expect 2 precommit.sh "$(bash_payload 'git add tools/hooktest.sh && git commit -m x')"
+rm -rf "$scratch_dir"
+
+# nospecrefs.sh takes that one flag and refuses anything else.
+n=$((n + 1))
+sh tools/nospecrefs.sh --staged >/dev/null 2>&1
+[ $? -eq 2 ] || { printf 'FAIL nospecrefs.sh took an argument it does not have\n' >&2; fail=1; }
 # postcommit reads the subject at HEAD, so it runs against a throwaway
 # repository rather than this checkout, whose HEAD on a CI pull request is
 # a merge commit.
