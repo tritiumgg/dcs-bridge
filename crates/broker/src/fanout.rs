@@ -647,12 +647,17 @@ pub struct Writer<T> {
     handle: Option<thread::JoinHandle<()>>,
     control: mpsc::Sender<Control<T>>,
     thread: thread::Thread,
+    counts: Arc<Counts>,
+}
+
+/// What the writer thread counts, for any thread to read.
+struct Counts {
     /// Records addressed to a connection that was gone when the writer
     /// thread reached them.
-    unaddressed: Arc<AtomicU64>,
+    unaddressed: AtomicU64,
     /// Records withheld at fan-out from a connection whose capabilities did
     /// not cover them, one per connection per record.
-    filtered: Arc<AtomicU64>,
+    filtered: AtomicU64,
 }
 
 impl<T: Clone + Send + 'static> Writer<T> {
@@ -673,15 +678,16 @@ impl<T: Clone + Send + 'static> Writer<T> {
         let (producer, consumer) = Ring::split(capacity);
         let (control, inbox) = mpsc::channel();
         let flag = Arc::new(ParkFlag::new());
-        let unaddressed = Arc::new(AtomicU64::new(0));
-        let filtered = Arc::new(AtomicU64::new(0));
+        let counts = Arc::new(Counts {
+            unaddressed: AtomicU64::new(0),
+            filtered: AtomicU64::new(0),
+        });
 
         let sleeping = Arc::clone(&flag);
-        let counting = Arc::clone(&unaddressed);
-        let withholding = Arc::clone(&filtered);
+        let counting = Arc::clone(&counts);
         let handle = thread::Builder::new()
             .name("dcsbridge-writer".into())
-            .spawn(move || Self::run(consumer, inbox, sleeping, &counting, &withholding))
+            .spawn(move || Self::run(consumer, inbox, sleeping, &counting))
             .expect("the writer thread spawns");
         let thread = handle.thread().clone();
 
@@ -699,8 +705,7 @@ impl<T: Clone + Send + 'static> Writer<T> {
             handle: Some(handle),
             control,
             thread,
-            unaddressed,
-            filtered,
+            counts,
         };
 
         (writer, commit, connections)
@@ -714,7 +719,7 @@ impl<T: Clone + Send + 'static> Writer<T> {
     /// the writer rather than one per closed connection, because a
     /// connection that is gone has nothing left to hold a count on.
     pub fn unaddressed(&self) -> u64 {
-        self.unaddressed.load(Ordering::Relaxed)
+        self.counts.unaddressed.load(Ordering::Relaxed)
     }
 
     /// How many times a fanned-out record was withheld from a connection
@@ -725,7 +730,7 @@ impl<T: Clone + Send + 'static> Writer<T> {
     /// never numbered for the connection, so the connection's `seq` shows
     /// no gap, and no drop count moves.
     pub fn filtered(&self) -> u64 {
-        self.filtered.load(Ordering::Relaxed)
+        self.counts.filtered.load(Ordering::Relaxed)
     }
 
     /// The writer thread's loop.
@@ -738,8 +743,7 @@ impl<T: Clone + Send + 'static> Writer<T> {
         mut commit: Consumer<Addressed<T>>,
         inbox: mpsc::Receiver<Control<T>>,
         flag: Arc<ParkFlag>,
-        unaddressed: &AtomicU64,
-        filtered: &AtomicU64,
+        counts: &Counts,
     ) {
         let mut connections: Vec<Connection<T>> = Vec::new();
         let mut empty_passes = 0;
@@ -773,8 +777,7 @@ impl<T: Clone + Send + 'static> Writer<T> {
                                 class: Class::Durable,
                                 record,
                             },
-                            unaddressed,
-                            filtered,
+                            counts,
                         );
                     }
                     Ok(Control::Authenticated(id, caps)) => {
@@ -799,7 +802,7 @@ impl<T: Clone + Send + 'static> Writer<T> {
                 let Some(record) = commit.pop() else {
                     break;
                 };
-                fan_out(&mut connections, record, unaddressed, filtered);
+                fan_out(&mut connections, record, counts);
                 fanned = true;
             }
             if fanned {
@@ -914,12 +917,7 @@ impl<T> Connection<T> {
 ///
 /// A record a ring turns away is dropped here, on the writer thread, and the
 /// ring has already counted it against that connection.
-fn fan_out<T: Clone>(
-    connections: &mut [Connection<T>],
-    addressed: Addressed<T>,
-    unaddressed: &AtomicU64,
-    filtered: &AtomicU64,
-) {
+fn fan_out<T: Clone>(connections: &mut [Connection<T>], addressed: Addressed<T>, counts: &Counts) {
     let Addressed {
         to,
         need,
@@ -931,7 +929,7 @@ fn fan_out<T: Clone>(
         match connections.iter_mut().find(|held| held.id == to) {
             Some(connection) => connection.push(class, record),
             None => {
-                unaddressed.fetch_add(1, Ordering::Relaxed);
+                counts.unaddressed.fetch_add(1, Ordering::Relaxed);
             }
         }
         return;
@@ -945,7 +943,7 @@ fn fan_out<T: Clone>(
         };
         let covered = caps.covers(need);
         if !covered {
-            filtered.fetch_add(1, Ordering::Relaxed);
+            counts.filtered.fetch_add(1, Ordering::Relaxed);
         }
         covered
     });
