@@ -103,7 +103,9 @@ entries at most: an eleventh means something here is finished, or belongs in
   prices both. ADR 0014. The sim driver's schema hash SPEC §8.3 has ride
   `shim.classes` has no owner; 4.3 carries the hook driver's on `configure`.
   The registry refuses an adopter's capability, and the fan-out mask holds
-  numbers below 64 (ADR 0027); SPEC §14.4's range has no task.
+  numbers below 64 (ADR 0027); SPEC §14.4's range has no task. On Windows a
+  full `LIFECYCLE` ring's close leaves the drainer blocked in `send` until
+  the peer reads or resets; aborting it has no task (ADR 0028).
 - **The loading flag has no setter until 6.5.** `Bridge::set_loading` picks
   `dcs_alive_threshold_loading_ms` and nothing in Lua calls it, so a load
   over 30 s reads as a dead sim until `MissionLoadBegan` sets it. Delete

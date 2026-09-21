@@ -180,9 +180,12 @@ fn accept_loop(
         // A third handle, for the writer thread: a connection whose
         // `LIFECYCLE` ring fills is closed from there, because the thread
         // that owns the socket is blocked writing to a consumer that has
-        // stopped reading. The shutdown fails that write, `serve` returns,
-        // and the connection ends the way any failed socket does.
-        // ADR 0028.
+        // stopped reading. Off Windows the shutdown fails that write,
+        // `serve` returns, and the connection ends the way any failed
+        // socket does. On Windows a send already blocked is not returned:
+        // the reader thread still exits and the consumer's stream still
+        // ends when it reads, and until then this thread and its rings
+        // stay. ADR 0028.
         let close: Close = Box::new(move || {
             let _ = ending.shutdown(Shutdown::Both);
         });
@@ -1600,20 +1603,27 @@ mod tests {
         commit.push(READ, Class::Durable, record(LAST + 1));
         assert_eq!(value(&read_frame(&mut reading)), LAST + 1);
 
-        // The close has to return a write that is blocked, and the stalled
-        // consumer has still read nothing, so its connection's thread is in
-        // that write unless the close got it out. Dropping the listener
-        // joins that thread: it returns only if the write did. A consumer
-        // that read first would complete the write itself and hide a close
-        // that returns nothing.
-        let (done, dropped) = std::sync::mpsc::channel();
-        thread::spawn(move || {
-            drop(listener);
-            let _ = done.send(());
-        });
-        dropped
-            .recv_timeout(Duration::from_secs(30))
-            .expect("a connection's thread stayed blocked in its write after the close");
+        // Off Windows the close returns the write the connection's thread
+        // is blocked in. The stalled consumer has still read nothing, so
+        // that thread is in the write unless the close got it out, and
+        // dropping the listener joins it: the drop returns only if the write
+        // did. A consumer that read first would complete the write itself
+        // and hide a close that returns nothing. On Windows a shutdown does
+        // not return a send already blocked, so the thread leaves when the
+        // consumer reads, below, and the listener is dropped after that.
+        // ADR 0028.
+        let mut listener = Some(listener);
+        if cfg!(not(windows)) {
+            let listener = listener.take();
+            let (done, dropped) = std::sync::mpsc::channel();
+            thread::spawn(move || {
+                drop(listener);
+                let _ = done.send(());
+            });
+            dropped
+                .recv_timeout(Duration::from_secs(30))
+                .expect("a connection's thread stayed blocked in its write after the close");
+        }
 
         // The stalled consumer reads again: frames until the stream ends,
         // which a closed socket does with an end or with an error.
@@ -1644,6 +1654,7 @@ mod tests {
             "a boundary record was skipped"
         );
 
+        drop(listener);
         drop(writer);
     }
 

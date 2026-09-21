@@ -67,10 +67,10 @@ work when any ring or any held place is occupied.
 attach.** The listener builds the closure over a handle to the socket, and
 it calls `shutdown` in both directions. When the `LIFECYCLE` ring refuses a
 record, the writer thread counts `lifecycle_disconnects_total`, calls the
-closure, and forgets the connection once the fan-out pass is over. The
-shutdown returns the blocked write with an error, the drainer returns, and
-the detach and the reader's exit follow as they do for any socket that
-fails. The refused record is not counted as dropped: the connection it was
+closure, and forgets the connection once the fan-out pass is over. On
+macOS and Linux the shutdown returns the blocked write with an error, the
+drainer returns, and the detach and the reader's exit follow as they do for
+any socket that fails. On Windows it does not: see Consequences. The refused record is not counted as dropped: the connection it was
 for is gone. A connection attached with no closure, which only a test does,
 is forgotten and counted the same way.
 
@@ -117,6 +117,22 @@ one-producer-one-consumer rule it rests on holds for each.
 
 The drop counts are read through the outbound path and nothing reports them
 until `stats` exists, as with `records_filtered_total` in ADR 0027.
+
+**On Windows the close does not free the connection's thread.** The Windows
+CI job on this task's pull request observed it: a local `shutdown` does not
+return a `send` that is already blocked, and the drainer stayed in its write
+for the 30 seconds the test gave it. What the rule promises the consumer
+still holds there. The writer thread has forgotten the connection, so nothing
+more is queued for it; the shutdown does return the reader thread's `recv`,
+as every test that drops a listener under open clients shows on that job, so
+the session closes and its place is given up; and the consumer's stream
+ends when it reads again. What stays, until the peer reads, exits or resets,
+is one thread blocked in the kernel and the three rings it holds. A consumer
+whose process is suspended for good is the case, and each such consumer
+costs one thread. Aborting the send needs `CancelIoEx` or a socket both
+threads poll, and neither can be tried without a Windows host in the loop;
+it belongs with the broker-hardening work, which has no task. The test of
+the close asserts the thread's return off Windows only.
 
 A consumer closed this way sees its stream end and nothing that says why.
 It reconnects into a fresh `seq` and the retained set, which is what the
