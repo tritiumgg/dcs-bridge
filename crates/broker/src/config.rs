@@ -211,10 +211,11 @@ keys! {
     inbound_records_per_sec_total: u32 = 400, Live, COUNT;
     auth_failures_per_min: u32 = 5, Live, COUNT;
     tokens: Vec<Token> = Vec::new(), Live, Kind::Tokens;
-    // Rings. The reserve is a watermark tested on push, so it is live where
-    // the sizes are not, and zero is a ring with no reserve.
-    ring_out_records: u32 = 4096, Restart, COUNT;
-    ring_out_lifecycle_reserve: u32 = 64, Live, Kind::Integer { min: 0, max: u32::MAX as u64 };
+    // Rings. A connection has one outbound ring per class, so a flood in
+    // one class evicts nothing of another. ADR 0009, ADR 0028.
+    ring_out_lossy_records: u32 = 3584, Restart, COUNT;
+    ring_out_durable_records: u32 = 512, Restart, COUNT;
+    ring_out_lifecycle_records: u32 = 256, Restart, COUNT;
     ring_in_sim_driver_records: u32 = 1024, Restart, COUNT;
     ring_in_hook_driver_records: u32 = 256, Restart, COUNT;
     // Timing. The last two are the consumer's, published as advice in the
@@ -439,11 +440,6 @@ impl Config {
                 "`max_unauthenticated_connections` must be below `max_connections`, so a slowloris cannot exhaust the pool",
             ));
         }
-        if self.ring_out_lifecycle_reserve >= self.ring_out_records {
-            return Err(Error::Invariant(
-                "`ring_out_lifecycle_reserve` must be below `ring_out_records`, or nothing but LIFECYCLE ever fits",
-            ));
-        }
         if self.heartbeat_interval_ms >= self.dcs_alive_threshold_ms {
             return Err(Error::Invariant(
                 "`heartbeat_interval_ms` must be below `dcs_alive_threshold_ms`, or the sim reads dead between beats",
@@ -496,7 +492,10 @@ mod tests {
             assert!(config.get(key.name).is_some(), "{} has no value", key.name);
             assert!(std::ptr::eq(Key::named(key.name).unwrap(), key));
         }
-        assert_eq!(KEYS.len(), 29, "a key was added without a row here");
+        assert_eq!(KEYS.len(), 30, "a key was added without a row here");
+        assert_eq!(config.get("ring_out_lossy_records"), Some(n(3584.0)));
+        assert_eq!(config.get("ring_out_durable_records"), Some(n(512.0)));
+        assert_eq!(config.get("ring_out_lifecycle_records"), Some(n(256.0)));
 
         assert_eq!(config.get("port"), Some(n(7742.0)));
         assert_eq!(
@@ -623,11 +622,7 @@ mod tests {
                 )
                 .is_err()
         );
-        assert!(
-            config
-                .set(Key::named("ring_out_lifecycle_reserve").unwrap(), n(0.0))
-                .is_ok()
-        );
+        assert!(config.set(Key::named("port").unwrap(), n(0.0)).is_ok());
     }
 
     /// A first call over an empty table is the defaults, in force. Over a
@@ -648,7 +643,9 @@ mod tests {
         let applied = Config::first([
             ("port", n(0.0)),
             ("bind_address", Value::String("::1".into())),
-            ("ring_out_records", n(128.0)),
+            ("ring_out_lossy_records", n(128.0)),
+            ("ring_out_durable_records", n(16.0)),
+            ("ring_out_lifecycle_records", n(8.0)),
             ("handshake_timeout_ms", n(250.0)),
             ("tokens", Value::Tokens(vec![token.clone()])),
             ("route", Value::String("A".into())),
@@ -661,7 +658,9 @@ mod tests {
             applied.config.bind_address,
             IpAddr::from([0, 0, 0, 0, 0, 0, 0, 1])
         );
-        assert_eq!(applied.config.ring_out_records, 128);
+        assert_eq!(applied.config.ring_out_lossy_records, 128);
+        assert_eq!(applied.config.ring_out_durable_records, 16);
+        assert_eq!(applied.config.ring_out_lifecycle_records, 8);
         assert_eq!(applied.config.handshake_timeout_ms, 250);
         assert_eq!(applied.config.tokens, vec![token]);
         assert_eq!(applied.config.max_connections, 8, "a key left out");
@@ -687,7 +686,7 @@ mod tests {
             .apply([
                 ("rejected_max_per_sec", n(20.0)),
                 ("port", n(7743.0)),
-                ("ring_out_records", n(4096.0)),
+                ("ring_out_lossy_records", n(3584.0)),
                 ("bind_address", Value::String("0:0:0:0:0:0:0:1".into())),
                 ("max_connections", n(16.0)),
             ])
@@ -715,6 +714,46 @@ mod tests {
         );
     }
 
+    /// Each class's outbound ring has a size of its own, a whole number of
+    /// at least one, that waits for a restart. The two keys one ring had
+    /// are named as unknown, as any key the broker does not read is.
+    #[test]
+    fn the_three_outbound_ring_sizes_are_restart_tier_counts() {
+        let keys = [
+            ("ring_out_lossy_records", 3584.0),
+            ("ring_out_durable_records", 512.0),
+            ("ring_out_lifecycle_records", 256.0),
+        ];
+        let config = Config::default();
+
+        for (key, default) in keys {
+            assert!(config.apply([(key, n(0.0))]).is_err(), "{key} took zero");
+            assert!(config.apply([(key, n(0.5))]).is_err(), "{key} took a half");
+
+            let later = config.apply([(key, n(default * 2.0))]).expect("a count");
+            assert_eq!(later.config, config, "{key} moved without a restart");
+            assert_eq!(
+                later.pending,
+                [Pending {
+                    key,
+                    effective: n(default),
+                    file: n(default * 2.0)
+                }]
+            );
+        }
+
+        let old = Config::first([
+            ("ring_out_records", n(8192.0)),
+            ("ring_out_lifecycle_reserve", n(128.0)),
+        ])
+        .expect("an unknown key refuses nothing");
+        assert_eq!(old.config, Config::default());
+        assert_eq!(
+            old.unknown,
+            ["ring_out_records", "ring_out_lifecycle_reserve"]
+        );
+    }
+
     /// A bad value anywhere in the table refuses the whole call: a good
     /// key before it does not apply, and a restart-tier key carrying one is
     /// refused on a later call rather than at the restart.
@@ -728,7 +767,7 @@ mod tests {
             refused.to_string(),
             "`port` must be a whole number from 0 to 65535"
         );
-        assert!(config.apply([("ring_out_records", n(0.5))]).is_err());
+        assert!(config.apply([("ring_out_lossy_records", n(0.5))]).is_err());
         assert!(Config::first([("tokens", n(1.0))]).is_err());
     }
 
@@ -745,10 +784,6 @@ mod tests {
         assert!(
             invariant(vec![("max_unauthenticated_connections", n(8.0))])
                 .contains("`max_connections`")
-        );
-        assert!(
-            invariant(vec![("ring_out_lifecycle_reserve", n(4096.0))])
-                .contains("`ring_out_records`")
         );
         assert!(
             invariant(vec![("heartbeat_interval_ms", n(30_000.0))])

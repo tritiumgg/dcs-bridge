@@ -536,9 +536,10 @@ impl Bridge {
     /// stay, sized as the refused table sized them, since the next call
     /// carries the same restart-tier keys or the file has changed under a
     /// broker that has never listened. A later call never reallocates and
-    /// never rebinds. The commit ring has no key of its own and takes
-    /// `ring_out_records`: one thread drains it into every connection's
-    /// ring, so it needs no more room than one of them.
+    /// never rebinds. The commit ring has no key of its own and takes the
+    /// sum of the three outbound sizes: it feeds every connection's rings,
+    /// and a burst one connection could hold should not be lost ahead of
+    /// them. ADR 0028.
     ///
     /// The swap is one pointer store, so a reader sees the old
     /// configuration or the new one and never a mix. The read lock is held
@@ -560,7 +561,9 @@ impl Bridge {
         } else {
             let applied = Config::first(table)?;
             let addr = SocketAddr::new(applied.config.bind_address, applied.config.port);
-            let ring = applied.config.ring_out_records as usize;
+            let ring = applied.config.ring_out_lossy_records as usize
+                + applied.config.ring_out_durable_records as usize
+                + applied.config.ring_out_lifecycle_records as usize;
             self.start_inbound(
                 applied.config.ring_in_sim_driver_records as usize,
                 applied.config.ring_in_hook_driver_records as usize,
