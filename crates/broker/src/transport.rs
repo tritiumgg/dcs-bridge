@@ -1592,6 +1592,28 @@ mod tests {
             assert!(Instant::now() < deadline, "the stalled consumer was kept");
             thread::yield_now();
         }
+        assert_eq!(
+            writer.lifecycle_disconnects(),
+            1,
+            "the reader was closed too"
+        );
+        commit.push(READ, Class::Durable, record(LAST + 1));
+        assert_eq!(value(&read_frame(&mut reading)), LAST + 1);
+
+        // The close has to return a write that is blocked, and the stalled
+        // consumer has still read nothing, so its connection's thread is in
+        // that write unless the close got it out. Dropping the listener
+        // joins that thread: it returns only if the write did. A consumer
+        // that read first would complete the write itself and hide a close
+        // that returns nothing.
+        let (done, dropped) = std::sync::mpsc::channel();
+        thread::spawn(move || {
+            drop(listener);
+            let _ = done.send(());
+        });
+        dropped
+            .recv_timeout(Duration::from_secs(30))
+            .expect("a connection's thread stayed blocked in its write after the close");
 
         // The stalled consumer reads again: frames until the stream ends,
         // which a closed socket does with an end or with an error.
@@ -1622,15 +1644,6 @@ mod tests {
             "a boundary record was skipped"
         );
 
-        assert_eq!(
-            writer.lifecycle_disconnects(),
-            1,
-            "the reader was closed too"
-        );
-        commit.push(READ, Class::Durable, record(LAST + 1));
-        assert_eq!(value(&read_frame(&mut reading)), LAST + 1);
-
-        drop(listener);
         drop(writer);
     }
 
