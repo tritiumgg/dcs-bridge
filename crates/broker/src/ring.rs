@@ -62,6 +62,11 @@ const fn state_of(stamp: u64) -> u64 {
     stamp & STATE_MASK
 }
 
+/// The absolute index a stamp carries.
+const fn index_of(stamp: u64) -> u64 {
+    stamp >> STATE_BITS
+}
+
 /// One record's worth of storage, and the stamp that says who owns it.
 ///
 /// The stamp names an absolute index rather than a position, so a slot on its
@@ -394,7 +399,14 @@ impl<T> Consumer<T> {
             let slot = &self.ring.slots[self.cursor];
             let current = slot.stamp.load(Ordering::SeqCst);
 
-            if current == stamp(self.index, EMPTY) {
+            // A stamp naming an earlier index is the producer inside this
+            // slot, evicting the record one lap back to write the record
+            // this end is owed. That record is not here yet, and stepping
+            // over the slot would leave it behind this end for good. No
+            // other stamp can name an earlier index: this end has been past
+            // that record already, and it left the slot empty for this
+            // index unless the producer took it first.
+            if current == stamp(self.index, EMPTY) || index_of(current) < self.index {
                 return None;
             }
 
@@ -429,9 +441,10 @@ impl<T> Consumer<T> {
                 return Some(value);
             }
 
-            // Either the producer evicted this record or it is evicting it now.
-            // Either way it is gone, and the next slot is where the ring's
-            // oldest record can be.
+            // Either the producer evicted this record, so the stamp names a
+            // later index, or it is evicting it now, so the stamp names this
+            // index held by the producer. Either way it is gone, and the next
+            // slot is where the ring's oldest record can be.
             self.advance();
         }
     }
@@ -845,29 +858,51 @@ mod tests {
 mod loom_tests {
     use super::*;
 
+    /// The consumer is the spawned thread in both models, and that is what
+    /// makes them exhaustive. Loom backtracks on the last access to an atomic
+    /// before a store, and a producer on the spawned thread loads each stamp
+    /// itself before it stores it, which hides the consumer's load behind its
+    /// own: the model then runs one schedule and checks nothing.
+    fn popping(
+        mut consumer: Consumer<u32>,
+        looks: usize,
+    ) -> loom::thread::JoinHandle<(Consumer<u32>, Vec<u32>)> {
+        loom::thread::spawn(move || {
+            let mut arrived = Vec::new();
+            for _ in 0..looks {
+                arrived.extend(consumer.pop());
+            }
+            (consumer, arrived)
+        })
+    }
+
     /// Every interleaving of a producer that evicts and a consumer that drains
-    /// leaves the records in order, with no slot reached by both ends at once.
+    /// leaves the records in order, with no slot reached by both ends at once,
+    /// and every record either arrives or comes back to the producer.
     ///
     /// The ring holds two and takes three records, so the producer must evict
     /// while the consumer is somewhere in the ring — which is the case the
     /// per-slot stamp exists for, and the one no test on real hardware can be
-    /// trusted to reach.
+    /// trusted to reach. The last clause is the consumer meeting, a lap
+    /// later, a slot the producer is still inside of: stepping over it would
+    /// leave the record written there behind the consumer for good.
     #[test]
     fn a_producer_that_evicts_never_races_its_consumer() {
-        loom::model(|| {
-            let (mut producer, mut consumer) = Ring::split(2);
+        let mut model = loom::model::Builder::new();
+        model.preemption_bound = Some(3);
 
-            let pushing = loom::thread::spawn(move || {
-                for value in 0..3u32 {
-                    producer.push(value);
+        model.check(|| {
+            let (mut producer, consumer) = Ring::split(2);
+            let popping = popping(consumer, 3);
+
+            let mut returned = Vec::new();
+            for value in 0..3u32 {
+                match producer.push(value) {
+                    Push::Stored => {}
+                    Push::Evicted(record) | Push::Refused(record) => returned.push(record),
                 }
-            });
-
-            let mut arrived = Vec::new();
-            while let Some(record) = consumer.pop() {
-                arrived.push(record);
             }
-            pushing.join().expect("the pushing thread only pushes");
+            let (mut consumer, mut arrived) = popping.join().expect("the consumer only pops");
             while let Some(record) = consumer.pop() {
                 arrived.push(record);
             }
@@ -875,6 +910,13 @@ mod loom_tests {
             assert!(
                 arrived.windows(2).all(|pair| pair[0] < pair[1]),
                 "records arrived out of order or twice: {arrived:?}"
+            );
+            let mut all: Vec<u32> = arrived.iter().chain(returned.iter()).copied().collect();
+            all.sort_unstable();
+            assert_eq!(
+                all,
+                vec![0, 1, 2],
+                "a record neither arrived nor came back: arrived {arrived:?}, returned {returned:?}"
             );
         });
     }
@@ -885,24 +927,20 @@ mod loom_tests {
     /// has left is stored.
     #[test]
     fn a_producer_that_offers_never_races_its_consumer() {
-        loom::model(|| {
-            let (mut producer, mut consumer) = Ring::split(2);
+        let mut model = loom::model::Builder::new();
+        model.preemption_bound = Some(3);
 
-            let pushing = loom::thread::spawn(move || {
-                let mut refused = Vec::new();
-                for value in 0..3u32 {
-                    if let Push::Refused(record) = producer.offer(value) {
-                        refused.push(record);
-                    }
+        model.check(|| {
+            let (mut producer, consumer) = Ring::split(2);
+            let popping = popping(consumer, 3);
+
+            let mut refused = Vec::new();
+            for value in 0..3u32 {
+                if let Push::Refused(record) = producer.offer(value) {
+                    refused.push(record);
                 }
-                refused
-            });
-
-            let mut arrived = Vec::new();
-            while let Some(record) = consumer.pop() {
-                arrived.push(record);
             }
-            let refused = pushing.join().expect("the pushing thread only offers");
+            let (mut consumer, mut arrived) = popping.join().expect("the consumer only pops");
             while let Some(record) = consumer.pop() {
                 arrived.push(record);
             }
