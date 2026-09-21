@@ -18,7 +18,7 @@ is just deleted. Write entries as one or two lines, never paragraphs.
 
 ## In progress
 
-Nothing. 2.14 is closed; 2.18 is next.
+Nothing. 2.18 is closed; 2.17 is next.
 
 *One task at most. Say what is done, what is not, and where to resume. Say what
 is committed and what is only in the working tree. Say what is knowingly
@@ -26,29 +26,28 @@ broken. Empty this when the task closes.*
 
 ## Just finished
 
+- **2.18** — the drop rule on a ring per class. Opens M2.3. PR #85, ADR 0028.
 - **2.14** — the capability filter at fan-out before `seq`, and the inbound
   `NO_CAPABILITY` refusal. Closes M2.2. PR #80, ADR 0027.
 - **2.13** — `Rejected` with its four reasons, the rate caps. PR #79, ADR 0026.
-- **2.C4** — `dcsb send`: bytes from a file or hex, `--wait`. PR #78, ADR 0025.
 
 *The last three at most, one line each. Git log holds the rest.*
 
 ## Next
 
-**Task 2.18** — the outbound drop rule, one branch in two runs of commits.
-First ADR 0009's ring per class, about 400 lines: three rings per connection,
-the writer pushing by class, the drainer merging on `seq`, which is the seam
-if it runs long. Then a full `LIFECYCLE` ring drops the connection and counts
-`lifecycle_disconnects_total`, about 200. The plan's row has the done-when.
-Opens M2.3.
+**Task 2.17** — `LIFECYCLE` retention: the latest record per topic, slots
+allocated at `shim.classes` under `max_lifecycle_topics`, replayed after auth
+in emit order before live traffic, through the capability filter. Counts
+`lifecycle_replayed_total`. A replay of 64 fits the 256-slot `LIFECYCLE` ring
+(ADR 0009). The plan's row has the done-when.
 
-**An agent verifies** over loopback that a `LOSSY` flood evicts no `DURABLE`
-and no `LIFECYCLE`; **the maintainer verifies** at a live install that a
-stalled `dcsb tail` is disconnected rather than shown a `LIFECYCLE` gap.
+**An agent verifies** over loopback that a late `dcsb tail` reads the retained
+record first, and in `mise run lua` that a `shim.classes` call over the cap is
+refused whole; **the maintainer verifies** the late `tail` at a live install.
 
 ## After that
 
-- **M2.3**: 2.17, 2.20, 2.C5, 2.C6 after 2.18, in that order. Phase 2 ends
+- **M2.3**: 2.20, 2.C5, 2.C6 after 2.17, in that order. Phase 2 ends
   with it, and the rows ahead are re-measured there.
 - **Phase 3** opens on 3.1, `protoc-gen-dcsbridge-lua`, which the `generator`
   crate stubs; ADR 0016.
@@ -76,12 +75,12 @@ entries at most: an eleventh means something here is finished, or belongs in
 - **`buf breaking` has no baseline until the next release.** `v0.1.0` predates
   the schema, so `tools/schema-breaking.sh` reports that and passes. It starts
   comparing at the first tag whose tree carries `proto/`. Delete this then.
-- **Ring sizes are provisional until task 9.7.** 2.15 took the
-  specification's defaults, `ring_out_records` 4096 and
-  `ring_out_lifecycle_reserve` 64, and sized the commit ring as one
-  connection's ring, which has no key; 2.12 took the two inbound sizes,
-  1024 and 256. PROBE-7 measures them seven phases later, so 2.18's
-  done-when reopens at 9.7.
+- **Ring sizes are provisional until task 9.7.** 2.18 took ADR 0009's
+  outbound sizes, `ring_out_lossy_records` 3584, `ring_out_durable_records`
+  512 and `ring_out_lifecycle_records` 256, and sized the commit ring, which
+  has no key, at their sum (ADR 0028); 2.12 took the two inbound sizes, 1024
+  and 256. PROBE-7 measures them seven phases later, so 2.18's done-when
+  reopens at 9.7. The by-class drop counts wait for `stats` to report them.
 - **SPEC §17's *Any (native module)* rows land with their behaviour.** Task 2.1
   built the carrier, `mise run lua`, and closed on that. Each row is owed by
   the task implementing what it describes: late join at 2.17, topic filter
