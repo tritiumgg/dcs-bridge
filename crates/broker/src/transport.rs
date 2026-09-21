@@ -213,7 +213,7 @@ fn accept_loop(
         // The handshake rides the attach, so the writer thread numbers it 1
         // as it attaches the ring and nothing fanned out can come first.
         let attached: (ConnectionId, Drain<Record>) =
-            connections.attach_with(capacities, waker, Some(answers.handshake()));
+            connections.attach_with(capacities, waker, Some(answers.handshake()), None);
         let id = attached.0;
 
         // The reader: a second thread on the same socket, because a read

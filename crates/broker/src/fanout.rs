@@ -307,6 +307,16 @@ fn outbound<T>(capacities: Capacities) -> (Outbox<T>, Drain<T>) {
     )
 }
 
+/// How the writer thread closes a connection it can no longer serve: the
+/// attaching side's way to end the socket, called once, on the writer
+/// thread.
+///
+/// A closure because this module holds no socket and is built where none
+/// exists, and because nothing else reaches the thread that would have to
+/// act: the drainer of a consumer that stopped reading is blocked in a
+/// write. ADR 0028.
+pub type Close = Box<dyn FnOnce() + Send>;
+
 /// What the attach side tells the writer thread.
 ///
 /// These cross a channel rather than a ring because none of them is sent from
@@ -317,7 +327,13 @@ enum Control<T> {
     /// and wake the thread draining it if it sleeps. The record carried,
     /// if any, is the connection's first: it rides the attach so nothing
     /// fanned out between two control messages can be numbered ahead of it.
-    Attach(ConnectionId, Outbox<T>, Option<Waker>, Option<T>),
+    Attach(
+        ConnectionId,
+        Outbox<T>,
+        Option<Waker>,
+        Option<T>,
+        Option<Close>,
+    ),
     /// A connection is gone; drop its ring's producer.
     Detach(ConnectionId),
     /// The broker answers this connection: push the record into its ring,
@@ -545,7 +561,7 @@ impl<T> Connections<T> {
     ///
     /// If a capacity is zero, for the reason [`Ring::split`] gives.
     pub fn attach(&self, capacities: Capacities) -> (ConnectionId, Drain<T>) {
-        self.attach_inner(capacities, None, None)
+        self.attach_inner(capacities, None, None, None)
     }
 
     /// [`attach`](Self::attach), with a thread to wake and a first record.
@@ -558,13 +574,18 @@ impl<T> Connections<T> {
     /// had already taken the attach, found the channel empty, and fanned a
     /// record into the new ring ahead of it. The handshake is what rides
     /// here. ADR 0018.
+    ///
+    /// `close`, when given, is what the writer thread calls if the
+    /// connection's `LIFECYCLE` ring fills: see [`Close`]. With none the
+    /// writer thread forgets the connection all the same.
     pub fn attach_with(
         &self,
         capacities: Capacities,
         waker: Waker,
         first: Option<T>,
+        close: Option<Close>,
     ) -> (ConnectionId, Drain<T>) {
-        self.attach_inner(capacities, Some(waker), first)
+        self.attach_inner(capacities, Some(waker), first, close)
     }
 
     fn attach_inner(
@@ -572,10 +593,11 @@ impl<T> Connections<T> {
         capacities: Capacities,
         waker: Option<Waker>,
         first: Option<T>,
+        close: Option<Close>,
     ) -> (ConnectionId, Drain<T>) {
         let (outbox, drain) = outbound(capacities);
         let id = ConnectionId(self.last_id.fetch_add(1, Ordering::Relaxed) + 1);
-        self.send(Control::Attach(id, outbox, waker, first));
+        self.send(Control::Attach(id, outbox, waker, first, close));
 
         (id, drain)
     }
@@ -658,6 +680,8 @@ struct Counts {
     /// Records withheld at fan-out from a connection whose capabilities did
     /// not cover them, one per connection per record.
     filtered: AtomicU64,
+    /// Connections closed because their `LIFECYCLE` ring was full.
+    lifecycle_disconnects: AtomicU64,
 }
 
 impl<T: Clone + Send + 'static> Writer<T> {
@@ -681,6 +705,7 @@ impl<T: Clone + Send + 'static> Writer<T> {
         let counts = Arc::new(Counts {
             unaddressed: AtomicU64::new(0),
             filtered: AtomicU64::new(0),
+            lifecycle_disconnects: AtomicU64::new(0),
         });
 
         let sleeping = Arc::clone(&flag);
@@ -733,6 +758,16 @@ impl<T: Clone + Send + 'static> Writer<T> {
         self.counts.filtered.load(Ordering::Relaxed)
     }
 
+    /// How many connections were closed because their `LIFECYCLE` ring had
+    /// no room for a record: `lifecycle_disconnects_total`.
+    ///
+    /// The record that found the ring full is not a dropped one. It went
+    /// with the connection, and the consumer that reconnects is sent the
+    /// retained set, which is where a boundary record lives on.
+    pub fn lifecycle_disconnects(&self) -> u64 {
+        self.counts.lifecycle_disconnects.load(Ordering::Relaxed)
+    }
+
     /// The writer thread's loop.
     ///
     /// Each pass takes every control message, then every record the commit ring
@@ -751,18 +786,20 @@ impl<T: Clone + Send + 'static> Writer<T> {
         loop {
             loop {
                 match inbox.try_recv() {
-                    Ok(Control::Attach(id, outbox, waker, first)) => {
+                    Ok(Control::Attach(id, outbox, waker, first, close)) => {
                         let mut connection = Connection {
                             id,
                             outbox,
                             next_seq: 1,
                             waker,
                             caps: None,
+                            close,
+                            closed: false,
                         };
                         if let Some(first) = first {
                             // The handshake is the broker's own record, and
                             // durable as its answers are. ADR 0028.
-                            connection.push(Class::Durable, first);
+                            connection.push(Class::Durable, first, counts);
                         }
                         connections.push(connection);
                     }
@@ -878,6 +915,11 @@ struct Connection<T> {
     /// record reaches it when the set covers the record's need; an
     /// addressed one always does.
     caps: Option<Capabilities>,
+    /// How to end its socket, until that has been done.
+    close: Option<Close>,
+    /// Whether its `LIFECYCLE` ring has refused a record. Such a connection
+    /// is forgotten when the fan-out that found it out returns.
+    closed: bool,
 }
 
 impl<T> Connection<T> {
@@ -886,12 +928,38 @@ impl<T> Connection<T> {
     ///
     /// The number is taken before the push, so an evicted record leaves the
     /// gap that tells its consumer it was lost.
-    fn push(&mut self, class: Class, record: T) {
+    ///
+    /// A `LIFECYCLE` record its ring has no room for is not a loss to
+    /// count. The consumer is so far behind that it has missed mission
+    /// boundaries, and a stream with one missing would tell it a world
+    /// still stands that does not, so the connection is closed instead
+    /// and the consumer starts again from the retained set. ADR 0009.
+    fn push(&mut self, class: Class, record: T, counts: &Counts) {
         let seq = self.next_seq;
         self.next_seq += 1;
-        drop(self.outbox.push(class, Numbered { seq, record }));
+        let pushed = self.outbox.push(class, Numbered { seq, record });
+        if class == Class::Lifecycle && matches!(pushed, Push::Refused(_)) {
+            self.close(counts);
+            return;
+        }
+        drop(pushed);
         if let Some(waker) = &self.waker {
             waker.wake_if_parked();
+        }
+    }
+
+    /// End the socket and mark the connection for forgetting.
+    ///
+    /// The wake is unconditional: a drainer parked on rings that will
+    /// never fill again has to look once more to find its socket closed.
+    fn close(&mut self, counts: &Counts) {
+        counts.lifecycle_disconnects.fetch_add(1, Ordering::Relaxed);
+        self.closed = true;
+        if let Some(close) = self.close.take() {
+            close();
+        }
+        if let Some(waker) = &self.waker {
+            waker.wake();
         }
     }
 }
@@ -916,8 +984,20 @@ impl<T> Connection<T> {
 /// because somebody sent it.
 ///
 /// A record a ring turns away is dropped here, on the writer thread, and the
-/// ring has already counted it against that connection.
-fn fan_out<T: Clone>(connections: &mut [Connection<T>], addressed: Addressed<T>, counts: &Counts) {
+/// ring has already counted it against that connection. A connection whose
+/// `LIFECYCLE` ring turned one away is closed by the push and forgotten
+/// here, once the walk that may still be holding it is over.
+fn fan_out<T: Clone>(
+    connections: &mut Vec<Connection<T>>,
+    addressed: Addressed<T>,
+    counts: &Counts,
+) {
+    deliver(connections, addressed, counts);
+    connections.retain(|held| !held.closed);
+}
+
+/// [`fan_out`]'s pushes, which forget nobody.
+fn deliver<T: Clone>(connections: &mut [Connection<T>], addressed: Addressed<T>, counts: &Counts) {
     let Addressed {
         to,
         need,
@@ -927,7 +1007,7 @@ fn fan_out<T: Clone>(connections: &mut [Connection<T>], addressed: Addressed<T>,
 
     if let Some(to) = to {
         match connections.iter_mut().find(|held| held.id == to) {
-            Some(connection) => connection.push(class, record),
+            Some(connection) => connection.push(class, record, counts),
             None => {
                 counts.unaddressed.fetch_add(1, Ordering::Relaxed);
             }
@@ -951,10 +1031,10 @@ fn fan_out<T: Clone>(connections: &mut [Connection<T>], addressed: Addressed<T>,
         return;
     };
     for connection in receiving {
-        previous.push(class, record.clone());
+        previous.push(class, record.clone(), counts);
         previous = connection;
     }
-    previous.push(class, record);
+    previous.push(class, record, counts);
 }
 
 #[cfg(all(test, not(loom)))]
@@ -1264,7 +1344,7 @@ mod tests {
             let flag = Arc::new(ParkFlag::new());
             let waker = Waker::new(Arc::clone(&flag), thread::current());
             let (_, mut consumer) =
-                connections.attach_with(Capacities::each(1 << 16), waker, Some(greeting));
+                connections.attach_with(Capacities::each(1 << 16), waker, Some(greeting), None);
             let first = drain_numbered(&mut consumer, 1);
             assert_eq!(
                 first,
@@ -1485,7 +1565,7 @@ mod tests {
         let (writer, mut commit, connections) = Writer::spawn(ROOMY);
         let waker = Waker::new(Arc::new(ParkFlag::new()), thread::current());
         let (id, mut stalled) =
-            connections.attach_with(Capacities::each(4), waker, Some(HANDSHAKE));
+            connections.attach_with(Capacities::each(4), waker, Some(HANDSHAKE), None);
         connections.authenticated(id, ALL);
         connections.settle();
 
@@ -1534,6 +1614,83 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(drain_numbered(&mut stalled, kept.len()), kept);
         assert_eq!(stalled.dropped(), 6);
+
+        drop(writer);
+    }
+
+    /// A connection nobody drains is closed by the boundary record its
+    /// `LIFECYCLE` ring has no room for: the closure it attached with runs
+    /// once, the close is counted once, and nothing fanned out afterwards
+    /// reaches it. What it was sent before the close is all there, with no
+    /// boundary record missing. A connection beside it that does drain
+    /// receives every record and is not closed.
+    #[test]
+    fn a_full_lifecycle_ring_closes_the_connection_and_no_other() {
+        let (writer, mut commit, connections) = Writer::spawn(ROOMY);
+        let closes = Arc::new(AtomicUsize::new(0));
+        let closing = Arc::clone(&closes);
+        let close: Close = Box::new(move || {
+            closing.fetch_add(1, Ordering::SeqCst);
+        });
+        let waker = Waker::new(Arc::new(ParkFlag::new()), thread::current());
+        let (id, mut stalled) =
+            connections.attach_with(Capacities::each(4), waker, None, Some(close));
+        connections.authenticated(id, ALL);
+        let (_, mut reading) = attached(&connections, ROOMY);
+
+        for value in 0..4u32 {
+            commit.push(READ, Class::Lifecycle, value);
+        }
+        fanned(&commit, &connections);
+        assert_eq!(closes.load(Ordering::SeqCst), 0, "a ring that fits closed");
+        assert_eq!(writer.lifecycle_disconnects(), 0);
+
+        commit.push(READ, Class::Lifecycle, 4);
+        commit.push(READ, Class::Lifecycle, 5);
+        commit.push(READ, Class::Durable, 6);
+        fanned(&commit, &connections);
+
+        assert_eq!(closes.load(Ordering::SeqCst), 1, "the closure ran once");
+        assert_eq!(writer.lifecycle_disconnects(), 1);
+        assert_eq!(drain_until(&mut stalled, 4), [0, 1, 2, 3]);
+        assert_eq!(stalled.pop(), None, "a closed connection was sent more");
+        assert_eq!(drain_until(&mut reading, 7), [0, 1, 2, 3, 4, 5, 6]);
+        assert_eq!(reading.dropped(), 0);
+
+        // An answer to the closed connection finds it gone, as it would
+        // after a detach, and the late detach its thread sends is a no-op.
+        connections.answer(id, 99);
+        connections.detach(id);
+        connections.settle();
+        assert_eq!(writer.unaddressed(), 1);
+
+        drop(writer);
+    }
+
+    /// Only a boundary record closes a connection. A flood of either other
+    /// class at full rings evicts, and the closure never runs.
+    #[test]
+    fn a_lossy_or_durable_flood_closes_nothing() {
+        let (writer, mut commit, connections) = Writer::spawn(ROOMY);
+        let closes = Arc::new(AtomicUsize::new(0));
+        let closing = Arc::clone(&closes);
+        let close: Close = Box::new(move || {
+            closing.fetch_add(1, Ordering::SeqCst);
+        });
+        let waker = Waker::new(Arc::new(ParkFlag::new()), thread::current());
+        let (id, stalled) = connections.attach_with(Capacities::each(4), waker, None, Some(close));
+        connections.authenticated(id, ALL);
+        connections.settle();
+
+        for value in 0..50u32 {
+            commit.push(READ, Class::Lossy, value);
+            commit.push(READ, Class::Durable, value);
+        }
+        fanned(&commit, &connections);
+
+        assert_eq!(closes.load(Ordering::SeqCst), 0);
+        assert_eq!(writer.lifecycle_disconnects(), 0);
+        assert_eq!(stalled.dropped(), 92);
 
         drop(writer);
     }
@@ -1810,7 +1967,7 @@ mod loom_tests {
             });
 
             let waker = Waker::new(flag, drainer.thread().clone());
-            let (id, consumer) = connections.attach_with(Capacities::each(2), waker, None);
+            let (id, consumer) = connections.attach_with(Capacities::each(2), waker, None, None);
             connections.authenticated(id, ALL);
             hand.send(consumer).expect("the drainer is waiting");
 

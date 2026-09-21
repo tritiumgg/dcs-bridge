@@ -234,6 +234,12 @@ impl Outbound {
         self.writer.filtered()
     }
 
+    /// How many connections were closed because their `LIFECYCLE` ring was
+    /// full, `lifecycle_disconnects_total`.
+    pub fn lifecycle_disconnects(&self) -> u64 {
+        self.writer.lifecycle_disconnects()
+    }
+
     /// The commit ring's producer, or why not.
     ///
     /// Never waited on: a second thread committing is a defect rather than a
