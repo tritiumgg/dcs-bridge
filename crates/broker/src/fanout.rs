@@ -1208,7 +1208,11 @@ mod tests {
     /// nothing lost anywhere along the way.
     #[test]
     fn every_consumer_sees_every_record_in_order() {
-        let pushes: u32 = if cfg!(miri) { 64 } else { 2_000 };
+        // Miri's clock counts what it interprets, and four consumers spinning
+        // on an empty merge of three rings spend it fast: 64 records took 46
+        // of its seconds against a deadline of 30. What Miri checks here is
+        // ownership, which 16 records move through the same paths.
+        let pushes: u32 = if cfg!(miri) { 16 } else { 2_000 };
         let (writer, mut commit, connections) = Writer::spawn(ROOMY);
 
         let consumers: Vec<_> = (0..4)
