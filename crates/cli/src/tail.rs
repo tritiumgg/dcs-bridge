@@ -469,6 +469,50 @@ mod tests {
         );
     }
 
+    /// An `EpochClosed` survives a `LOSSY` flood, as an operator sees it:
+    /// the boundary record is committed in the middle of a burst that a
+    /// four-slot ring sheds most of, and `tail` prints it all the same,
+    /// beside the gap lines that say the flood was dropped. In one ring of
+    /// four, the 256 records behind it would have evicted it.
+    #[test]
+    fn an_epoch_closed_survives_a_lossy_flood() {
+        const EPOCH_CLOSED: &str = "dcsbridge.builtin.hook.EpochClosed";
+        let (writer, mut commit, connections) = Writer::spawn(4096);
+        let answers = Arc::new(dcsbridge_broker::state::Global);
+        let listener =
+            Listener::spawn("127.0.0.1:0", connections, Capacities::each(4), answers).unwrap();
+        let mut client = client(listener.local_addr());
+        let mut bytes = take_frame(&mut client);
+        bytes.extend(take_frame(&mut client));
+        warm_up(&mut commit, &client);
+
+        let big = record(64 << 10);
+        for _ in 0..256 {
+            drop(commit.push(READ, Class::Lossy, Arc::clone(&big)));
+        }
+        drop(commit.push(READ, Class::Lifecycle, record_on(EPOCH_CLOSED, 16)));
+        for _ in 0..256 {
+            drop(commit.push(READ, Class::Lossy, Arc::clone(&big)));
+        }
+
+        bytes.extend(drain(&mut client));
+        drop(listener);
+        drop(writer);
+
+        let mut out = Vec::new();
+        let summary = run(&bytes[..], &mut out).unwrap();
+        let out = String::from_utf8(out).unwrap();
+
+        assert!(summary.gaps >= 1, "the flood left no gap:\n{out}");
+        assert_eq!(
+            out.matches(&format!(" topic={EPOCH_CLOSED} bytes="))
+                .count(),
+            1,
+            "the boundary record was not printed once:\n{out}"
+        );
+        assert!(!out.contains("out of order"), "seq went backwards:\n{out}");
+    }
+
     /// The capability filter, observed the way an operator observes it: a
     /// `read` token watches a stream in which every other record needs
     /// `command`, and `tail` prints the records it may see, none it may
