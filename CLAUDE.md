@@ -20,11 +20,13 @@ docs/
 proto/                 the record schema. buf.yaml configures the lint
 vendor/lua/lua.def     the import definition for DCS's Lua
 tests/lua/             the module opened by a stock Lua 5.1, no DCS present
-tools/                 ledger.sh, luatest.sh, miri.sh, mkimplib.sh, mkschema.sh, raiseshape.sh,
-                       readmeopen.sh, statecheck.sh
+tools/                 ledger.sh, luatest.sh, miri.sh, mkimplib.sh, mkschema.sh, nexttask.sh,
+                       raiseshape.sh, readmeopen.sh, statecheck.sh
 .github/workflows/     CI, release, version bump
 .claude/               hooks: the read guard, the frozen-write guard, the shell guard,
                        the commit checks, the session start, the stop check
+                       workflows: task-brief, task-review
+                       skills: /task, which runs both for one plan task
 ```
 
 ## `STATE.md` is the handoff between sessions
@@ -148,6 +150,8 @@ a person watching. Before starting a task, decide whether an agent can observe
 the result itself, whether it needs a maintainer reading a CI result, or whether
 only somebody at a live install can see it. Write it in `STATE.md` under the
 task. An agent that skips this declares victory on something it never observed.
+The `task-brief` workflow makes this split for a plan task and drafts the
+line; the session checks it and writes it.
 
 ## Toolchain
 
@@ -237,14 +241,24 @@ something a person sees, and reaching one is when the plan's rows ahead are
 re-measured and re-ordered.
 
 **Review locally, run `mise run ci`, then push.** A fix found after the push
-costs a CI run, so a branch is finished on the machine first: one
-adversarial reviewer, on Sonnet, read-only, told the claim the branch makes
-and asked to break it; every finding fixed in a commit of its own, or
-squashed into the commit that introduced it while nothing is pushed; then
-`mise run ci`, which runs what the Linux job runs, Miri included. Only then
+costs a CI run, so a branch is finished on the machine first: the
+`task-review` workflow, told the claim the branch makes, whose read-only
+reviewers try to break it and whose refuters try to break each finding; every
+finding that stands fixed in a commit of its own, or squashed into the commit
+that introduced it while nothing is pushed; and `mise run ci`, which runs what
+the Linux job runs, Miri included, and can run beside the review. Only then
 is the branch pushed and the pull request opened. `mise run check` alone is
 what a Windows host can run and what a mid-task commit needs; it is not what
 a push needs.
+
+**The workflows run through `/task`.** The maintainer invokes it with a task
+id, with none to take the row `tools/nexttask.sh` names, or with a branch
+name to review a branch that is no plan task. That is the consent the two
+workflows need: a session does not start either by itself. The skill holds
+the steps. Where the maintainer asks for the work in words alone, say `/task`
+exists and do the work the same way without the workflows: a brief written
+in the session, and one adversarial reviewer, on Sonnet, read-only, in place
+of `task-review`.
 
 **History is linear. Rebase, never merge-commit.** A branch lands with
 `git merge --ff-only`, and a refused fast-forward means the branch is fixed.
