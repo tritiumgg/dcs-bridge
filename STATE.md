@@ -1,6 +1,6 @@
 # Working state
 
-**Last updated:** 2026-09-12
+**Last updated:** 2026-09-21
 
 The handoff between sessions. Read it first; update it before a session ends,
 not only when a task finishes. Stamp the date above each time; it carries a
@@ -35,12 +35,12 @@ broken. Empty this when the task closes.*
 
 ## Next
 
-**Task 2.18** — the outbound drop rule on ADR 0009's ring per class: three
-rings per connection, the writer pushing by class, the drainer merging on
-`seq`; a full `LIFECYCLE` ring drops the connection. Done when `LOSSY` drops
-before `DURABLE`, an `EpochClosed` survives a `LOSSY` flood, and a consumer
-far enough behind is disconnected. Two branches, `task/2.18-1-ring-per-class`
-then `task/2.18-2-lifecycle-disconnect`; the plan has their tables. Opens M2.3.
+**Task 2.18** — the outbound drop rule, one branch in two runs of commits.
+First ADR 0009's ring per class, about 400 lines: three rings per connection,
+the writer pushing by class, the drainer merging on `seq`, which is the seam
+if it runs long. Then a full `LIFECYCLE` ring drops the connection and counts
+`lifecycle_disconnects_total`, about 200. The plan's row has the done-when.
+Opens M2.3.
 
 **An agent verifies** over loopback that a `LOSSY` flood evicts no `DURABLE`
 and no `LIFECYCLE`; **the maintainer verifies** at a live install that a
