@@ -124,7 +124,7 @@ assert(shim.commit() == false, 'an oversize lifecycle record was queued')
 shim.begin('boundary')
 shim.integer(1, 1)
 queued('the lifecycle record after a refused one', shim.commit())
-shim.begin('t')
+shim.begin('dcsbridge.builtin.sim.UnitDestroyed')
 shim.string(1, string.rep('x', 16 * 1024))
 queued('a durable record of the same size', shim.commit())
 
