@@ -250,6 +250,12 @@ impl Outbound {
         self.writer.lifecycle_disconnects()
     }
 
+    /// How many retained records were pushed to connections at their
+    /// authentication, `lifecycle_replayed_total`.
+    pub fn replayed(&self) -> u64 {
+        self.writer.replayed()
+    }
+
     /// How many records the connections' rings have turned away, by label,
     /// `records_dropped_total`.
     pub fn dropped(&self) -> Dropped {
@@ -670,7 +676,10 @@ impl Bridge {
             return Ok(outbound.local_addr());
         }
 
-        let (writer, commit, connections) = Writer::spawn(capacities.total());
+        // The retained set is sized from the same frozen number the
+        // registry binds slots under. ADR 0029.
+        let slots = self.lifecycle_cap() as usize;
+        let (writer, commit, connections) = Writer::spawn_with(capacities.total(), slots);
         // Answered through the global, so a handshake field that arrives
         // after the listener is up is in the next connection's.
         let listener = Listener::spawn(addr, connections, capacities, Arc::new(Global))?;
@@ -2078,6 +2087,53 @@ mod tests {
             },
             "a record outside an epoch carried a stamp"
         );
+
+        // A LIFECYCLE record committed outside an epoch is retained, and a
+        // connection that authenticates after it receives it as its first
+        // record, numbered in its own stream, with the tail bytes as they
+        // were committed: no epoch and no clock, since it carried neither.
+        let retained_tail = {
+            let mut e = crate::encode::Encoder::with_capacity(256);
+            e.begin(b"dcsbridge.builtin.hook.EpochClosed", bridge().stamp());
+            e.integer(1, 7).unwrap();
+            let tail = e.commit().unwrap().to_vec();
+            bridge()
+                .commit(Capability::Read, Class::Lifecycle, Some(0), &tail)
+                .expect("the path is started");
+            tail
+        };
+        assert_eq!(read_stamped(&mut client).seq, 6);
+        let mut late = TcpStream::connect(addr).expect("the listener accepts");
+        late.set_read_timeout(Some(Duration::from_secs(30)))
+            .unwrap();
+        let read_frame = |client: &mut TcpStream| {
+            let mut length = [0u8; 4];
+            client.read_exact(&mut length).expect("a frame arrives");
+            let mut frame = vec![0u8; u32::from_le_bytes(length) as usize];
+            client
+                .read_exact(&mut frame)
+                .expect("the frame's body arrives");
+            frame
+        };
+        assert_eq!(&read_frame(&mut late)[..2], [0x08, 0x01], "the handshake");
+        late.write_all(&auth).expect("the auth is sent");
+        assert_eq!(&read_frame(&mut late)[..2], [0x08, 0x02], "the result");
+        let replayed = read_frame(&mut late);
+        assert_eq!(&replayed[..2], [0x08, 0x03], "the replay is not seq 3");
+        assert_eq!(
+            &replayed[2..],
+            &retained_tail[..],
+            "the replayed tail is not the committed one"
+        );
+        assert_eq!(
+            Stamped::decode(&replayed[..]).unwrap(),
+            Stamped {
+                seq: 3,
+                epoch: None,
+                mission_time: None,
+            }
+        );
+        assert_eq!(bridge().outbound().unwrap().replayed(), 1);
 
         // A record sent on a registered inbound topic the token covers
         // reaches the ring its route names, through the shared bridge's

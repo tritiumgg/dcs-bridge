@@ -747,6 +747,9 @@ struct Counts {
     filtered: AtomicU64,
     /// Connections closed because their `LIFECYCLE` ring was full.
     lifecycle_disconnects: AtomicU64,
+    /// Retained records pushed to a connection at its authentication, one
+    /// per connection per record.
+    replayed: AtomicU64,
     /// Records a connection's ring turned away, by what was lost.
     dropped_lossy: AtomicU64,
     dropped_durable: AtomicU64,
@@ -771,7 +774,8 @@ pub struct Dropped {
 }
 
 impl<T: Clone + Send + 'static> Writer<T> {
-    /// Start the writer thread over a commit ring of `capacity` records.
+    /// Start the writer thread over a commit ring of `capacity` records,
+    /// with a retained set of the specification's default 64 slots.
     ///
     /// Returns the thread's owner, the logic thread's handle and the attach
     /// side. Nothing about the size is decided here; the commit ring has no
@@ -785,6 +789,14 @@ impl<T: Clone + Send + 'static> Writer<T> {
     /// first `shim.configure` is where that surfaces.
     #[must_use]
     pub fn spawn(capacity: usize) -> (Self, Commit<T>, Connections<T>) {
+        Self::spawn_with(capacity, 64)
+    }
+
+    /// [`spawn`](Self::spawn) with a retained set of `slots` entries, which
+    /// is `max_lifecycle_topics` as the bridge froze it. The set is
+    /// allocated once, here, and lives on the writer thread. ADR 0029.
+    #[must_use]
+    pub fn spawn_with(capacity: usize, slots: usize) -> (Self, Commit<T>, Connections<T>) {
         let (producer, consumer) = Ring::split(capacity);
         let (control, inbox) = mpsc::channel();
         let flag = Arc::new(ParkFlag::new());
@@ -792,16 +804,18 @@ impl<T: Clone + Send + 'static> Writer<T> {
             unaddressed: AtomicU64::new(0),
             filtered: AtomicU64::new(0),
             lifecycle_disconnects: AtomicU64::new(0),
+            replayed: AtomicU64::new(0),
             dropped_lossy: AtomicU64::new(0),
             dropped_durable: AtomicU64::new(0),
             dropped_broker_answer: AtomicU64::new(0),
         });
+        let retained = Retained::new(slots);
 
         let sleeping = Arc::clone(&flag);
         let counting = Arc::clone(&counts);
         let handle = thread::Builder::new()
             .name("dcsbridge-writer".into())
-            .spawn(move || Self::run(consumer, inbox, sleeping, &counting))
+            .spawn(move || Self::run(consumer, inbox, sleeping, retained, &counting))
             .expect("the writer thread spawns");
         let thread = handle.thread().clone();
 
@@ -857,6 +871,14 @@ impl<T: Clone + Send + 'static> Writer<T> {
         self.counts.lifecycle_disconnects.load(Ordering::Relaxed)
     }
 
+    /// How many retained records were pushed to connections at their
+    /// authentication: `lifecycle_replayed_total`, one per connection per
+    /// record. A record withheld by the capability filter counts in
+    /// `filtered` instead.
+    pub fn replayed(&self) -> u64 {
+        self.counts.replayed.load(Ordering::Relaxed)
+    }
+
     /// How many records the connections' rings have turned away, by label.
     pub fn dropped(&self) -> Dropped {
         Dropped {
@@ -872,10 +894,15 @@ impl<T: Clone + Send + 'static> Writer<T> {
     /// holds. Control before records, so a detached connection stops receiving
     /// at the first pass after the detach. An empty pass yields, and only after
     /// [`LOOKS_BEFORE_PARK`] empty passes in a row does the thread park.
+    ///
+    /// A popped record with a slot is kept in the retained set before it is
+    /// fanned out, and the set is replayed to a connection as it is reported
+    /// authenticated, ahead of anything fanned out to it after. ADR 0029.
     fn run(
         mut commit: Consumer<Addressed<T>>,
         inbox: mpsc::Receiver<Control<T>>,
         flag: Arc<ParkFlag>,
+        mut retained: Retained<T>,
         counts: &Counts,
     ) {
         let mut connections: Vec<Connection<T>> = Vec::new();
@@ -920,7 +947,9 @@ impl<T: Clone + Send + 'static> Writer<T> {
                     Ok(Control::Authenticated(id, caps)) => {
                         if let Some(held) = connections.iter_mut().find(|held| held.id == id) {
                             held.caps = Some(caps);
+                            retained.replay(held, caps, counts);
                         }
+                        connections.retain(|held| !held.closed);
                     }
                     #[cfg(all(test, not(loom)))]
                     Ok(Control::Barrier(taken)) => {
@@ -939,6 +968,9 @@ impl<T: Clone + Send + 'static> Writer<T> {
                 let Some(record) = commit.pop() else {
                     break;
                 };
+                if let Some(slot) = record.slot {
+                    retained.keep(slot, record.need, record.record.clone());
+                }
                 fan_out(&mut connections, record, false, counts);
                 fanned = true;
             }
@@ -999,6 +1031,66 @@ impl<T> Drop for Writer<T> {
         self.thread.unpark();
         if let Some(handle) = self.handle.take() {
             let _ = handle.join();
+        }
+    }
+}
+
+/// The retained set: the latest `LIFECYCLE` record per slot, and the
+/// occupied slots in emit order.
+///
+/// Owned by the writer thread and touched by no other, so it needs no lock.
+/// A slot holds a reference to the record the rings share, not a copy, and
+/// what bounds a record's size is the refusal at commit. ADR 0029.
+struct Retained<T> {
+    /// By slot: the capability number the record needs, and the record.
+    slots: Vec<Option<(u32, T)>>,
+    /// The occupied slots, oldest emit first. A replaced slot moves to the
+    /// back.
+    order: Vec<u32>,
+}
+
+impl<T: Clone> Retained<T> {
+    /// An empty set of `slots` entries.
+    fn new(slots: usize) -> Self {
+        Retained {
+            slots: (0..slots).map(|_| None).collect(),
+            order: Vec::with_capacity(slots),
+        }
+    }
+
+    /// Keep `record` as the latest of its slot, after every other slot in
+    /// the order. A slot past the set is nothing the registry could have
+    /// bound, since both are sized from one number, so it is not kept.
+    fn keep(&mut self, slot: u32, need: u32, record: T) {
+        let Some(entry) = self.slots.get_mut(slot as usize) else {
+            return;
+        };
+        if entry.is_some() {
+            self.order.retain(|held| *held != slot);
+        }
+        *entry = Some((need, record));
+        self.order.push(slot);
+    }
+
+    /// Push the set to `connection` in emit order, through the same filter
+    /// fan-out applies: a record `caps` does not cover is withheld and
+    /// counted as filtered, so the connection sees no gap for it. Stops at
+    /// a connection its `LIFECYCLE` ring closed, since nothing more reaches
+    /// it.
+    fn replay(&self, connection: &mut Connection<T>, caps: Capabilities, counts: &Counts) {
+        for slot in &self.order {
+            if connection.closed {
+                return;
+            }
+            let Some((need, record)) = &self.slots[*slot as usize] else {
+                continue;
+            };
+            if !caps.covers(*need) {
+                counts.filtered.fetch_add(1, Ordering::Relaxed);
+                continue;
+            }
+            connection.push(Class::Lifecycle, false, record.clone(), counts);
+            counts.replayed.fetch_add(1, Ordering::Relaxed);
         }
     }
 }
@@ -1632,6 +1724,137 @@ mod tests {
             "the retained record the token does not cover reached it, or left a gap"
         );
         assert_eq!(writer.filtered(), 1);
+        assert_eq!(writer.lifecycle_disconnects(), 0);
+
+        drop(writer);
+    }
+
+    /// A connection authenticated after three retained pushes, two of them
+    /// to one slot, receives the latest per slot in emit order, numbered
+    /// from one, and a live record after them with no gap.
+    #[test]
+    fn the_retained_set_replays_latest_per_slot_in_emit_order() {
+        let (writer, mut commit, connections) = Writer::spawn(ROOMY);
+        let (_, mut early) = attached(&connections, ROOMY);
+
+        commit.push_retained(READ, 0, 10u32);
+        commit.push_retained(READ, 1, 11);
+        commit.push_retained(READ, 0, 12);
+        assert_eq!(drain_until(&mut early, 3), vec![10, 11, 12]);
+
+        let (_, mut late) = attached(&connections, ROOMY);
+        commit.push(READ, Class::Durable, 13);
+        assert_eq!(
+            drain_numbered(&mut late, 3),
+            vec![
+                Numbered { seq: 1, record: 11 },
+                Numbered { seq: 2, record: 12 },
+                Numbered { seq: 3, record: 13 },
+            ],
+            "the replay is not the latest per slot in emit order, ahead of the live record"
+        );
+        assert_eq!(drain_until(&mut early, 1), vec![13]);
+        assert_eq!(writer.replayed(), 2);
+        assert_eq!(writer.lifecycle_disconnects(), 0);
+        assert_eq!(late.dropped(), 0);
+
+        drop(writer);
+    }
+
+    /// The replay passes the capability filter: a retained record the
+    /// token does not cover is withheld and counted as filtered, the
+    /// connection's `seq` does not move for it, and nothing is replayed.
+    #[test]
+    fn the_replay_withholds_what_the_capabilities_do_not_cover() {
+        let (writer, mut commit, connections) = Writer::spawn(ROOMY);
+        let (_, mut early) = attached(&connections, ROOMY);
+        commit.push_retained(COMMAND, 0, 0u32);
+        assert_eq!(drain_until(&mut early, 1), vec![0]);
+
+        let (reader_id, mut reader) = connections.attach(Capacities::each(ROOMY));
+        connections.authenticated(reader_id, Capabilities::NONE.with(READ));
+        connections.settle();
+        commit.push(READ, Class::Durable, 1);
+
+        assert_eq!(
+            drain_numbered(&mut reader, 1),
+            vec![Numbered { seq: 1, record: 1 }],
+            "the withheld replay reached the connection, or left a gap"
+        );
+        assert_eq!(writer.filtered(), 1);
+        assert_eq!(writer.replayed(), 0);
+
+        drop(writer);
+    }
+
+    /// A retained record fanned out between a connection's attach and its
+    /// authentication passed the connection over then, and reaches it once,
+    /// by the replay.
+    #[test]
+    fn a_record_fanned_out_before_authentication_arrives_once_by_replay() {
+        let (writer, mut commit, connections) = Writer::spawn(ROOMY);
+        let (pending_id, mut pending) = connections.attach(Capacities::each(ROOMY));
+        connections.settle();
+
+        commit.push_retained(READ, 0, 0u32);
+        // The early connection proves the record was fanned out before
+        // the authentication below is sent.
+        let (_, mut early) = attached(&connections, ROOMY);
+        commit.push_retained(READ, 1, 1);
+        assert_eq!(drain_until(&mut early, 2), vec![0, 1]);
+
+        connections.authenticated(pending_id, ALL);
+        commit.push(READ, Class::Durable, 2);
+        assert_eq!(
+            drain_numbered(&mut pending, 3),
+            vec![
+                Numbered { seq: 1, record: 0 },
+                Numbered { seq: 2, record: 1 },
+                Numbered { seq: 3, record: 2 },
+            ],
+            "a record was replayed twice, or missed"
+        );
+
+        drop(writer);
+    }
+
+    /// A replay of a full retained set fits a `LIFECYCLE` ring of the
+    /// shipped size, and every record is counted as replayed.
+    #[test]
+    fn a_full_replay_fits_the_lifecycle_ring() {
+        // Miri interprets every push; 16 slots move through the same paths
+        // as 64.
+        let slots: u32 = if cfg!(miri) { 16 } else { 64 };
+        let (writer, mut commit, connections) = Writer::spawn_with(ROOMY, slots as usize);
+        for slot in 0..slots {
+            commit.push_retained(READ, slot, slot);
+        }
+        // The early connection has every retained record, by fan-out or by
+        // replay, before the live one; so every push was popped and kept
+        // before the late connection attaches.
+        let (_, mut early) = attached(&connections, ROOMY);
+        commit.push(READ, Class::Durable, u32::MAX);
+        assert_eq!(
+            drain_until(&mut early, slots as usize + 1).last(),
+            Some(&u32::MAX)
+        );
+
+        // Whether the early connection was replayed to or fanned out to is
+        // thread schedule, so the count is read as a difference.
+        let before = writer.replayed();
+        let (late_id, mut late) = connections.attach(Capacities {
+            lossy: 4,
+            durable: 4,
+            lifecycle: 256,
+        });
+        connections.authenticated(late_id, ALL);
+        let replayed = drain_numbered(&mut late, slots as usize);
+        assert_eq!(
+            replayed.iter().map(|n| n.record).collect::<Vec<_>>(),
+            (0..slots).collect::<Vec<_>>()
+        );
+        assert_eq!(replayed.last().map(|n| n.seq), Some(u64::from(slots)));
+        assert_eq!(writer.replayed() - before, u64::from(slots));
         assert_eq!(writer.lifecycle_disconnects(), 0);
 
         drop(writer);
