@@ -246,6 +246,12 @@ a mission boundary are never dropped: a consumer that has fallen behind by
 enough that one would be lost is disconnected, and reconnects into a fresh
 sequence.
 
+The bridge keeps the latest record of each mission-boundary topic and sends
+that set to a consumer as soon as it authenticates, before any live record,
+so a `tail` started or restarted mid-mission sees the epoch it joined. The
+set holds at most `max_lifecycle_topics` topics, and a boundary record over
+`max_lifecycle_record_bytes` is refused when it is committed.
+
 `ping` needs no token. It prints one line, such as `dcs_alive=true
 dcs_last_heard_ms=312 bridge_enabled=true`, and exits 1 when the sim is not
 alive, so a script can ask too. The sim is alive when the hook driver's
