@@ -1827,6 +1827,10 @@ mod tests {
         assert_eq!(drain_until(&mut early, 2), vec![0, 1]);
 
         connections.authenticated(pending_id, ALL);
+        // The live record is committed only once the writer thread holds
+        // the authentication, or a pass could pop it first and pass the
+        // connection over, and a plain record is never replayed.
+        connections.settle();
         commit.push(READ, Class::Durable, 2);
         assert_eq!(
             drain_numbered(&mut pending, 3),
