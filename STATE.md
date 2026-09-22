@@ -1,6 +1,6 @@
 # Working state
 
-**Last updated:** 2026-09-21
+**Last updated:** 2026-09-22
 
 The handoff between sessions. Read it first; update it before a session ends,
 not only when a task finishes. Stamp the date above each time; it carries a
@@ -18,7 +18,7 @@ is just deleted. Write entries as one or two lines, never paragraphs.
 
 ## In progress
 
-Nothing. 2.18 is closed; 2.17 is next.
+Nothing. 2.17 is closed; 2.20 is next.
 
 *One task at most. Say what is done, what is not, and where to resume. Say what
 is committed and what is only in the working tree. Say what is knowingly
@@ -26,28 +26,29 @@ broken. Empty this when the task closes.*
 
 ## Just finished
 
+- **2.17** — `LIFECYCLE` retention and replay under one frozen cap; the late
+  `tail` verified over loopback, live with PR #86's hook script. ADR 0029.
+- **1.2** — ruleset 23835728 on `main` requires `Preflight`, `Linux`, `Windows`.
 - **2.18** — the drop rule on a ring per class. Opens M2.3. PR #85, ADR 0028.
-- **2.14** — the capability filter at fan-out before `seq`, and the inbound
-  `NO_CAPABILITY` refusal. Closes M2.2. PR #80, ADR 0027.
-- **2.13** — `Rejected` with its four reasons, the rate caps. PR #79, ADR 0026.
 
 *The last three at most, one line each. Git log holds the rest.*
 
 ## Next
 
-**Task 2.17** — `LIFECYCLE` retention: the latest record per topic, slots
-allocated at `shim.classes` under `max_lifecycle_topics`, replayed after auth
-in emit order before live traffic, through the capability filter. Counts
-`lifecycle_replayed_total`. A replay of 64 fits the 256-slot `LIFECYCLE` ring
-(ADR 0009). The plan's row has the done-when.
+**Task 2.20** — `SetTopicFilter` and `GetTopics` on the reader thread: `ALL`
+by default, replace rather than accumulate, `LIFECYCLE` always admitted, the
+four refused shapes, `topic_filter_max_topics`, the filter handed to the
+writer thread by pointer swap and applied at fan-out before `seq`, counted in
+`records_filtered_total`. The plan's row has the done-when.
 
-**An agent verifies** over loopback that a late `dcsb tail` reads the retained
-record first, and in `mise run lua` that a `shim.classes` call over the cap is
-refused whole; **the maintainer verifies** the late `tail` at a live install.
+**An agent verifies** over loopback that a connection under `ONLY` receives
+the named topic, every `LIFECYCLE` topic and no other with no `seq` gap, and
+that `GetTopics` lists the token's topics; **the maintainer verifies** nothing
+live until 6.1 emits records.
 
 ## After that
 
-- **M2.3**: 2.20, 2.C5, 2.C6 after 2.17, in that order. Phase 2 ends
+- **M2.3**: 2.C5, 2.C6 after 2.20, in that order. Phase 2 ends
   with it, and the rows ahead are re-measured there.
 - **Phase 3** opens on 3.1, `protoc-gen-dcsbridge-lua`, which the `generator`
   crate stubs; ADR 0016.
@@ -59,11 +60,11 @@ resolved, and say where. Mark an entry only the maintainer can settle. Ten
 entries at most: an eleventh means something here is finished, or belongs in
 `docs/decisions/` or `CLAUDE.md` instead.
 
-- **Maintainer decision — task 1.2's gate cannot be set on this plan.**
-  `dcs-bridge` is private on GitHub Free, so branch protection and rulesets
-  both answer 403. Make the repository public or upgrade to Pro; an agent can
-  set the rule after that. Require `Preflight`, `Linux` and `Windows`;
-  `macOS` runs weekly and on request, so it cannot be required.
+- **What 2.17 left to `stats`.** `lifecycle_replayed_total`,
+  `lifecycle_oversize_total` and `lifecycle_evicted_total` are one number
+  each until `stats` reports them. A boundary the commit ring evicts under a
+  burst before the writer thread keeps it is counted, not prevented; the
+  commit ring's class is PROBE-7's question at 9.7. ADR 0029.
 - **Maintainer decision — the policy gate is unmeasured and no probe covers
   it.** Tasks 4.8, 4.9, 9.C1 and 10.2 rest on which `net.allow_dostring_in`
   value list is correct. Measure it, or ship the wider union and state the
@@ -83,12 +84,12 @@ entries at most: an eleventh means something here is finished, or belongs in
   reopens at 9.7. The by-class drop counts wait for `stats` to report them.
 - **SPEC §17's *Any (native module)* rows land with their behaviour.** Task 2.1
   built the carrier, `mise run lua`, and closed on that. Each row is owed by
-  the task implementing what it describes: late join at 2.17, topic filter
-  at 2.20. The plan's 2.1 done-when reads as though all seventeen run at
-  2.1, which none of them can. Point-to-point landed at 2.8 on the
-  acknowledgement, at 2.16 on the typed replies and at 2.12 on `poll`
-  returning the id; capability at 2.14, in the Rust loopback tests, since
-  a bare Lua 5.1 opens no socket. ADR 0017, ADR 0023, ADR 0027.
+  the task implementing what it describes: topic filter at 2.20. The plan's
+  2.1 done-when reads as though all seventeen run at 2.1, which none of
+  them can. Point-to-point landed at 2.8 on the acknowledgement, at 2.16 on
+  the typed replies and at 2.12 on `poll` returning the id; capability at
+  2.14 and late join at 2.17, in the Rust loopback tests, since a bare Lua
+  5.1 opens no socket. ADR 0017, ADR 0023, ADR 0027, ADR 0029.
 - **Task 2.2's load banner is owed by 4.1.** SPEC §13 addresses the banner to
   the Lua side and SPEC §15 has `doctor` check it. Nothing makes the DLL write
   one, and SPEC §4 leaves it no `io`. Delete this when 4.1 closes.
