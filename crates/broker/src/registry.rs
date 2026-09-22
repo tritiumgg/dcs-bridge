@@ -173,6 +173,17 @@ pub enum Refusal {
         /// What the call offered instead.
         offered: &'static str,
     },
+    /// The call's fresh `LIFECYCLE` topics would take the retained set
+    /// past `max_lifecycle_topics`. Every slot is allocated at the first
+    /// configure, so there is no room to make. ADR 0029.
+    OverCap {
+        /// `LIFECYCLE` topics already bound to a slot.
+        bound: u32,
+        /// `LIFECYCLE` topics the call would bind.
+        offered: u32,
+        /// `max_lifecycle_topics`.
+        cap: u32,
+    },
 }
 
 impl fmt::Display for Refusal {
@@ -183,6 +194,14 @@ impl fmt::Display for Refusal {
                 held,
                 offered,
             } => write!(f, "{topic} is registered as {held}, not {offered}"),
+            Refusal::OverCap {
+                bound,
+                offered,
+                cap,
+            } => write!(
+                f,
+                "{offered} LIFECYCLE topics beside {bound} bound would exceed max_lifecycle_topics {cap}"
+            ),
         }
     }
 }
@@ -201,6 +220,18 @@ fn merge<V: Member>(
     map: &mut HashMap<Topic, V>,
     rows: impl IntoIterator<Item = (Topic, V)>,
 ) -> Result<usize, Refusal> {
+    let fresh = fresh(map, rows)?;
+    let added = fresh.len();
+    map.extend(fresh);
+    Ok(added)
+}
+
+/// [`merge`]'s first pass: the rows new to `map`, or the conflict that
+/// refuses the call.
+fn fresh<V: Member>(
+    map: &HashMap<Topic, V>,
+    rows: impl IntoIterator<Item = (Topic, V)>,
+) -> Result<HashMap<Topic, V>, Refusal> {
     let mut fresh: HashMap<Topic, V> = HashMap::new();
     for (topic, offered) in rows {
         match map.get(&topic).or_else(|| fresh.get(&topic)) {
@@ -217,9 +248,7 @@ fn merge<V: Member>(
             }
         }
     }
-    let added = fresh.len();
-    map.extend(fresh);
-    Ok(added)
+    Ok(fresh)
 }
 
 /// The maps the two registrars share.
@@ -236,21 +265,57 @@ fn merge<V: Member>(
 /// Each table registers through its own merge, so the tables of one
 /// registrar arrive in whatever order its calls come, and a topic is
 /// complete once its class and its capability have both arrived.
+///
+/// A `LIFECYCLE` topic is bound to a slot in the retained set as its class
+/// arrives, and the slot is what the record carries to the writer thread,
+/// which holds no registry. Slots are never given back: retiring a topic
+/// is a DCS restart. ADR 0029.
 #[derive(Debug, Default)]
 pub struct Registry {
     classes: HashMap<Topic, RecordClass>,
     routes: HashMap<Topic, Target>,
     caps: HashMap<Topic, Capability>,
     replies: HashSet<Topic>,
+    /// The retained-set slot of every `LIFECYCLE` topic in `classes`.
+    slots: HashMap<Topic, u32>,
 }
 
 impl Registry {
-    /// Merge a table of drop policies. See [`merge`].
+    /// Merge a table of drop policies, binding each fresh `LIFECYCLE` topic
+    /// to the next slot under `cap`. See [`merge`].
+    ///
+    /// A call whose fresh `LIFECYCLE` topics would take the bound count
+    /// past `cap` is refused whole, the row of another class beside them
+    /// included: the two-pass shape of `merge`, so a registrar's table is
+    /// applied or it is not. A topic already bound binds nothing again.
     pub fn register_classes(
         &mut self,
         rows: impl IntoIterator<Item = (Topic, RecordClass)>,
+        cap: u32,
     ) -> Result<usize, Refusal> {
-        merge(&mut self.classes, rows)
+        let fresh = fresh(&self.classes, rows)?;
+        let bound = self.slots.len() as u32;
+        let offered = fresh
+            .values()
+            .filter(|class| **class == RecordClass::Lifecycle)
+            .count() as u32;
+        if bound.saturating_add(offered) > cap {
+            return Err(Refusal::OverCap {
+                bound,
+                offered,
+                cap,
+            });
+        }
+        let added = fresh.len();
+        for (topic, class) in fresh {
+            if class == RecordClass::Lifecycle {
+                // Under the cap, which is a u32.
+                let slot = self.slots.len() as u32;
+                self.slots.insert(topic.clone(), slot);
+            }
+            self.classes.insert(topic, class);
+        }
+        Ok(added)
     }
 
     /// Merge a table of destination states. See [`merge`].
@@ -316,9 +381,10 @@ impl Registry {
         self.required(topic).is_some()
     }
 
-    /// The capability a connection needs to receive a record on `topic` and
-    /// the ring the record takes on its way there, or `None` when the topic
-    /// is incomplete by [`is_complete`](Self::is_complete)'s rule.
+    /// The capability a connection needs to receive a record on `topic`,
+    /// the ring the record takes on its way there, and the retained-set
+    /// slot a `LIFECYCLE` record replaces, or `None` when the topic is
+    /// incomplete by [`is_complete`](Self::is_complete)'s rule.
     ///
     /// Looked up once, when the record is opened, and carried with it to
     /// fan-out: the writer thread holds no registry. The acknowledgement
@@ -326,13 +392,14 @@ impl Registry {
     /// one connection that sent the command, and an addressed record is
     /// never filtered, so the value is not consulted on that path. It is
     /// `DURABLE` in the schema. ADR 0028.
-    pub fn required(&self, topic: &[u8]) -> Option<(Capability, Class)> {
+    pub fn required(&self, topic: &[u8]) -> Option<(Capability, Class, Option<u32>)> {
         if topic == dcsbridge_topic::COMMAND_ACK.as_bytes() {
-            return Some((Capability::Command, Class::Durable));
+            return Some((Capability::Command, Class::Durable, None));
         }
         let topic = std::str::from_utf8(topic).ok()?;
         let class = self.classes.get(topic)?.outbound();
-        Some((self.caps.get(topic).copied()?, class))
+        let slot = self.slots.get(topic).copied();
+        Some((self.caps.get(topic).copied()?, class, slot))
     }
 }
 
@@ -367,8 +434,23 @@ mod tests {
     const COMMAND: &str = "dcsbridge.builtin.sim.SetFlag";
     const REPLY: &str = "dcsbridge.builtin.sim.FlagValue";
 
+    /// A cap no test here reaches, unless it is about the cap.
+    const CAP: u32 = 64;
+
     fn rows<V: Member>(rows: &[(&str, V)]) -> Vec<(Topic, V)> {
         rows.iter().map(|(t, v)| (t.to_string(), *v)).collect()
+    }
+
+    /// `count` distinct `LIFECYCLE` topics, numbered from `from`.
+    fn lifecycle(from: u32, count: u32) -> Vec<(Topic, RecordClass)> {
+        (from..from + count)
+            .map(|n| {
+                (
+                    format!("dcsbridge.builtin.hook.Boundary{n}"),
+                    RecordClass::Lifecycle,
+                )
+            })
+            .collect()
     }
 
     /// Two registrars over disjoint topic sets both merge, and the map
@@ -377,8 +459,8 @@ mod tests {
     fn a_second_registrar_over_new_topics_merges() {
         let mut registry = Registry::default();
 
-        let hook = registry.register_classes(rows(&[(EVENT, RecordClass::Durable)]));
-        let sim = registry.register_classes(rows(&[(COMMAND, RecordClass::Command)]));
+        let hook = registry.register_classes(rows(&[(EVENT, RecordClass::Durable)]), CAP);
+        let sim = registry.register_classes(rows(&[(COMMAND, RecordClass::Command)]), CAP);
 
         assert_eq!(hook, Ok(1));
         assert_eq!(sim, Ok(1));
@@ -434,10 +516,10 @@ mod tests {
     fn a_call_that_disagrees_with_itself_is_refused() {
         let mut registry = Registry::default();
 
-        let refused = registry.register_classes(rows(&[
-            (EVENT, RecordClass::Durable),
-            (EVENT, RecordClass::Lossy),
-        ]));
+        let refused = registry.register_classes(
+            rows(&[(EVENT, RecordClass::Durable), (EVENT, RecordClass::Lossy)]),
+            CAP,
+        );
 
         assert_eq!(
             refused,
@@ -460,10 +542,13 @@ mod tests {
     fn a_topic_is_complete_with_a_class_and_a_capability_and_no_route() {
         let mut registry = Registry::default();
         registry
-            .register_classes(rows(&[
-                (EVENT, RecordClass::Durable),
-                (COMMAND, RecordClass::Command),
-            ]))
+            .register_classes(
+                rows(&[
+                    (EVENT, RecordClass::Durable),
+                    (COMMAND, RecordClass::Command),
+                ]),
+                CAP,
+            )
             .expect("classes");
         registry
             .register_caps(rows(&[(EVENT, Capability::Read)]))
@@ -475,7 +560,7 @@ mod tests {
         assert!(registry.is_complete(EVENT.as_bytes()));
         assert_eq!(
             registry.required(EVENT.as_bytes()),
-            Some((Capability::Read, Class::Durable))
+            Some((Capability::Read, Class::Durable, None))
         );
         assert!(
             !registry.is_complete(COMMAND.as_bytes()),
@@ -493,38 +578,109 @@ mod tests {
     }
 
     /// Each class names its own ring, and a command-class topic committed
-    /// outbound takes the durable one.
+    /// outbound takes the durable one. The one `LIFECYCLE` topic is bound
+    /// to the first slot, and no other topic has one.
     #[test]
     fn a_topic_takes_the_ring_of_its_class_and_a_command_the_durable_one() {
         const GAUGE: &str = "dcsbridge.builtin.sim.Gauge";
         const EDGE: &str = "dcsbridge.builtin.hook.Edge";
         let all = [
-            (GAUGE, RecordClass::Lossy, Class::Lossy),
-            (EVENT, RecordClass::Durable, Class::Durable),
-            (EDGE, RecordClass::Lifecycle, Class::Lifecycle),
-            (COMMAND, RecordClass::Command, Class::Durable),
+            (GAUGE, RecordClass::Lossy, Class::Lossy, None),
+            (EVENT, RecordClass::Durable, Class::Durable, None),
+            (EDGE, RecordClass::Lifecycle, Class::Lifecycle, Some(0)),
+            (COMMAND, RecordClass::Command, Class::Durable, None),
         ];
         let mut registry = Registry::default();
-        for (topic, class, _) in all {
+        for (topic, class, _, _) in all {
             registry
-                .register_classes(rows(&[(topic, class)]))
+                .register_classes(rows(&[(topic, class)]), CAP)
                 .expect("classes");
             registry
                 .register_caps(rows(&[(topic, Capability::Read)]))
                 .expect("caps");
         }
 
-        for (topic, _, ring) in all {
+        for (topic, _, ring, slot) in all {
             assert_eq!(
                 registry.required(topic.as_bytes()),
-                Some((Capability::Read, ring)),
+                Some((Capability::Read, ring, slot)),
                 "{topic}"
             );
         }
         assert_eq!(
             registry.required(dcsbridge_topic::COMMAND_ACK.as_bytes()),
-            Some((Capability::Command, Class::Durable))
+            Some((Capability::Command, Class::Durable, None))
         );
+    }
+
+    /// The cap bounds how many `LIFECYCLE` topics are ever bound. A call
+    /// past it is refused whole, the row of another class beside it
+    /// unapplied, and re-registering bound topics binds nothing more. The
+    /// slot numbers within one call are not asserted, because `merge`
+    /// hands its fresh rows over in hash order; what holds is that the
+    /// bound slots are distinct and all under the cap.
+    #[test]
+    fn a_lifecycle_registration_past_the_cap_is_refused_whole() {
+        let mut registry = Registry::default();
+
+        assert_eq!(registry.register_classes(lifecycle(0, CAP), CAP), Ok(64));
+        assert_eq!(
+            registry.register_classes(lifecycle(0, CAP), CAP),
+            Ok(0),
+            "a re-registration bound a slot"
+        );
+
+        let mut over = lifecycle(CAP, 1);
+        over.push((EVENT.to_string(), RecordClass::Durable));
+        assert_eq!(
+            registry.register_classes(over, CAP),
+            Err(Refusal::OverCap {
+                bound: 64,
+                offered: 1,
+                cap: 64,
+            })
+        );
+        assert_eq!(
+            registry.classes().len(),
+            64,
+            "a refused call applied the durable row beside the cap"
+        );
+        assert_eq!(
+            Refusal::OverCap {
+                bound: 64,
+                offered: 1,
+                cap: 64
+            }
+            .to_string(),
+            "1 LIFECYCLE topics beside 64 bound would exceed max_lifecycle_topics 64"
+        );
+
+        let mut slots: Vec<u32> = registry.slots.values().copied().collect();
+        slots.sort_unstable();
+        slots.dedup();
+        assert_eq!(slots.len(), 64, "two topics share a slot");
+        assert!(slots.iter().all(|slot| *slot < CAP), "a slot past the cap");
+    }
+
+    /// One call of one more than the cap is refused with nothing bound,
+    /// under a cap smaller than the default.
+    #[test]
+    fn one_call_over_a_small_cap_binds_nothing() {
+        let mut registry = Registry::default();
+
+        assert_eq!(
+            registry.register_classes(lifecycle(0, 17), 16),
+            Err(Refusal::OverCap {
+                bound: 0,
+                offered: 17,
+                cap: 16,
+            })
+        );
+        assert!(
+            registry.classes().is_empty(),
+            "a refused call applied a row"
+        );
+        assert_eq!(registry.register_classes(lifecycle(0, 16), 16), Ok(16));
     }
 
     /// The acknowledgement is complete and addressable with nothing

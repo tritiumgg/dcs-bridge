@@ -99,7 +99,26 @@ for _, call in ipairs({ 'classes', 'routes', 'caps', 'replies' }) do
   raises(call .. ' with a string', shim[call], 'durable')
 end
 
+-- A lifecycle topic takes a slot in the retained set, and there are
+-- max_lifecycle_topics of them, 64 before configure. One call of 65 is
+-- refused whole, naming the key; a call of 64 binds them all; one more
+-- is refused. This script is the only one in its process, so the 64
+-- count against nothing else.
+local function boundaries(from, count)
+  local t = {}
+  for n = from, from + count - 1 do
+    t['dcsbridge.builtin.hook.Boundary' .. n] = 'lifecycle'
+  end
+  return t
+end
+refused('65 lifecycle topics in one call', shim.classes, boundaries(1, 65),
+  'classes refused', '65 LIFECYCLE topics', 'max_lifecycle_topics 64')
+assert(shim.classes(boundaries(1, 64)) == 64, 'the refused call bound a slot')
+refused('a 65th lifecycle topic', shim.classes, boundaries(65, 1),
+  'classes refused', '1 LIFECYCLE topics beside 64 bound', 'max_lifecycle_topics 64')
+
 print('ok  the four calls are on the table and a second registrar merges')
 print('ok  an identical registration answers zero, and a conflicting row is refused whole')
 print('ok  an outbound-only topic registers with a class and a capability and no route')
 print('ok  a table that is not topic-to-member is refused naming the row')
+print('ok  a classes call past max_lifecycle_topics is refused whole')

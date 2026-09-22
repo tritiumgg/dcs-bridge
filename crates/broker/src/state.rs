@@ -1164,11 +1164,11 @@ impl Bridge {
     ///
     /// Asked at every `begin` and `begin_to`, and answered the way
     /// [`Bridge::addressable`] is: a plain value with no lock held, so the
-    /// raise the Lua side makes of `None` jumps past no guard. The pair
-    /// travels with the record to [`Bridge::commit`], where the writer
+    /// raise the Lua side makes of `None` jumps past no guard. The three
+    /// travel with the record to [`Bridge::commit`], where the writer
     /// thread withholds the record from a connection the capability does
-    /// not cover.
-    pub fn registered(&self, topic: &[u8]) -> Option<(Capability, Class)> {
+    /// not cover, and keeps a `LIFECYCLE` record in its slot.
+    pub fn registered(&self, topic: &[u8]) -> Option<(Capability, Class, Option<u32>)> {
         let required = self.registry().required(topic);
         if required.is_none() {
             self.partial_registration.fetch_add(1, Ordering::Relaxed);
@@ -1202,7 +1202,9 @@ impl Bridge {
         &self,
         rows: impl IntoIterator<Item = (Topic, RecordClass)>,
     ) -> Result<usize, Refusal> {
-        self.registry_mut().register_classes(rows)
+        // The specification's default, until the cap is frozen from the
+        // configuration.
+        self.registry_mut().register_classes(rows, 64)
     }
 
     /// Merge a table of destination states. [`Registry::register_routes`].
@@ -1667,7 +1669,7 @@ mod tests {
             .expect("caps");
         assert_eq!(
             bridge.registered(EVENT.as_bytes()),
-            Some((Capability::Read, Class::Durable)),
+            Some((Capability::Read, Class::Durable, None)),
             "a registered topic did not name its capability and its ring"
         );
         assert_eq!(
@@ -1678,7 +1680,7 @@ mod tests {
 
         assert_eq!(
             bridge.registered(dcsbridge_topic::COMMAND_ACK.as_bytes()),
-            Some((Capability::Command, Class::Durable))
+            Some((Capability::Command, Class::Durable, None))
         );
 
         assert!(!bridge.addressable(REPLY.as_bytes()));

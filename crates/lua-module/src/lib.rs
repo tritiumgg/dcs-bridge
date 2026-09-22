@@ -1436,7 +1436,7 @@ mod put {
             let s = lua::luaL_checklstring(state, 1, &mut len);
             let topic = core::slice::from_raw_parts(s.cast::<u8>(), len);
             let pending = opening(state);
-            let Some((need, class)) = dcsbridge_broker::bridge().registered(topic) else {
+            let Some((need, class, _)) = dcsbridge_broker::bridge().registered(topic) else {
                 lua::luaL_error(
                     state,
                     c"begin refused: %s has no class or no capability registered".as_ptr(),
@@ -1504,7 +1504,7 @@ mod put {
             }
             // A reply is marked addressable by one table and given its
             // class and capability by two others, and needs all three.
-            let Some((need, class)) = dcsbridge_broker::bridge().registered(topic) else {
+            let Some((need, class, _)) = dcsbridge_broker::bridge().registered(topic) else {
                 lua::luaL_error(
                     state,
                     c"begin_to refused: %s has no class or no capability registered".as_ptr(),
