@@ -207,6 +207,9 @@ pub struct Outbound {
     commit: Mutex<Commit<Record>>,
     listener: Listener,
     contended: AtomicU64,
+    /// The commit ring's count of evicted `LIFECYCLE` records, read here
+    /// without the lock the committer holds `commit` under.
+    lifecycle_evicted: Arc<AtomicU64>,
 }
 
 impl fmt::Debug for Outbound {
@@ -254,6 +257,12 @@ impl Outbound {
     /// authentication, `lifecycle_replayed_total`.
     pub fn replayed(&self) -> u64 {
         self.writer.replayed()
+    }
+
+    /// How many `LIFECYCLE` records the commit ring evicted before the
+    /// writer thread kept them, `lifecycle_evicted_total`.
+    pub fn lifecycle_evicted(&self) -> u64 {
+        self.lifecycle_evicted.load(Ordering::Relaxed)
     }
 
     /// How many records the connections' rings have turned away, by label,
@@ -687,6 +696,7 @@ impl Bridge {
         // The lock above makes this the only setter.
         let _ = self.outbound.set(Outbound {
             writer,
+            lifecycle_evicted: commit.lifecycle_evicted_shared(),
             commit: Mutex::new(commit),
             listener,
             contended: AtomicU64::new(0),

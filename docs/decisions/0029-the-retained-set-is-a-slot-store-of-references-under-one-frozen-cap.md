@@ -113,11 +113,28 @@ it registers, so the built driver never hits either case.
 Slots are never given back. Retiring a `LIFECYCLE` topic is a DCS restart,
 as retiring any registration is.
 
-A full `LIFECYCLE` ring during the replay closes the connection as any push
-into a full one does (ADR 0028). A replay of `max_lifecycle_topics` records
-fits `ring_out_lifecycle_records` at both defaults, 64 into 256; the ring
-size stays provisional until PROBE-7 at task 9.7, and this figure reopens
-with it.
+The replay is pushed into a fresh connection's `LIFECYCLE` ring in one pass,
+before its drainer has popped any of it, and a full `LIFECYCLE` ring closes
+the connection as any push into a full one does (ADR 0028). So `configure`
+refuses a `ring_out_lifecycle_records` at or below `max_lifecycle_topics`,
+as ADR 0019 has it refuse every pair whose basis says one bounds the other;
+a file that lowered the ring alone would close every consumer at its
+authentication. The defaults, 64 into 256, leave room for the boundaries a
+mission emits after the replay. The ring size stays provisional until
+PROBE-7 at task 9.7, and this pair reopens with it.
+
+**The commit ring can evict a `LIFECYCLE` record before the writer thread
+keeps it.** The ring has one class and evicts its oldest record under a
+burst (ADR 0011), and the writer thread keeps a record only once it has
+popped it, so a boundary committed just ahead of a burst larger than the
+ring, on a host that holds the writer thread off for that long, is lost to
+the retained set as well as to every live consumer. The logic thread is the
+one that finds out, and it counts the loss in `lifecycle_evicted_total`; a
+late consumer is then replayed the slot's previous record until the next
+boundary. Re-queuing the record would put an allocation or a retry on the
+commit path, and a second commit ring per class is the sizing question
+PROBE-7 prices, so the loss is counted here and not prevented. Nothing
+reports the count until `stats`.
 
 `lifecycle_replayed_total` is one number for the writer thread until `stats`
 reports it per connection.

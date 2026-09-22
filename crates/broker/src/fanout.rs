@@ -509,6 +509,10 @@ impl Clone for Waker {
 pub struct Commit<T> {
     producer: Producer<Addressed<T>>,
     waker: Waker,
+    /// A `LIFECYCLE` record the commit ring evicts before the writer thread
+    /// keeps it is a loss the retained set never sees, so it is counted
+    /// here, on the thread that finds out. ADR 0029.
+    lifecycle_evicted: Arc<AtomicU64>,
 }
 
 impl<T> Commit<T> {
@@ -563,7 +567,12 @@ impl<T> Commit<T> {
             record,
         }) {
             Push::Stored => Push::Stored,
-            Push::Evicted(lost) => Push::Evicted(lost.record),
+            Push::Evicted(lost) => {
+                if lost.slot.is_some() {
+                    self.lifecycle_evicted.fetch_add(1, Ordering::Relaxed);
+                }
+                Push::Evicted(lost.record)
+            }
             Push::Refused(lost) => Push::Refused(lost.record),
         };
         self.waker.wake_if_parked();
@@ -574,6 +583,19 @@ impl<T> Commit<T> {
     /// How many records the commit ring has turned away.
     pub fn dropped(&self) -> u64 {
         self.producer.dropped()
+    }
+
+    /// How many `LIFECYCLE` records the commit ring evicted before the
+    /// writer thread could keep them, `lifecycle_evicted_total`: each is a
+    /// boundary the retained set never held.
+    pub fn lifecycle_evicted(&self) -> u64 {
+        self.lifecycle_evicted.load(Ordering::Relaxed)
+    }
+
+    /// The count behind [`lifecycle_evicted`](Self::lifecycle_evicted), for
+    /// a reader that must not take the lock the committer holds this under.
+    pub fn lifecycle_evicted_shared(&self) -> Arc<AtomicU64> {
+        Arc::clone(&self.lifecycle_evicted)
     }
 
     /// How many records the commit ring holds, as a gauge.
@@ -823,6 +845,7 @@ impl<T: Clone + Send + 'static> Writer<T> {
         let commit = Commit {
             producer,
             waker: waker.clone(),
+            lifecycle_evicted: Arc::new(AtomicU64::new(0)),
         };
         let connections = Connections {
             control: control.clone(),
@@ -1858,6 +1881,36 @@ mod tests {
         assert_eq!(writer.lifecycle_disconnects(), 0);
 
         drop(writer);
+    }
+
+    /// A `LIFECYCLE` record the commit ring evicts before the writer thread
+    /// pops it is counted as evicted, and a plain record evicted the same
+    /// way is not: the count is the boundaries the retained set never
+    /// held. Built over a bare ring with no writer thread, so the eviction
+    /// is certain rather than a matter of schedule.
+    #[test]
+    fn a_lifecycle_record_the_commit_ring_evicts_is_counted() {
+        let (producer, _consumer) = Ring::split(2);
+        let mut commit: Commit<u32> = Commit {
+            producer,
+            waker: Waker::new(Arc::new(ParkFlag::new()), thread::current()),
+            lifecycle_evicted: Arc::new(AtomicU64::new(0)),
+        };
+
+        assert!(matches!(commit.push_retained(READ, 0, 0), Push::Stored));
+        assert!(matches!(commit.push(READ, Class::Durable, 1), Push::Stored));
+        assert!(matches!(
+            commit.push(READ, Class::Durable, 2),
+            Push::Evicted(0)
+        ));
+        assert_eq!(commit.lifecycle_evicted(), 1);
+        assert!(matches!(commit.push_retained(READ, 1, 3), Push::Evicted(1)));
+        assert_eq!(
+            commit.lifecycle_evicted(),
+            1,
+            "an evicted plain record counted as a lifecycle one"
+        );
+        assert_eq!(commit.dropped(), 2);
     }
 
     /// The set is a mask by number: a number added is covered, one not
