@@ -455,6 +455,15 @@ impl Config {
                 "`bind_address` is public; set `allow_public_bind` to listen there anyway",
             ));
         }
+        // The replay is pushed into a fresh connection's LIFECYCLE ring in
+        // one pass, before its drainer has popped any of it, so the ring
+        // holds the whole retained set or the connection is closed at its
+        // authentication. ADR 0029.
+        if self.ring_out_lifecycle_records <= self.max_lifecycle_topics {
+            return Err(Error::Invariant(
+                "`ring_out_lifecycle_records` must be above `max_lifecycle_topics`, or a replay of the retained set closes the connection it is for",
+            ));
+        }
         Ok(())
     }
 }
@@ -646,6 +655,7 @@ mod tests {
             ("ring_out_lossy_records", n(128.0)),
             ("ring_out_durable_records", n(16.0)),
             ("ring_out_lifecycle_records", n(8.0)),
+            ("max_lifecycle_topics", n(4.0)),
             ("handshake_timeout_ms", n(250.0)),
             ("tokens", Value::Tokens(vec![token.clone()])),
             ("route", Value::String("A".into())),
@@ -793,6 +803,14 @@ mod tests {
         assert!(
             invariant(vec![("bind_address", Value::String("0.0.0.0".into()))])
                 .contains("`allow_public_bind`")
+        );
+        assert!(
+            invariant(vec![("ring_out_lifecycle_records", n(64.0))])
+                .contains("`max_lifecycle_topics`")
+        );
+        assert!(
+            invariant(vec![("max_lifecycle_topics", n(256.0))])
+                .contains("`ring_out_lifecycle_records`")
         );
 
         // Raising both sides together passes, and so does a public bind
