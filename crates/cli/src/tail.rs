@@ -513,6 +513,73 @@ mod tests {
         assert!(!out.contains("out of order"), "seq went backwards:\n{out}");
     }
 
+    /// A `tail` started mid-epoch reads the boundary record first, and one
+    /// that reconnects reads it again, from the retained set: the second
+    /// connection attaches after every live record was fanned out, so the
+    /// boundary record on its stream can have come from nowhere else, and
+    /// no live record follows it. The first connection's first record is
+    /// the boundary record too, by fan-out or by replay, whichever the
+    /// writer thread reached first.
+    #[test]
+    fn a_tail_that_joins_mid_epoch_reads_the_boundary_record_first() {
+        const EPOCH_OPENED: &str = "dcsbridge.builtin.hook.EpochOpened";
+        let (writer, mut commit, connections) = Writer::spawn(4096);
+        let answers = Arc::new(dcsbridge_broker::state::Global);
+        let listener =
+            Listener::spawn("127.0.0.1:0", connections, Capacities::each(64), answers).unwrap();
+        drop(commit.push_retained(READ, 0, record_on(EPOCH_OPENED, 16)));
+
+        let mut first = client(listener.local_addr());
+        let mut first_bytes = take_frame(&mut first);
+        first_bytes.extend(take_frame(&mut first));
+        warm_up(&mut commit, &first);
+        drop(commit.push(READ, Class::Durable, record(16)));
+        first_bytes.extend(drain(&mut first));
+
+        let mut second = client(listener.local_addr());
+        let mut second_bytes = take_frame(&mut second);
+        second_bytes.extend(take_frame(&mut second));
+        second_bytes.extend(drain(&mut second));
+        let replayed = writer.replayed();
+        drop(listener);
+        drop(writer);
+
+        let mut out = Vec::new();
+        let summary = run(&first_bytes[..], &mut out).unwrap();
+        let out = String::from_utf8(out).unwrap();
+        assert!(!summary.refused, "the token was refused:\n{out}");
+        // The handshake and the auth result are printed as frames too, and
+        // are the broker's own; the first record follows them.
+        let first_record = out
+            .lines()
+            .filter(|line| line.contains(" topic="))
+            .nth(2)
+            .unwrap_or_else(|| panic!("no record line:\n{out}"));
+        assert!(
+            first_record.contains(&format!(" topic={EPOCH_OPENED} bytes=")),
+            "the first record is not the boundary record:\n{out}"
+        );
+
+        let mut out = Vec::new();
+        let summary = run(&second_bytes[..], &mut out).unwrap();
+        let out = String::from_utf8(out).unwrap();
+        assert!(!summary.refused, "the token was refused:\n{out}");
+        assert_eq!(
+            out.matches(&format!(" topic={EPOCH_OPENED} bytes="))
+                .count(),
+            1,
+            "the reconnect did not read the boundary record once:\n{out}"
+        );
+        assert!(
+            !out.contains(&format!(" topic={TOPIC} bytes=")),
+            "a live record reached the reconnect:\n{out}"
+        );
+        assert_eq!(summary.frames, 3, "handshake, result, replay:\n{out}");
+        assert_eq!(summary.gaps, 0, "the replay left a gap:\n{out}");
+        assert!(!out.contains("out of order"), "seq went backwards:\n{out}");
+        assert!(replayed >= 1, "nothing was counted as replayed");
+    }
+
     /// The capability filter, observed the way an operator observes it: a
     /// `read` token watches a stream in which every other record needs
     /// `command`, and `tail` prints the records it may see, none it may
