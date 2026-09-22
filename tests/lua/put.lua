@@ -112,8 +112,25 @@ second.integer(1, 2)
 queued("the second table's record", second.commit())
 queued("the first table's record, after the second committed", shim.commit())
 
+-- A lifecycle record over max_lifecycle_record_bytes, 16 KiB by default,
+-- is refused at commit: false back, and the next record starts clean. A
+-- durable record of the same size queues, since the bound is on what the
+-- broker keeps for the life of the process.
+shim.classes({ boundary = 'lifecycle' })
+shim.caps({ boundary = 'read' })
+shim.begin('boundary')
+shim.string(1, string.rep('x', 16 * 1024))
+assert(shim.commit() == false, 'an oversize lifecycle record was queued')
+shim.begin('boundary')
+shim.integer(1, 1)
+queued('the lifecycle record after a refused one', shim.commit())
+shim.begin('t')
+shim.string(1, string.rep('x', 16 * 1024))
+queued('a durable record of the same size', shim.commit())
+
 print('ok  the nine put calls are on the table')
 print('ok  a record of every put queues, and so does an empty one')
 print('ok  a defect raises, a refused commit returns false, a begin discards')
 print('ok  a begin on a topic missing a class or a capability is refused by name')
 print('ok  two tables hold two records in progress')
+print('ok  a lifecycle record over max_lifecycle_record_bytes is refused at commit')

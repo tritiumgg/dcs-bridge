@@ -70,6 +70,10 @@ pub struct Bridge {
     /// Records refused at `begin` or `begin_to` because their topic has no
     /// class or no capability registered. `partial_registration_total`.
     partial_registration: AtomicU64,
+    /// `LIFECYCLE` records refused at `commit` for a tail over
+    /// `max_lifecycle_record_bytes`. `lifecycle_oversize_total`, as one
+    /// number until `stats` reports it by topic.
+    lifecycle_oversize: AtomicU64,
     /// Names this process in every handshake, so a consumer can tell a
     /// restarted broker from the one it was talking to.
     instance_id: u64,
@@ -382,6 +386,11 @@ pub enum CommitError {
     /// Another thread was committing. Refused, because waiting would put a
     /// lock on the logic thread and a second committer is a defect.
     Busy,
+    /// A `LIFECYCLE` tail over `max_lifecycle_record_bytes`. Refused,
+    /// because the retained set holds one such record per topic for the
+    /// life of the process, and the key is what bounds that memory.
+    /// ADR 0029.
+    Oversize,
 }
 
 impl fmt::Display for CommitError {
@@ -389,6 +398,7 @@ impl fmt::Display for CommitError {
         f.write_str(match self {
             CommitError::NotStarted => "the outbound path is not started",
             CommitError::Busy => "another thread is committing",
+            CommitError::Oversize => "a LIFECYCLE record is over max_lifecycle_record_bytes",
         })
     }
 }
@@ -507,6 +517,7 @@ impl Bridge {
             unrouted: AtomicU64::new(0),
             misaddressed: AtomicU64::new(0),
             partial_registration: AtomicU64::new(0),
+            lifecycle_oversize: AtomicU64::new(0),
             instance_id,
             started: Instant::now(),
             heartbeat: AtomicU64::new(0),
@@ -1103,6 +1114,10 @@ impl Bridge {
     /// reference; that is the one allocation on the commit path. A record the
     /// commit ring evicts to make room comes back here and is dropped on the
     /// calling thread. ADR 0014.
+    ///
+    /// A `LIFECYCLE` tail over `max_lifecycle_record_bytes` is refused
+    /// before the copy and counted: a retained record lives as long as the
+    /// process, and the key is what bounds that memory. ADR 0029.
     pub fn commit(
         &self,
         need: Capability,
@@ -1111,6 +1126,12 @@ impl Bridge {
         tail: &[u8],
     ) -> Result<(), CommitError> {
         let outbound = self.outbound.get().ok_or(CommitError::NotStarted)?;
+        if class == Class::Lifecycle
+            && tail.len() > self.config().max_lifecycle_record_bytes as usize
+        {
+            self.lifecycle_oversize.fetch_add(1, Ordering::Relaxed);
+            return Err(CommitError::Oversize);
+        }
         let record: Record = Arc::from(tail);
 
         let mut commit = outbound.producer()?;
@@ -1215,6 +1236,12 @@ impl Bridge {
     /// such topic.
     pub fn partial_registration(&self) -> u64 {
         self.partial_registration.load(Ordering::Relaxed)
+    }
+
+    /// How many `LIFECYCLE` records were refused at `commit` for a tail
+    /// over `max_lifecycle_record_bytes`: `lifecycle_oversize_total`.
+    pub fn lifecycle_oversize(&self) -> u64 {
+        self.lifecycle_oversize.load(Ordering::Relaxed)
     }
 
     /// Write to the registration maps.
@@ -1740,6 +1767,40 @@ mod tests {
                 })
             ),
             "a 129th topic was bound under a cap of 128"
+        );
+    }
+
+    /// A `LIFECYCLE` tail over `max_lifecycle_record_bytes` is refused at
+    /// commit and counted, one at the bound is queued, and a `DURABLE` tail
+    /// of any size is not measured against the key.
+    #[test]
+    fn an_oversize_lifecycle_record_is_refused_at_commit() {
+        let bridge = Bridge::new(43);
+        bridge
+            .configure([("port", Value::Number(0.0))])
+            .expect("a valid table");
+        let bound = bridge.config().max_lifecycle_record_bytes as usize;
+        assert_eq!(bound, 16 * 1024);
+
+        let over = vec![0u8; bound + 1];
+        assert_eq!(
+            bridge.commit(Capability::Read, Class::Lifecycle, Some(0), &over),
+            Err(CommitError::Oversize)
+        );
+        assert_eq!(bridge.lifecycle_oversize(), 1);
+        assert_eq!(
+            bridge.commit(Capability::Read, Class::Lifecycle, Some(0), &over[..bound]),
+            Ok(())
+        );
+        assert_eq!(
+            bridge.commit(Capability::Read, Class::Durable, None, &over),
+            Ok(()),
+            "a durable record was measured against the lifecycle bound"
+        );
+        assert_eq!(bridge.lifecycle_oversize(), 1);
+        assert_eq!(
+            CommitError::Oversize.to_string(),
+            "a LIFECYCLE record is over max_lifecycle_record_bytes"
         );
     }
 
