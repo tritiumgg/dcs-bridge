@@ -129,10 +129,20 @@ the session closes and its place is given up; and the consumer's stream
 ends when it reads again. What stays, until the peer reads, exits or resets,
 is one thread blocked in the kernel and the three rings it holds. A consumer
 whose process is suspended for good is the case, and each such consumer
-costs one thread. Aborting the send needs `CancelIoEx` or a socket both
-threads poll, and neither can be tried without a Windows host in the loop;
-it belongs with the broker-hardening work, which has no task. The test of
-the close asserts the thread's return off Windows only.
+costs one thread, and a few megabytes of rings, until then. Nothing a
+consumer sees differs from macOS and Linux, and no other consumer is
+affected, so the cost is accepted and not fixed here.
+
+Two cancels were tried on that job and neither returned the send:
+`CancelIoEx` on the socket, which Windows documents for asynchronous I/O,
+and `CancelSynchronousIo` on the draining thread's handle, which it
+documents for this case. Whether the second was reached at all is not
+known, because the test observes the drainer's join alone. What is left is
+a send timeout, which on Windows makes the socket unusable and so is a
+disconnect rule of its own, or a socket both threads poll; either is a
+decision of its own and belongs with the broker-hardening work, which has
+no task. The test of the close asserts the thread's return off Windows
+only.
 
 A consumer closed this way sees its stream end and nothing that says why.
 It reconnects into a fresh `seq` and the retained set, which is what the
