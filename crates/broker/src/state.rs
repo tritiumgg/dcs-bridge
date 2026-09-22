@@ -1096,18 +1096,28 @@ impl Bridge {
 
     /// Queue an envelope tail for every connection whose token covers
     /// `need`, the capability its topic requires, into the ring `class`
-    /// names in each. Both come from [`Bridge::registered`].
+    /// names in each, and into `slot` of the retained set when the topic
+    /// is a `LIFECYCLE` one. All three come from [`Bridge::registered`].
     ///
     /// The tail is copied once, into the allocation the rings share by
     /// reference; that is the one allocation on the commit path. A record the
     /// commit ring evicts to make room comes back here and is dropped on the
     /// calling thread. ADR 0014.
-    pub fn commit(&self, need: Capability, class: Class, tail: &[u8]) -> Result<(), CommitError> {
+    pub fn commit(
+        &self,
+        need: Capability,
+        class: Class,
+        slot: Option<u32>,
+        tail: &[u8],
+    ) -> Result<(), CommitError> {
         let outbound = self.outbound.get().ok_or(CommitError::NotStarted)?;
         let record: Record = Arc::from(tail);
 
         let mut commit = outbound.producer()?;
-        drop(commit.push(need.number(), class, record));
+        drop(match slot {
+            Some(slot) => commit.push_retained(need.number(), slot, record),
+            None => commit.push(need.number(), class, record),
+        });
         Ok(())
     }
 
@@ -1924,7 +1934,7 @@ mod tests {
         // now reaches the connection, numbered after it.
         let tail = [0x22, 0x00];
         bridge()
-            .commit(Capability::Read, Class::Durable, &tail)
+            .commit(Capability::Read, Class::Durable, None, &tail)
             .expect("the path is started");
         client.read_exact(&mut length).expect("a frame arrives");
         assert_eq!(u32::from_le_bytes(length), 2 + tail.len() as u32);
@@ -1980,7 +1990,7 @@ mod tests {
             e.begin(topic, bridge().stamp());
             e.integer(1, 1).unwrap();
             bridge()
-                .commit(Capability::Read, Class::Durable, e.commit().unwrap())
+                .commit(Capability::Read, Class::Durable, None, e.commit().unwrap())
                 .expect("the path is started");
         };
 

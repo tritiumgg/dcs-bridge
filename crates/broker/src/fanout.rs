@@ -146,6 +146,11 @@ pub struct Addressed<T> {
     pub need: u32,
     /// The ring the record takes in each connection it reaches.
     pub class: Class,
+    /// The slot of the retained set the record replaces, for a `LIFECYCLE`
+    /// record on a registered topic. Bound at registration and carried
+    /// here because the writer thread reads no envelope and holds no
+    /// registry. ADR 0029.
+    pub slot: Option<u32>,
     /// The record itself.
     pub record: T,
 }
@@ -516,7 +521,17 @@ impl<T> Commit<T> {
     /// ADR 0011 accepts that until the record type is fixed and its drop cost
     /// is known.
     pub fn push(&mut self, need: u32, class: Class, value: T) -> Push<T> {
-        self.push_addressed(None, need, class, value)
+        self.push_addressed(None, need, class, None, value)
+    }
+
+    /// Commit a `LIFECYCLE` record for every connection whose capabilities
+    /// cover `need`, and keep it in `slot` of the retained set for the
+    /// connections that authenticate later.
+    ///
+    /// Queued as [`push`](Self::push) queues; the slot rides with the
+    /// record to the writer thread, which is the one that holds the set.
+    pub fn push_retained(&mut self, need: u32, slot: u32, value: T) -> Push<T> {
+        self.push_addressed(None, need, Class::Lifecycle, Some(slot), value)
     }
 
     /// Commit a record for one connection and no other.
@@ -527,7 +542,7 @@ impl<T> Commit<T> {
     /// costs the logic thread what `push` does.
     pub fn push_to(&mut self, to: ConnectionId, class: Class, value: T) -> Push<T> {
         // An addressed record is not filtered, so it needs nothing.
-        self.push_addressed(Some(to), 0, class, value)
+        self.push_addressed(Some(to), 0, class, None, value)
     }
 
     /// Push with an address, and hand back what the ring turned away as the
@@ -537,12 +552,14 @@ impl<T> Commit<T> {
         to: Option<ConnectionId>,
         need: u32,
         class: Class,
+        slot: Option<u32>,
         record: T,
     ) -> Push<T> {
         let pushed = match self.producer.push(Addressed {
             to,
             need,
             class,
+            slot,
             record,
         }) {
             Push::Stored => Push::Stored,
@@ -893,6 +910,7 @@ impl<T: Clone + Send + 'static> Writer<T> {
                                 need: 0,
                                 // A broker answer is durable. ADR 0028.
                                 class: Class::Durable,
+                                slot: None,
                                 record,
                             },
                             true,
@@ -1093,10 +1111,12 @@ fn deliver<T: Clone>(
     answer: bool,
     counts: &Counts,
 ) {
+    // The slot is the retained set's concern, settled before the push.
     let Addressed {
         to,
         need,
         class,
+        slot: _,
         record,
     } = addressed;
 
@@ -1574,6 +1594,45 @@ mod tests {
             "the addressed record was withheld, or the fanned one was not"
         );
         assert_eq!(writer.filtered(), 1);
+
+        drop(writer);
+    }
+
+    /// A retained push fans out as a plain one does: numbered in order
+    /// with the records around it, into the `LIFECYCLE` ring, withheld from
+    /// a connection its need is not covered by.
+    #[test]
+    fn a_retained_push_fans_out_as_a_plain_one_does() {
+        let (writer, mut commit, connections) = Writer::spawn(ROOMY);
+        let (reader_id, mut reader) = connections.attach(Capacities::each(ROOMY));
+        connections.authenticated(reader_id, Capabilities::NONE.with(READ));
+        let (_, mut trusted) = attached(&connections, ROOMY);
+
+        commit.push(READ, Class::Durable, 0u32);
+        commit.push_retained(READ, 0, 1);
+        commit.push_retained(COMMAND, 1, 2);
+        commit.push(READ, Class::Durable, 3);
+
+        assert_eq!(
+            drain_numbered(&mut trusted, 4),
+            vec![
+                Numbered { seq: 1, record: 0 },
+                Numbered { seq: 2, record: 1 },
+                Numbered { seq: 3, record: 2 },
+                Numbered { seq: 4, record: 3 },
+            ]
+        );
+        assert_eq!(
+            drain_numbered(&mut reader, 3),
+            vec![
+                Numbered { seq: 1, record: 0 },
+                Numbered { seq: 2, record: 1 },
+                Numbered { seq: 3, record: 3 },
+            ],
+            "the retained record the token does not cover reached it, or left a gap"
+        );
+        assert_eq!(writer.filtered(), 1);
+        assert_eq!(writer.lifecycle_disconnects(), 0);
 
         drop(writer);
     }

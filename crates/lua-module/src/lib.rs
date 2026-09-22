@@ -1254,13 +1254,16 @@ mod put {
     /// broker at `commit` so the writer thread can withhold the record from
     /// a connection whose token lacks it without holding a registry.
     /// `class` is looked up with it and travels the same way, so the writer
-    /// thread knows which of a connection's rings the record takes. Both are
-    /// meaningful only while a record is open.
+    /// thread knows which of a connection's rings the record takes, and
+    /// `slot` with both, so it knows which entry of the retained set a
+    /// `LIFECYCLE` record replaces. All three are meaningful only while a
+    /// record is open.
     struct Pending {
         encoder: Option<Encoder>,
         to: Option<ConnectionId>,
         need: Capability,
         class: Class,
+        slot: Option<u32>,
     }
 
     /// The calls and their names on the table.
@@ -1287,6 +1290,7 @@ mod put {
             to: None,
             need: Capability::Read,
             class: Class::Durable,
+            slot: None,
         }));
 
         // SAFETY: the userdata is exactly one pointer wide and lives as long
@@ -1436,7 +1440,7 @@ mod put {
             let s = lua::luaL_checklstring(state, 1, &mut len);
             let topic = core::slice::from_raw_parts(s.cast::<u8>(), len);
             let pending = opening(state);
-            let Some((need, class, _)) = dcsbridge_broker::bridge().registered(topic) else {
+            let Some((need, class, slot)) = dcsbridge_broker::bridge().registered(topic) else {
                 lua::luaL_error(
                     state,
                     c"begin refused: %s has no class or no capability registered".as_ptr(),
@@ -1447,6 +1451,7 @@ mod put {
             pending.to = None;
             pending.need = need;
             pending.class = class;
+            pending.slot = slot;
             pending
                 .encoder
                 .as_mut()
@@ -1522,6 +1527,8 @@ mod put {
             pending.to = Some(ConnectionId::from_raw(id as u64));
             pending.need = need;
             pending.class = class;
+            // A record for one connection is nothing a later one is owed.
+            pending.slot = None;
         }
         0
     }
@@ -1619,7 +1626,9 @@ mod put {
             let queued = match encoder.commit() {
                 Ok(tail) => match to {
                     Some(to) => bridge.commit_to(to, pending.class, tail).is_ok(),
-                    None => bridge.commit(pending.need, pending.class, tail).is_ok(),
+                    None => bridge
+                        .commit(pending.need, pending.class, pending.slot, tail)
+                        .is_ok(),
                 },
                 Err(Error::NotOpen) => raise(state, Error::NotOpen),
                 Err(_) => false,
