@@ -1005,7 +1005,7 @@ mod register {
     unsafe fn table<V: Member>(
         state: *mut c_void,
         call: &'static str,
-        register: impl FnOnce(Vec<(Topic, V)>) -> Result<usize, dcsbridge_broker::registry::Conflict>,
+        register: impl FnOnce(Vec<(Topic, V)>) -> Result<usize, dcsbridge_broker::registry::Refusal>,
     ) -> bool {
         // SAFETY: the caller's contract. The table is read whole before the
         // broker sees any of it, so a bad row leaves the maps as they were.

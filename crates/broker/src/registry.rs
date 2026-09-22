@@ -162,26 +162,32 @@ impl Member for Capability {
 
 /// Why a registration was refused, with none of it applied.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct Conflict {
-    /// The topic the call named with a value other than the one held.
-    pub topic: Topic,
-    /// What the topic is registered as.
-    pub held: &'static str,
-    /// What the call offered instead.
-    pub offered: &'static str,
+pub enum Refusal {
+    /// A row named a topic with a value other than the one held, by the
+    /// map or by an earlier row of the same call.
+    Conflict {
+        /// The topic the call named.
+        topic: Topic,
+        /// What the topic is registered as.
+        held: &'static str,
+        /// What the call offered instead.
+        offered: &'static str,
+    },
 }
 
-impl fmt::Display for Conflict {
+impl fmt::Display for Refusal {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "{} is registered as {}, not {}",
-            self.topic, self.held, self.offered
-        )
+        match self {
+            Refusal::Conflict {
+                topic,
+                held,
+                offered,
+            } => write!(f, "{topic} is registered as {held}, not {offered}"),
+        }
     }
 }
 
-impl std::error::Error for Conflict {}
+impl std::error::Error for Refusal {}
 
 /// Merge `rows` into `map`: every row new to the map is added, every row
 /// repeating the map is passed over, and the first row disagreeing with the
@@ -194,12 +200,12 @@ impl std::error::Error for Conflict {}
 fn merge<V: Member>(
     map: &mut HashMap<Topic, V>,
     rows: impl IntoIterator<Item = (Topic, V)>,
-) -> Result<usize, Conflict> {
+) -> Result<usize, Refusal> {
     let mut fresh: HashMap<Topic, V> = HashMap::new();
     for (topic, offered) in rows {
         match map.get(&topic).or_else(|| fresh.get(&topic)) {
             Some(held) if *held != offered => {
-                return Err(Conflict {
+                return Err(Refusal::Conflict {
                     held: held.name(),
                     offered: offered.name(),
                     topic,
@@ -243,7 +249,7 @@ impl Registry {
     pub fn register_classes(
         &mut self,
         rows: impl IntoIterator<Item = (Topic, RecordClass)>,
-    ) -> Result<usize, Conflict> {
+    ) -> Result<usize, Refusal> {
         merge(&mut self.classes, rows)
     }
 
@@ -251,7 +257,7 @@ impl Registry {
     pub fn register_routes(
         &mut self,
         rows: impl IntoIterator<Item = (Topic, Target)>,
-    ) -> Result<usize, Conflict> {
+    ) -> Result<usize, Refusal> {
         merge(&mut self.routes, rows)
     }
 
@@ -259,7 +265,7 @@ impl Registry {
     pub fn register_caps(
         &mut self,
         rows: impl IntoIterator<Item = (Topic, Capability)>,
-    ) -> Result<usize, Conflict> {
+    ) -> Result<usize, Refusal> {
         merge(&mut self.caps, rows)
     }
 
@@ -409,7 +415,7 @@ mod tests {
 
         assert_eq!(
             refused,
-            Err(Conflict {
+            Err(Refusal::Conflict {
                 topic: COMMAND.into(),
                 held: "sim_driver",
                 offered: "hook_driver",
@@ -434,8 +440,12 @@ mod tests {
         ]));
 
         assert_eq!(
-            refused.map_err(|c| (c.held, c.offered)),
-            Err(("durable", "lossy"))
+            refused,
+            Err(Refusal::Conflict {
+                topic: EVENT.into(),
+                held: "durable",
+                offered: "lossy",
+            })
         );
         assert!(
             registry.classes().is_empty(),

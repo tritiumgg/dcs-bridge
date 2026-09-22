@@ -37,7 +37,7 @@ use crate::handshake;
 use crate::inbound::{
     Answers, AuthError, Command, Delivery, Limits, Liveness, RejectedReason, Session, Window,
 };
-use crate::registry::{Capability, Conflict, Member, RecordClass, Registry, Target, Topic};
+use crate::registry::{Capability, Member, RecordClass, Refusal, Registry, Target, Topic};
 use crate::ring::{Consumer, Producer, Push, Ring};
 use crate::transport::{Listener, Record};
 
@@ -1197,11 +1197,11 @@ impl Bridge {
     }
 
     /// Merge a table of drop policies, answering the rows it added, or the
-    /// conflict that refused it whole. [`Registry::register_classes`].
+    /// refusal that applied none of them. [`Registry::register_classes`].
     pub fn register_classes(
         &self,
         rows: impl IntoIterator<Item = (Topic, RecordClass)>,
-    ) -> Result<usize, Conflict> {
+    ) -> Result<usize, Refusal> {
         self.registry_mut().register_classes(rows)
     }
 
@@ -1209,7 +1209,7 @@ impl Bridge {
     pub fn register_routes(
         &self,
         rows: impl IntoIterator<Item = (Topic, Target)>,
-    ) -> Result<usize, Conflict> {
+    ) -> Result<usize, Refusal> {
         self.registry_mut().register_routes(rows)
     }
 
@@ -1217,7 +1217,7 @@ impl Bridge {
     pub fn register_caps(
         &self,
         rows: impl IntoIterator<Item = (Topic, Capability)>,
-    ) -> Result<usize, Conflict> {
+    ) -> Result<usize, Refusal> {
         self.registry_mut().register_caps(rows)
     }
 
