@@ -30,7 +30,7 @@ use std::sync::{
 };
 use std::time::Instant;
 
-use crate::config::{self, Applied, Config, Value};
+use crate::config::{self, Applied, Config, Pending, Value};
 use crate::encode::Stamp;
 use crate::fanout::{Capacities, Class, Commit, ConnectionId, Dropped, Writer};
 use crate::handshake;
@@ -52,6 +52,12 @@ pub struct Bridge {
     registry: RwLock<Registry>,
     outbound: OnceLock<Outbound>,
     inbound: OnceLock<Inbound>,
+    /// `max_lifecycle_topics` as one number, frozen by whichever of the
+    /// first `LIFECYCLE` registration and the first `configure` comes
+    /// first, since the driver may register before it configures. The
+    /// registry binds slots under it and the writer thread's retained set
+    /// is sized from it, so the two can never disagree. ADR 0029.
+    lifecycle_cap: OnceLock<u32>,
     /// Held while the outbound path or the inbound rings are being started,
     /// so two starters cannot both bind or both allocate.
     starting: Mutex<()>,
@@ -496,6 +502,7 @@ impl Bridge {
             registry: RwLock::new(Registry::default()),
             outbound: OnceLock::new(),
             inbound: OnceLock::new(),
+            lifecycle_cap: OnceLock::new(),
             starting: Mutex::new(()),
             unrouted: AtomicU64::new(0),
             misaddressed: AtomicU64::new(0),
@@ -571,7 +578,23 @@ impl Bridge {
         let applied = if *configured {
             self.config().apply(table)?
         } else {
-            let applied = Config::first(table)?;
+            let mut applied = Config::first(table)?;
+            // A LIFECYCLE registration before this call froze the cap at
+            // the default and bound slots under it, and those slots are
+            // not resized. The file's value then waits for a restart, as a
+            // restart-tier key does, and what is in force is the frozen
+            // number. ADR 0029.
+            let cap = *self
+                .lifecycle_cap
+                .get_or_init(|| applied.config.max_lifecycle_topics);
+            if applied.config.max_lifecycle_topics != cap {
+                applied.pending.push(Pending {
+                    key: "max_lifecycle_topics",
+                    effective: Value::Number(f64::from(cap)),
+                    file: Value::Number(f64::from(applied.config.max_lifecycle_topics)),
+                });
+                applied.config.max_lifecycle_topics = cap;
+            }
             let addr = SocketAddr::new(applied.config.bind_address, applied.config.port);
             let capacities = Capacities {
                 lossy: applied.config.ring_out_lossy_records as usize,
@@ -1202,9 +1225,27 @@ impl Bridge {
         &self,
         rows: impl IntoIterator<Item = (Topic, RecordClass)>,
     ) -> Result<usize, Refusal> {
-        // The specification's default, until the cap is frozen from the
-        // configuration.
-        self.registry_mut().register_classes(rows, 64)
+        let rows: Vec<(Topic, RecordClass)> = rows.into_iter().collect();
+        // The cap is frozen by the first call that would bind a slot, and
+        // not by one that would not: a table of no `LIFECYCLE` topic
+        // leaves the file's value free to be applied at configure.
+        let cap = if rows
+            .iter()
+            .any(|(_, class)| *class == RecordClass::Lifecycle)
+        {
+            self.lifecycle_cap()
+        } else {
+            u32::MAX
+        };
+        self.registry_mut().register_classes(rows, cap)
+    }
+
+    /// `max_lifecycle_topics` in force: the frozen number, or the
+    /// specification's default frozen now, before the first `configure`.
+    pub fn lifecycle_cap(&self) -> u32 {
+        *self
+            .lifecycle_cap
+            .get_or_init(|| self.config().max_lifecycle_topics)
     }
 
     /// Merge a table of destination states. [`Registry::register_routes`].
@@ -1599,6 +1640,96 @@ mod tests {
         assert!(
             bridge().misaddressed() >= before + 2,
             "two refusals were not counted as two"
+        );
+    }
+
+    /// `count` distinct `LIFECYCLE` topics, numbered from `from`.
+    fn boundaries(from: u32, count: u32) -> Vec<(Topic, RecordClass)> {
+        (from..from + count)
+            .map(|n| {
+                (
+                    format!("dcsbridge.builtin.hook.Boundary{n}"),
+                    RecordClass::Lifecycle,
+                )
+            })
+            .collect()
+    }
+
+    /// A `LIFECYCLE` registration before the first `configure` freezes the
+    /// cap at the default. The file's smaller value is then pending a
+    /// restart and the configuration in force reports the frozen one, so
+    /// the slots already bound stay under the cap the store is sized by.
+    #[test]
+    fn a_registration_before_configure_freezes_the_cap_at_the_default() {
+        let bridge = Bridge::new(41);
+        assert_eq!(bridge.register_classes(boundaries(0, 64)), Ok(64));
+
+        let applied = bridge
+            .configure([
+                ("port", Value::Number(0.0)),
+                ("max_lifecycle_topics", Value::Number(16.0)),
+            ])
+            .expect("a valid table");
+
+        assert_eq!(bridge.lifecycle_cap(), 64);
+        assert_eq!(bridge.config().max_lifecycle_topics, 64);
+        assert_eq!(applied.config.max_lifecycle_topics, 64);
+        assert_eq!(
+            applied.pending,
+            vec![Pending {
+                key: "max_lifecycle_topics",
+                effective: Value::Number(64.0),
+                file: Value::Number(16.0),
+            }]
+        );
+        assert_eq!(bridge.pending_restart(), 1);
+        assert!(
+            matches!(
+                bridge.register_classes(boundaries(64, 1)),
+                Err(Refusal::OverCap {
+                    bound: 64,
+                    cap: 64,
+                    ..
+                })
+            ),
+            "a 65th topic was bound under a cap of 64"
+        );
+    }
+
+    /// The first `configure` before any `LIFECYCLE` registration freezes
+    /// the cap at the file's value, and the registry binds up to it. A
+    /// registration of another class before it freezes nothing.
+    #[test]
+    fn configure_before_a_registration_freezes_the_cap_at_the_file_value() {
+        let bridge = Bridge::new(42);
+        assert_eq!(
+            bridge.register_classes([(
+                "dcsbridge.builtin.sim.UnitDestroyed".to_string(),
+                RecordClass::Durable
+            )]),
+            Ok(1)
+        );
+
+        let applied = bridge
+            .configure([
+                ("port", Value::Number(0.0)),
+                ("max_lifecycle_topics", Value::Number(128.0)),
+            ])
+            .expect("a valid table");
+
+        assert!(applied.pending.is_empty(), "a durable row froze the cap");
+        assert_eq!(bridge.lifecycle_cap(), 128);
+        assert_eq!(bridge.register_classes(boundaries(0, 128)), Ok(128));
+        assert!(
+            matches!(
+                bridge.register_classes(boundaries(128, 1)),
+                Err(Refusal::OverCap {
+                    bound: 128,
+                    cap: 128,
+                    ..
+                })
+            ),
+            "a 129th topic was bound under a cap of 128"
         );
     }
 
