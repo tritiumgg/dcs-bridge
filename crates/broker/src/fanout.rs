@@ -118,6 +118,41 @@ impl Capabilities {
     }
 }
 
+/// What a connection wants sent, of the fanned-out records its
+/// capabilities cover: the capability set decides what it may see, and
+/// this decides what it asked for, and fan-out asks both.
+///
+/// Built on the reader thread from a `SetTopicFilter`, sent whole down the
+/// control channel and dropped on the writer thread when the next one
+/// replaces it, so the two threads share nothing. A name is matched as a
+/// string against the name each record carries, so a topic named before
+/// its registration is admitted by the first record on it, with nothing
+/// to reconcile. ADR 0030, ADR 0031.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub enum Filter {
+    /// Every record the capability set covers. What a connection has until
+    /// it asks for less.
+    #[default]
+    All,
+    /// The named topics, and every `LIFECYCLE` record whether or not it is
+    /// named: a consumer that could filter away a boundary would keep
+    /// receiving records whose `epoch` it can no longer interpret.
+    Only(std::collections::HashSet<String>),
+}
+
+impl Filter {
+    /// Whether a fanned-out record of `class` on `topic` is wanted. A
+    /// record on no topic is one nothing named.
+    fn admits(&self, class: Class, topic: Option<&str>) -> bool {
+        match self {
+            Filter::All => true,
+            Filter::Only(topics) => {
+                class == Class::Lifecycle || topic.is_some_and(|topic| topics.contains(topic))
+            }
+        }
+    }
+}
+
 /// Which of a connection's rings a record belongs in, and so what it may
 /// evict and what may evict it.
 ///
@@ -406,6 +441,11 @@ enum Control<T> {
     /// The connection has authenticated under a token granting these
     /// capabilities; fan out to it from here on what they cover.
     Authenticated(ConnectionId, Capabilities),
+    /// The connection asked to be sent this much of what its capabilities
+    /// cover; fan out to it from here on what the filter admits. Sent
+    /// before the answer that reports it, so every record numbered after
+    /// the answer obeys it.
+    TopicFilter(ConnectionId, Filter),
     /// Say when the writer thread has taken every message sent before this
     /// one. Only a test asks: [`Connections::attach`] promises nothing about
     /// a record committed while the attach is in flight, and a test that
@@ -756,6 +796,16 @@ impl<T> Connections<T> {
         self.send(Control::Authenticated(id, caps));
     }
 
+    /// Replace what a connection wants sent. Records fanned out after the
+    /// writer thread takes this are the ones the filter admits; earlier
+    /// ones, its queue included, are delivered as they were numbered.
+    ///
+    /// Sent before the answer that reports the filter, on the same
+    /// channel, so no record the answer follows escapes it.
+    pub fn topic_filter(&self, id: ConnectionId, filter: Filter) {
+        self.send(Control::TopicFilter(id, filter));
+    }
+
     /// Wait until the writer thread has taken every control message sent
     /// before this call, so a record committed next is fanned out under
     /// them. The channel keeps order, which is what makes one barrier enough.
@@ -797,9 +847,12 @@ struct Counts {
     /// Records addressed to a connection that was gone when the writer
     /// thread reached them.
     unaddressed: AtomicU64,
-    /// Records withheld at fan-out from a connection whose capabilities did
-    /// not cover them, one per connection per record.
+    /// Records withheld at fan-out from a connection, one per connection
+    /// per record, whether its capabilities did not cover them or its
+    /// topic filter did not admit them.
     filtered: AtomicU64,
+    /// The part of `filtered` the topic filter withheld.
+    filtered_topic: AtomicU64,
     /// Connections closed because their `LIFECYCLE` ring was full.
     lifecycle_disconnects: AtomicU64,
     /// Retained records pushed to a connection at its authentication, one
@@ -858,6 +911,7 @@ impl<T: Clone + Send + 'static> Writer<T> {
         let counts = Arc::new(Counts {
             unaddressed: AtomicU64::new(0),
             filtered: AtomicU64::new(0),
+            filtered_topic: AtomicU64::new(0),
             lifecycle_disconnects: AtomicU64::new(0),
             replayed: AtomicU64::new(0),
             dropped_lossy: AtomicU64::new(0),
@@ -906,8 +960,9 @@ impl<T: Clone + Send + 'static> Writer<T> {
         self.counts.unaddressed.load(Ordering::Relaxed)
     }
 
-    /// How many times a fanned-out record was withheld from a connection
-    /// whose capabilities did not cover it.
+    /// How many times a fanned-out record was withheld from a connection,
+    /// because its capabilities did not cover it or its topic filter did
+    /// not admit it: `records_filtered_total`.
     ///
     /// One per connection per record, so a record three connections may not
     /// see counts three. A withheld record is not a dropped one: it was
@@ -915,6 +970,12 @@ impl<T: Clone + Send + 'static> Writer<T> {
     /// no gap, and no drop count moves.
     pub fn filtered(&self) -> u64 {
         self.counts.filtered.load(Ordering::Relaxed)
+    }
+
+    /// The part of [`filtered`](Self::filtered) the topic filter withheld,
+    /// so the two causes can be told apart.
+    pub fn filtered_topic(&self) -> u64 {
+        self.counts.filtered_topic.load(Ordering::Relaxed)
     }
 
     /// How many connections were closed because their `LIFECYCLE` ring had
@@ -974,6 +1035,7 @@ impl<T: Clone + Send + 'static> Writer<T> {
                             next_seq: 1,
                             waker,
                             caps: None,
+                            filter: Filter::All,
                             close,
                             closed: false,
                         };
@@ -1007,6 +1069,13 @@ impl<T: Clone + Send + 'static> Writer<T> {
                             retained.replay(held, caps, counts);
                         }
                         connections.retain(|held| !held.closed);
+                    }
+                    Ok(Control::TopicFilter(id, filter)) => {
+                        if let Some(held) = connections.iter_mut().find(|held| held.id == id) {
+                            // The set it replaces is dropped here, on the
+                            // thread that was reading it.
+                            held.filter = filter;
+                        }
                     }
                     #[cfg(all(test, not(loom)))]
                     Ok(Control::Barrier(taken)) => {
@@ -1164,6 +1233,9 @@ struct Connection<T> {
     /// record reaches it when the set covers the record's need; an
     /// addressed one always does.
     caps: Option<Capabilities>,
+    /// What it wants of the records its capabilities cover. Everything,
+    /// until it asks for less.
+    filter: Filter,
     /// How to end its socket, until that has been done.
     close: Option<Close>,
     /// Whether its `LIFECYCLE` ring has refused a record. Such a connection
@@ -1260,14 +1332,13 @@ fn deliver<T: Clone>(
     answer: bool,
     counts: &Counts,
 ) {
-    // The slot is the retained set's concern, settled before the push. The
-    // topic is the filter's, which nothing consults yet.
+    // The slot is the retained set's concern, settled before the push.
     let Addressed {
         to,
         need,
         class,
         slot: _,
-        topic: _,
+        topic,
         record,
     } = addressed;
 
@@ -1283,15 +1354,24 @@ fn deliver<T: Clone>(
 
     // The walk below visits every connection, so a count taken as each
     // one is passed over is a count of every connection withheld from.
+    // The capability set is asked first and the filter second, so a
+    // record the token does not cover is withheld whatever the filter
+    // names: a filter narrows and never widens.
+    let topic = topic.as_deref();
     let mut receiving = connections.iter_mut().filter(|held| {
         let Some(caps) = held.caps else {
             return false;
         };
-        let covered = caps.covers(need);
-        if !covered {
+        if !caps.covers(need) {
             counts.filtered.fetch_add(1, Ordering::Relaxed);
+            return false;
         }
-        covered
+        let wanted = held.filter.admits(class, topic);
+        if !wanted {
+            counts.filtered.fetch_add(1, Ordering::Relaxed);
+            counts.filtered_topic.fetch_add(1, Ordering::Relaxed);
+        }
+        wanted
     });
     let Some(mut previous) = receiving.next() else {
         return;
@@ -1723,6 +1803,119 @@ mod tests {
         );
         assert_eq!(reader.dropped(), 0, "a withheld record counted as dropped");
         assert_eq!(commit.dropped(), 0, "a withheld record counted as dropped");
+
+        drop(writer);
+    }
+
+    /// A filter naming the given topics, for a test that narrows a
+    /// connection.
+    fn only(topics: &[&str]) -> Filter {
+        Filter::Only(topics.iter().map(|topic| (*topic).to_string()).collect())
+    }
+
+    /// A connection under `ONLY` naming one topic receives that topic and
+    /// every `LIFECYCLE` record, and no other: a record on another topic
+    /// and one on no topic are withheld and counted, once each, while a
+    /// connection that never narrowed receives all of them. The narrowed
+    /// connection's `seq` runs with no gap and no drop count moves. The
+    /// writer thread was never told the topic exists, which is how a name
+    /// filed before its registration is admitted by the first record on it.
+    #[test]
+    fn fan_out_withholds_a_record_the_filter_does_not_name_without_a_gap() {
+        let (writer, mut commit, connections) = Writer::spawn(ROOMY);
+        let (narrow_id, mut narrow) = attached(&connections, ROOMY);
+        let (_, mut wide) = attached(&connections, ROOMY);
+        connections.topic_filter(narrow_id, only(&["t.Named"]));
+        connections.settle();
+
+        let named = TopicName::from("t.Named");
+        let other = TopicName::from("t.Other");
+        commit.push_topic(READ, Class::Durable, None, named.clone(), 0u32);
+        commit.push_topic(READ, Class::Durable, None, other.clone(), 1);
+        commit.push_topic(READ, Class::Lifecycle, None, other, 2);
+        commit.push(READ, Class::Durable, 3);
+        commit.push_topic(READ, Class::Lossy, None, named, 4);
+
+        assert_eq!(
+            drain_numbered(&mut narrow, 3),
+            vec![
+                Numbered { seq: 1, record: 0 },
+                Numbered { seq: 2, record: 2 },
+                Numbered { seq: 3, record: 4 },
+            ],
+            "the narrowed connection saw a record it did not name, or a gap"
+        );
+        assert_eq!(drain_until(&mut wide, 5), vec![0, 1, 2, 3, 4]);
+        assert_eq!(
+            writer.filtered(),
+            2,
+            "one connection was withheld from twice"
+        );
+        assert_eq!(writer.filtered_topic(), 2, "the cause was not the filter");
+        assert_eq!(narrow.dropped(), 0, "a withheld record counted as dropped");
+        assert_eq!(commit.dropped(), 0, "a withheld record counted as dropped");
+        assert_eq!(writer.dropped(), Dropped::default());
+
+        drop(writer);
+    }
+
+    /// A second filter replaces the first rather than adding to it: a
+    /// connection narrowed to one topic and then widened to everything
+    /// receives a record on another topic, and one narrowed to nothing
+    /// receives `LIFECYCLE` records alone.
+    #[test]
+    fn a_second_filter_replaces_the_first() {
+        let (writer, mut commit, connections) = Writer::spawn(ROOMY);
+        let (id, mut consumer) = attached(&connections, ROOMY);
+        let other = TopicName::from("t.Other");
+
+        connections.topic_filter(id, only(&["t.Named"]));
+        connections.settle();
+        commit.push_topic(READ, Class::Durable, None, other.clone(), 0u32);
+        fanned(&commit, &connections);
+
+        connections.topic_filter(id, Filter::All);
+        connections.settle();
+        commit.push_topic(READ, Class::Durable, None, other.clone(), 1);
+        assert_eq!(
+            drain_numbered(&mut consumer, 1),
+            vec![Numbered { seq: 1, record: 1 }],
+            "widening to ALL did not replace the narrower filter"
+        );
+
+        connections.topic_filter(id, only(&[]));
+        connections.settle();
+        commit.push_topic(READ, Class::Durable, None, other.clone(), 2);
+        commit.push_topic(READ, Class::Lifecycle, None, other, 3);
+        assert_eq!(
+            drain_numbered(&mut consumer, 1),
+            vec![Numbered { seq: 2, record: 3 }],
+            "ONLY with no topic admitted more than the LIFECYCLE record"
+        );
+        assert_eq!(writer.filtered_topic(), 2);
+
+        drop(writer);
+    }
+
+    /// A broker answer reaches a connection narrowed to nothing, and is
+    /// not counted as filtered: the filter is for fan-out alone, and a
+    /// consumer always receives the answer to its own message.
+    #[test]
+    fn an_addressed_record_reaches_a_narrowed_connection() {
+        let (writer, mut commit, connections) = Writer::spawn(ROOMY);
+        let (id, mut consumer) = attached(&connections, ROOMY);
+        connections.topic_filter(id, only(&[]));
+        connections.settle();
+
+        // One crosses the ring and the other the control channel, and the
+        // writer thread orders the two only within a pass, so what arrives
+        // is checked and not which came first.
+        commit.push_to(id, Class::Durable, 0u32);
+        connections.answer(id, 1);
+        let mut arrived = drain_until(&mut consumer, 2);
+        arrived.sort_unstable();
+        assert_eq!(arrived, vec![0, 1]);
+        assert_eq!(writer.filtered(), 0, "an addressed record was filtered");
 
         drop(writer);
     }
