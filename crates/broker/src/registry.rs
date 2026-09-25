@@ -15,7 +15,7 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 
-use crate::fanout::Class;
+use crate::fanout::{Class, TopicName};
 
 /// A topic: the fully-qualified protobuf type name of a record's payload.
 ///
@@ -270,6 +270,10 @@ fn fresh<V: Member>(
 /// arrives, and the slot is what the record carries to the writer thread,
 /// which holds no registry. Slots are never given back: retiring a topic
 /// is a DCS restart. ADR 0029.
+///
+/// The topic's name travels the same way, for the writer thread's topic
+/// filters to match: one shared allocation per topic, made as its class
+/// arrives, so a record carries a reference count and not a copy. ADR 0030.
 #[derive(Debug, Default)]
 pub struct Registry {
     classes: HashMap<Topic, RecordClass>,
@@ -278,6 +282,8 @@ pub struct Registry {
     replies: HashSet<Topic>,
     /// The retained-set slot of every `LIFECYCLE` topic in `classes`.
     slots: HashMap<Topic, u32>,
+    /// The shared name of every topic in `classes`.
+    names: HashMap<Topic, TopicName>,
 }
 
 impl Registry {
@@ -313,6 +319,8 @@ impl Registry {
                 let slot = self.slots.len() as u32;
                 self.slots.insert(topic.clone(), slot);
             }
+            self.names
+                .insert(topic.clone(), TopicName::from(topic.as_str()));
             self.classes.insert(topic, class);
         }
         Ok(added)
@@ -392,14 +400,23 @@ impl Registry {
     /// one connection that sent the command, and an addressed record is
     /// never filtered, so the value is not consulted on that path. It is
     /// `DURABLE` in the schema. ADR 0028.
-    pub fn required(&self, topic: &[u8]) -> Option<(Capability, Class, Option<u32>)> {
+    pub fn required(&self, topic: &[u8]) -> Option<(Capability, Class, Option<u32>, TopicName)> {
         if topic == dcsbridge_topic::COMMAND_ACK.as_bytes() {
-            return Some((Capability::Command, Class::Durable, None));
+            // An addressed record's name is never matched, so the
+            // allocation here is one nothing reads; it is one per
+            // acknowledgement, on the path that opened an encoder.
+            return Some((
+                Capability::Command,
+                Class::Durable,
+                None,
+                TopicName::from(dcsbridge_topic::COMMAND_ACK),
+            ));
         }
         let topic = std::str::from_utf8(topic).ok()?;
         let class = self.classes.get(topic)?.outbound();
         let slot = self.slots.get(topic).copied();
-        Some((self.caps.get(topic).copied()?, class, slot))
+        let name = TopicName::clone(self.names.get(topic)?);
+        Some((self.caps.get(topic).copied()?, class, slot, name))
     }
 }
 
@@ -560,7 +577,12 @@ mod tests {
         assert!(registry.is_complete(EVENT.as_bytes()));
         assert_eq!(
             registry.required(EVENT.as_bytes()),
-            Some((Capability::Read, Class::Durable, None))
+            Some((
+                Capability::Read,
+                Class::Durable,
+                None,
+                TopicName::from(EVENT)
+            ))
         );
         assert!(
             !registry.is_complete(COMMAND.as_bytes()),
@@ -575,6 +597,27 @@ mod tests {
             .register_caps(rows(&[(EVENT, Capability::Read)]))
             .expect("caps");
         assert_eq!(classless.required(EVENT.as_bytes()), None);
+    }
+
+    /// The name a complete topic's records carry is one allocation shared
+    /// by every lookup, so a commit costs a count and not a copy.
+    #[test]
+    fn a_topic_name_is_shared_across_lookups() {
+        let mut registry = Registry::default();
+        registry
+            .register_classes(rows(&[(EVENT, RecordClass::Durable)]), CAP)
+            .expect("classes");
+        registry
+            .register_caps(rows(&[(EVENT, Capability::Read)]))
+            .expect("caps");
+
+        let (_, _, _, first) = registry.required(EVENT.as_bytes()).expect("complete");
+        let (_, _, _, second) = registry.required(EVENT.as_bytes()).expect("complete");
+        assert_eq!(&*first, EVENT);
+        assert!(
+            TopicName::ptr_eq(&first, &second),
+            "each lookup allocated the name again"
+        );
     }
 
     /// Each class names its own ring, and a command-class topic committed
@@ -603,13 +646,18 @@ mod tests {
         for (topic, _, ring, slot) in all {
             assert_eq!(
                 registry.required(topic.as_bytes()),
-                Some((Capability::Read, ring, slot)),
+                Some((Capability::Read, ring, slot, TopicName::from(topic))),
                 "{topic}"
             );
         }
         assert_eq!(
             registry.required(dcsbridge_topic::COMMAND_ACK.as_bytes()),
-            Some((Capability::Command, Class::Durable, None))
+            Some((
+                Capability::Command,
+                Class::Durable,
+                None,
+                TopicName::from(dcsbridge_topic::COMMAND_ACK)
+            ))
         );
     }
 

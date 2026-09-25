@@ -32,7 +32,7 @@ use std::time::Instant;
 
 use crate::config::{self, Applied, Config, Pending, Value};
 use crate::encode::Stamp;
-use crate::fanout::{Capacities, Class, Commit, ConnectionId, Dropped, Writer};
+use crate::fanout::{Capacities, Class, Commit, ConnectionId, Dropped, TopicName, Writer};
 use crate::handshake;
 use crate::inbound::{
     Answers, AuthError, Command, Delivery, Limits, Liveness, RejectedReason, Session, Window,
@@ -1127,7 +1127,8 @@ impl Bridge {
     /// Queue an envelope tail for every connection whose token covers
     /// `need`, the capability its topic requires, into the ring `class`
     /// names in each, and into `slot` of the retained set when the topic
-    /// is a `LIFECYCLE` one. All three come from [`Bridge::registered`].
+    /// is a `LIFECYCLE` one, carrying `topic` for the writer thread's
+    /// filters to match. All four come from [`Bridge::registered`].
     ///
     /// The tail is copied once, into the allocation the rings share by
     /// reference; that is the one allocation on the commit path. A record the
@@ -1142,6 +1143,7 @@ impl Bridge {
         need: Capability,
         class: Class,
         slot: Option<u32>,
+        topic: TopicName,
         tail: &[u8],
     ) -> Result<(), CommitError> {
         let outbound = self.outbound.get().ok_or(CommitError::NotStarted)?;
@@ -1154,10 +1156,7 @@ impl Bridge {
         let record: Record = Arc::from(tail);
 
         let mut commit = outbound.producer()?;
-        drop(match slot {
-            Some(slot) => commit.push_retained(need.number(), slot, record),
-            None => commit.push(need.number(), class, record),
-        });
+        drop(commit.push_topic(need.number(), class, slot, topic, record));
         Ok(())
     }
 
@@ -1237,11 +1236,12 @@ impl Bridge {
     ///
     /// Asked at every `begin` and `begin_to`, and answered the way
     /// [`Bridge::addressable`] is: a plain value with no lock held, so the
-    /// raise the Lua side makes of `None` jumps past no guard. The three
+    /// raise the Lua side makes of `None` jumps past no guard. The four
     /// travel with the record to [`Bridge::commit`], where the writer
     /// thread withholds the record from a connection the capability does
-    /// not cover, and keeps a `LIFECYCLE` record in its slot.
-    pub fn registered(&self, topic: &[u8]) -> Option<(Capability, Class, Option<u32>)> {
+    /// not cover, keeps a `LIFECYCLE` record in its slot, and matches the
+    /// name against each connection's topic filter.
+    pub fn registered(&self, topic: &[u8]) -> Option<(Capability, Class, Option<u32>, TopicName)> {
         let required = self.registry().required(topic);
         if required.is_none() {
             self.partial_registration.fetch_add(1, Ordering::Relaxed);
@@ -1794,6 +1794,7 @@ mod tests {
     /// of any size is not measured against the key.
     #[test]
     fn an_oversize_lifecycle_record_is_refused_at_commit() {
+        let edge = || TopicName::from("dcsbridge.builtin.hook.EpochClosed");
         let bridge = Bridge::new(43);
         bridge
             .configure([("port", Value::Number(0.0))])
@@ -1803,16 +1804,22 @@ mod tests {
 
         let over = vec![0u8; bound + 1];
         assert_eq!(
-            bridge.commit(Capability::Read, Class::Lifecycle, Some(0), &over),
+            bridge.commit(Capability::Read, Class::Lifecycle, Some(0), edge(), &over),
             Err(CommitError::Oversize)
         );
         assert_eq!(bridge.lifecycle_oversize(), 1);
         assert_eq!(
-            bridge.commit(Capability::Read, Class::Lifecycle, Some(0), &over[..bound]),
+            bridge.commit(
+                Capability::Read,
+                Class::Lifecycle,
+                Some(0),
+                edge(),
+                &over[..bound]
+            ),
             Ok(())
         );
         assert_eq!(
-            bridge.commit(Capability::Read, Class::Durable, None, &over),
+            bridge.commit(Capability::Read, Class::Durable, None, edge(), &over),
             Ok(()),
             "a durable record was measured against the lifecycle bound"
         );
@@ -1890,7 +1897,12 @@ mod tests {
             .expect("caps");
         assert_eq!(
             bridge.registered(EVENT.as_bytes()),
-            Some((Capability::Read, Class::Durable, None)),
+            Some((
+                Capability::Read,
+                Class::Durable,
+                None,
+                TopicName::from(EVENT)
+            )),
             "a registered topic did not name its capability and its ring"
         );
         assert_eq!(
@@ -1901,7 +1913,12 @@ mod tests {
 
         assert_eq!(
             bridge.registered(dcsbridge_topic::COMMAND_ACK.as_bytes()),
-            Some((Capability::Command, Class::Durable, None))
+            Some((
+                Capability::Command,
+                Class::Durable,
+                None,
+                TopicName::from(dcsbridge_topic::COMMAND_ACK)
+            ))
         );
 
         assert!(!bridge.addressable(REPLY.as_bytes()));
@@ -2014,7 +2031,13 @@ mod tests {
         // now reaches the connection, numbered after it.
         let tail = [0x22, 0x00];
         bridge()
-            .commit(Capability::Read, Class::Durable, None, &tail)
+            .commit(
+                Capability::Read,
+                Class::Durable,
+                None,
+                TopicName::from("dcsbridge.builtin.sim.UnitDestroyed"),
+                &tail,
+            )
             .expect("the path is started");
         client.read_exact(&mut length).expect("a frame arrives");
         assert_eq!(u32::from_le_bytes(length), 2 + tail.len() as u32);
@@ -2070,7 +2093,13 @@ mod tests {
             e.begin(topic, bridge().stamp());
             e.integer(1, 1).unwrap();
             bridge()
-                .commit(Capability::Read, Class::Durable, None, e.commit().unwrap())
+                .commit(
+                    Capability::Read,
+                    Class::Durable,
+                    None,
+                    TopicName::from(std::str::from_utf8(topic).unwrap()),
+                    e.commit().unwrap(),
+                )
                 .expect("the path is started");
         };
 
@@ -2108,7 +2137,13 @@ mod tests {
             e.integer(1, 7).unwrap();
             let tail = e.commit().unwrap().to_vec();
             bridge()
-                .commit(Capability::Read, Class::Lifecycle, Some(0), &tail)
+                .commit(
+                    Capability::Read,
+                    Class::Lifecycle,
+                    Some(0),
+                    TopicName::from("dcsbridge.builtin.hook.EpochClosed"),
+                    &tail,
+                )
                 .expect("the path is started");
             tail
         };

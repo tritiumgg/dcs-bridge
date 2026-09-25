@@ -1227,7 +1227,7 @@ mod put {
     use core::ffi::{CStr, c_int, c_void};
 
     use dcsbridge_broker::encode::{Encoder, Error};
-    use dcsbridge_broker::fanout::{Class, ConnectionId};
+    use dcsbridge_broker::fanout::{Class, ConnectionId, TopicName};
     use dcsbridge_broker::registry::Capability;
 
     use crate::lua;
@@ -1264,6 +1264,8 @@ mod put {
         need: Capability,
         class: Class,
         slot: Option<u32>,
+        /// The topic's shared name, `None` for a record on no topic yet.
+        topic: Option<TopicName>,
     }
 
     /// The calls and their names on the table.
@@ -1291,6 +1293,7 @@ mod put {
             need: Capability::Read,
             class: Class::Durable,
             slot: None,
+            topic: None,
         }));
 
         // SAFETY: the userdata is exactly one pointer wide and lives as long
@@ -1421,6 +1424,44 @@ mod put {
         0
     }
 
+    /// Look `topic` up and open the record on it, for every connection or
+    /// for `to`, or say the topic is not registered. Its own frame, never
+    /// inlined: the name the lookup hands back is a shared allocation with
+    /// a destructor, and the entry that raises on `false` must own
+    /// nothing. Raises nothing itself; the caller has run `opening`. See
+    /// `push_error`.
+    ///
+    /// # Safety
+    ///
+    /// `state` is live and `opening` has set the encoder.
+    #[inline(never)]
+    unsafe fn open(state: *mut c_void, topic: &[u8], to: Option<ConnectionId>) -> bool {
+        let bridge = dcsbridge_broker::bridge();
+        let Some((need, class, slot, name)) = bridge.registered(topic) else {
+            return false;
+        };
+        // SAFETY: the caller's contract.
+        let pending = unsafe { pending(state) };
+        pending
+            .encoder
+            .as_mut()
+            .expect("opening set it")
+            .begin(topic, bridge.stamp());
+        pending.to = to;
+        pending.need = need;
+        pending.class = class;
+        if to.is_some() {
+            // A record for one connection is nothing a later one is owed,
+            // and no filter reaches it.
+            pending.slot = None;
+            pending.topic = None;
+        } else {
+            pending.slot = slot;
+            pending.topic = Some(name);
+        }
+        true
+    }
+
     /// `shim.begin(topic)`: open a record on the topic for every connection,
     /// discarding and counting one left open. The topic names the record's
     /// type on the wire. Raises before the first `configure`, and on a topic
@@ -1439,24 +1480,15 @@ mod put {
             let mut len = 0;
             let s = lua::luaL_checklstring(state, 1, &mut len);
             let topic = core::slice::from_raw_parts(s.cast::<u8>(), len);
-            let pending = opening(state);
-            let Some((need, class, slot)) = dcsbridge_broker::bridge().registered(topic) else {
+            opening(state);
+            if !open(state, topic, None) {
                 lua::luaL_error(
                     state,
                     c"begin refused: %s has no class or no capability registered".as_ptr(),
                     s,
                 );
                 unreachable!("luaL_error does not return")
-            };
-            pending.to = None;
-            pending.need = need;
-            pending.class = class;
-            pending.slot = slot;
-            pending
-                .encoder
-                .as_mut()
-                .expect("opening set it")
-                .begin(topic, dcsbridge_broker::bridge().stamp());
+            }
         }
         0
     }
@@ -1509,26 +1541,15 @@ mod put {
             }
             // A reply is marked addressable by one table and given its
             // class and capability by two others, and needs all three.
-            let Some((need, class, _)) = dcsbridge_broker::bridge().registered(topic) else {
+            opening(state);
+            if !open(state, topic, Some(ConnectionId::from_raw(id as u64))) {
                 lua::luaL_error(
                     state,
                     c"begin_to refused: %s has no class or no capability registered".as_ptr(),
                     s,
                 );
                 unreachable!("luaL_error does not return")
-            };
-
-            let pending = opening(state);
-            pending
-                .encoder
-                .as_mut()
-                .expect("opening set it")
-                .begin(topic, dcsbridge_broker::bridge().stamp());
-            pending.to = Some(ConnectionId::from_raw(id as u64));
-            pending.need = need;
-            pending.class = class;
-            // A record for one connection is nothing a later one is owed.
-            pending.slot = None;
+            }
         }
         0
     }
@@ -1619,16 +1640,20 @@ mod put {
             // Taken before anything can raise, so the address goes with the
             // record whether or not the record goes anywhere.
             let to = pending.to.take();
+            // The name is taken with the address: a record `begin` opened
+            // has one, and one `begin_to` opened is addressed instead.
+            let topic = pending.topic.take();
             let bridge = dcsbridge_broker::bridge();
             let Some(encoder) = pending.encoder.as_mut() else {
                 raise(state, Error::NotOpen)
             };
             let queued = match encoder.commit() {
-                Ok(tail) => match to {
-                    Some(to) => bridge.commit_to(to, pending.class, tail).is_ok(),
-                    None => bridge
-                        .commit(pending.need, pending.class, pending.slot, tail)
+                Ok(tail) => match (to, topic) {
+                    (Some(to), _) => bridge.commit_to(to, pending.class, tail).is_ok(),
+                    (None, Some(topic)) => bridge
+                        .commit(pending.need, pending.class, pending.slot, topic, tail)
                         .is_ok(),
+                    (None, None) => raise(state, Error::NotOpen),
                 },
                 Err(Error::NotOpen) => raise(state, Error::NotOpen),
                 Err(_) => false,

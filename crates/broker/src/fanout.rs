@@ -135,8 +135,14 @@ pub enum Class {
     Lifecycle,
 }
 
+/// A topic id as a record carries it to the writer thread: one allocation
+/// per registered topic, shared by reference by every record on it, so a
+/// commit costs a count and not a copy. Plain `std` under Loom too, since
+/// nothing is synchronized through it. ADR 0030.
+pub type TopicName = std::sync::Arc<str>;
+
 /// A record as the commit ring carries it: for every connection, or for one.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Addressed<T> {
     /// The one connection the record is for, or every connection.
     pub to: Option<ConnectionId>,
@@ -151,6 +157,11 @@ pub struct Addressed<T> {
     /// here because the writer thread reads no envelope and holds no
     /// registry. ADR 0029.
     pub slot: Option<u32>,
+    /// The topic the record is on, for a connection's topic filter to
+    /// match by name; carried here for the same reason the slot is. `None`
+    /// for an addressed record, which no filter reaches, and for a test
+    /// record on no topic. ADR 0030.
+    pub topic: Option<TopicName>,
     /// The record itself.
     pub record: T,
 }
@@ -525,7 +536,7 @@ impl<T> Commit<T> {
     /// ADR 0011 accepts that until the record type is fixed and its drop cost
     /// is known.
     pub fn push(&mut self, need: u32, class: Class, value: T) -> Push<T> {
-        self.push_addressed(None, need, class, None, value)
+        self.push_addressed(None, need, class, None, None, value)
     }
 
     /// Commit a `LIFECYCLE` record for every connection whose capabilities
@@ -535,7 +546,27 @@ impl<T> Commit<T> {
     /// Queued as [`push`](Self::push) queues; the slot rides with the
     /// record to the writer thread, which is the one that holds the set.
     pub fn push_retained(&mut self, need: u32, slot: u32, value: T) -> Push<T> {
-        self.push_addressed(None, need, Class::Lifecycle, Some(slot), value)
+        self.push_addressed(None, need, Class::Lifecycle, Some(slot), None, value)
+    }
+
+    /// Commit a record on a named topic for every connection whose
+    /// capabilities cover `need` and whose topic filter admits the topic,
+    /// keeping it in `slot` of the retained set when it has one.
+    ///
+    /// What the bridge commits: [`push`](Self::push) and
+    /// [`push_retained`](Self::push_retained) queue a record on no topic,
+    /// which is what a test that never narrows a connection needs. A slot
+    /// comes with a `LIFECYCLE` class, since registration binds one to
+    /// nothing else.
+    pub fn push_topic(
+        &mut self,
+        need: u32,
+        class: Class,
+        slot: Option<u32>,
+        topic: TopicName,
+        value: T,
+    ) -> Push<T> {
+        self.push_addressed(None, need, class, slot, Some(topic), value)
     }
 
     /// Commit a record for one connection and no other.
@@ -546,7 +577,7 @@ impl<T> Commit<T> {
     /// costs the logic thread what `push` does.
     pub fn push_to(&mut self, to: ConnectionId, class: Class, value: T) -> Push<T> {
         // An addressed record is not filtered, so it needs nothing.
-        self.push_addressed(Some(to), 0, class, None, value)
+        self.push_addressed(Some(to), 0, class, None, None, value)
     }
 
     /// Push with an address, and hand back what the ring turned away as the
@@ -557,6 +588,7 @@ impl<T> Commit<T> {
         need: u32,
         class: Class,
         slot: Option<u32>,
+        topic: Option<TopicName>,
         record: T,
     ) -> Push<T> {
         let pushed = match self.producer.push(Addressed {
@@ -564,6 +596,7 @@ impl<T> Commit<T> {
             need,
             class,
             slot,
+            topic,
             record,
         }) {
             Push::Stored => Push::Stored,
@@ -961,6 +994,7 @@ impl<T: Clone + Send + 'static> Writer<T> {
                                 // A broker answer is durable. ADR 0028.
                                 class: Class::Durable,
                                 slot: None,
+                                topic: None,
                                 record,
                             },
                             true,
@@ -1226,12 +1260,14 @@ fn deliver<T: Clone>(
     answer: bool,
     counts: &Counts,
 ) {
-    // The slot is the retained set's concern, settled before the push.
+    // The slot is the retained set's concern, settled before the push. The
+    // topic is the filter's, which nothing consults yet.
     let Addressed {
         to,
         need,
         class,
         slot: _,
+        topic: _,
         record,
     } = addressed;
 
@@ -1915,6 +1951,38 @@ mod tests {
             "an evicted plain record counted as a lifecycle one"
         );
         assert_eq!(commit.dropped(), 2);
+    }
+
+    /// A record committed on a topic reaches the writer thread's end of
+    /// the ring with that topic's name and its slot, and one committed
+    /// without a topic, as an answer is, carries none. Built over a bare
+    /// ring, so the header is read as the writer thread reads it.
+    #[test]
+    fn a_record_carries_its_topic_name_across_the_commit_ring() {
+        let (producer, mut consumer) = Ring::split(4);
+        let mut commit: Commit<u32> = Commit {
+            producer,
+            waker: Waker::new(Arc::new(ParkFlag::new()), thread::current()),
+            lifecycle_evicted: Arc::new(AtomicU64::new(0)),
+        };
+        let edge = TopicName::from("dcsbridge.builtin.hook.Edge");
+
+        assert!(matches!(
+            commit.push_topic(READ, Class::Lifecycle, Some(2), TopicName::clone(&edge), 0),
+            Push::Stored
+        ));
+        assert!(matches!(commit.push(READ, Class::Durable, 1), Push::Stored));
+
+        let named = consumer.pop().expect("the named record");
+        assert_eq!(named.topic.as_deref(), Some("dcsbridge.builtin.hook.Edge"));
+        assert_eq!(named.slot, Some(2));
+        assert_eq!(named.class, Class::Lifecycle);
+        assert!(
+            std::sync::Arc::ptr_eq(named.topic.as_ref().unwrap(), &edge),
+            "the name was copied rather than shared"
+        );
+        let unnamed = consumer.pop().expect("the unnamed record");
+        assert_eq!(unnamed.topic, None);
     }
 
     /// The set is a mask by number: a number added is covered, one not
