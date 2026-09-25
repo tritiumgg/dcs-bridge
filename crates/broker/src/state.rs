@@ -32,10 +32,11 @@ use std::time::Instant;
 
 use crate::config::{self, Applied, Config, Pending, Value};
 use crate::encode::Stamp;
-use crate::fanout::{Capacities, Class, Commit, ConnectionId, Dropped, TopicName, Writer};
+use crate::fanout::{Capacities, Class, Commit, ConnectionId, Dropped, Filter, TopicName, Writer};
 use crate::handshake;
 use crate::inbound::{
-    Answers, AuthError, Command, Delivery, Limits, Liveness, RejectedReason, Session, Window,
+    Answers, AuthError, Command, Delivery, Limits, Liveness, RejectedReason, Resolved, Session,
+    Window,
 };
 use crate::registry::{Capability, Member, RecordClass, Refusal, Registry, Target, Topic};
 use crate::ring::{Consumer, Producer, Push, Ring};
@@ -469,6 +470,10 @@ impl Answers for Global {
 
     fn set_enabled(&self, enabled: bool) {
         bridge().set_enabled(enabled);
+    }
+
+    fn set_topic_filter(&self, session: &Session, filter: &Filter) -> Resolved {
+        bridge().set_topic_filter(session, filter)
     }
 
     fn rejected(&self, reason: RejectedReason, answered: bool) {
@@ -981,6 +986,61 @@ impl Bridge {
         self.config().enabled
     }
 
+    /// What a session's connection will now be sent under `filter`, and
+    /// which named topics are not admissible, for the answer alone: the
+    /// filter itself goes to the writer thread as it is, since a name is
+    /// admitted there by the record that carries it.
+    ///
+    /// A topic is admissible when the class table holds it and the token
+    /// covers the capability its row names; one registered with a class
+    /// and no capability is withheld at fan-out and so is not admissible.
+    /// A named topic not admissible is listed as unknown whether it is
+    /// unregistered or uncovered, and nothing tells the two apart: told
+    /// apart, the field would answer whether this mission registered any
+    /// id at all, which is what the capability set exists to withhold.
+    /// `admitted` is the admissible topics the filter admits, `LIFECYCLE`
+    /// ones under `ONLY` whether or not named, and every one under `ALL`.
+    /// Read under the registry lock and answered as of now: a later
+    /// registration can raise the count, and the same message sent again
+    /// is the way to watch it.
+    pub fn set_topic_filter(&self, session: &Session, filter: &Filter) -> Resolved {
+        let registry = self.registry();
+        let admissible = |topic: &str| {
+            registry.classes().contains_key(topic)
+                && registry
+                    .caps()
+                    .get(topic)
+                    .is_some_and(|cap| session.caps.contains(cap))
+        };
+        match filter {
+            Filter::All => Resolved {
+                admitted: registry
+                    .classes()
+                    .keys()
+                    .filter(|topic| admissible(topic))
+                    .count() as u32,
+                unknown: Vec::new(),
+            },
+            Filter::Only(named) => {
+                let admitted = registry
+                    .classes()
+                    .iter()
+                    .filter(|(topic, class)| {
+                        (**class == RecordClass::Lifecycle || named.contains(*topic))
+                            && admissible(topic)
+                    })
+                    .count() as u32;
+                let mut unknown: Vec<String> = named
+                    .iter()
+                    .filter(|topic| !admissible(topic))
+                    .cloned()
+                    .collect();
+                unknown.sort_unstable();
+                Resolved { admitted, unknown }
+            }
+        }
+    }
+
     /// Set the kill switch: the one key `SetEnabled` moves between two
     /// `configure`s, swapped in the same way. What a disabled bridge stops
     /// is the hook driver's to stop, and it reads this to know.
@@ -1466,6 +1526,100 @@ mod tests {
                 .unwrap_or_else(|| panic!("{member} is not in {path}"));
             assert_eq!(theirs, ours, "{member} is {theirs} in the schema");
         }
+    }
+
+    /// A filter is resolved against the class table and the token: a
+    /// named topic the token covers is admitted; one the token does not
+    /// cover is unknown exactly as one nobody registered is; one with a
+    /// class and no capability is unknown too; `ONLY` with no name
+    /// admits the covered `LIFECYCLE` topics alone; and `ALL` admits
+    /// every covered topic. A registration after the first answer raises
+    /// the count on the next.
+    #[test]
+    fn a_topic_filter_is_resolved_against_the_registry_and_the_token() {
+        const EVENT: &str = "dcsbridge.builtin.sim.UnitDestroyed";
+        const EDGE: &str = "dcsbridge.builtin.hook.EpochClosed";
+        const COMMAND: &str = "dcsbridge.builtin.sim.SetFlag";
+        const CLASSLESS_CAP: &str = "dcsbridge.builtin.sim.Capped";
+        const CAPLESS: &str = "dcsbridge.builtin.sim.Uncapped";
+        let bridge = Bridge::new(44);
+        bridge
+            .register_classes([
+                (EVENT.to_string(), RecordClass::Durable),
+                (EDGE.to_string(), RecordClass::Lifecycle),
+                (COMMAND.to_string(), RecordClass::Command),
+                (CAPLESS.to_string(), RecordClass::Durable),
+            ])
+            .expect("classes");
+        bridge
+            .register_caps([
+                (EVENT.to_string(), Capability::Read),
+                (EDGE.to_string(), Capability::Read),
+                (COMMAND.to_string(), Capability::Command),
+                (CLASSLESS_CAP.to_string(), Capability::Read),
+            ])
+            .expect("caps");
+        let reader = Session {
+            token_id: "reader".into(),
+            caps: [Capability::Read].into_iter().collect(),
+        };
+        let only =
+            |names: &[&str]| Filter::Only(names.iter().map(|name| (*name).to_string()).collect());
+
+        assert_eq!(
+            bridge.set_topic_filter(&reader, &only(&[EVENT])),
+            Resolved {
+                admitted: 2,
+                unknown: Vec::new()
+            },
+            "the named topic and the LIFECYCLE topic were not the two admitted"
+        );
+        assert_eq!(
+            bridge.set_topic_filter(
+                &reader,
+                &only(&[
+                    COMMAND,
+                    "dcsbridge.builtin.sim.Nobody",
+                    CAPLESS,
+                    CLASSLESS_CAP
+                ])
+            ),
+            Resolved {
+                admitted: 1,
+                unknown: vec![
+                    CLASSLESS_CAP.into(),
+                    "dcsbridge.builtin.sim.Nobody".into(),
+                    COMMAND.into(),
+                    CAPLESS.into(),
+                ]
+            },
+            "an uncovered, an unregistered and a half-registered topic were told apart"
+        );
+        assert_eq!(
+            bridge.set_topic_filter(&reader, &only(&[])),
+            Resolved {
+                admitted: 1,
+                unknown: Vec::new()
+            },
+            "ONLY with no name admitted more than the LIFECYCLE topic"
+        );
+        assert_eq!(
+            bridge.set_topic_filter(&reader, &Filter::All),
+            Resolved {
+                admitted: 2,
+                unknown: Vec::new()
+            },
+            "ALL admitted other than every covered topic"
+        );
+
+        bridge
+            .register_caps([(CAPLESS.to_string(), Capability::Read)])
+            .expect("caps");
+        assert_eq!(
+            bridge.set_topic_filter(&reader, &only(&[CAPLESS])).admitted,
+            2,
+            "a registration after the answer did not raise the next one"
+        );
     }
 
     /// A secret no token carries is a bad token, a token granting nothing
