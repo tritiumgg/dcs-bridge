@@ -363,7 +363,7 @@ fn write_all_vectored(stream: &mut TcpStream, first: &[u8], second: &[u8]) -> io
 mod tests {
     use super::*;
     use crate::encode::Encoder;
-    use crate::fanout::{Class, Writer};
+    use crate::fanout::{Class, Dropped, TopicName, Writer};
     use crate::inbound::{AuthError, RejectedReason, Session};
     use dcsbridge_topic::{self as topic, TYPE_URL_PREFIX};
     use prost::Message;
@@ -396,6 +396,14 @@ mod tests {
     /// The capability number every record committed here needs, which every
     /// stub's token grants.
     const READ: u32 = crate::registry::Capability::Read as u32;
+
+    /// A record on `topic` carrying `n` in field 1.
+    fn record_on(topic: &str, n: i64) -> Record {
+        let mut e = Encoder::with_capacity(256);
+        e.begin(topic.as_bytes(), None);
+        e.integer(1, n).unwrap();
+        Arc::from(e.commit().unwrap())
+    }
 
     /// A record on [`TOPIC`] carrying `n` in field 1.
     fn record(n: i64) -> Record {
@@ -1731,6 +1739,150 @@ mod tests {
             "one record withheld from one connection"
         );
         assert_eq!(commit.dropped(), 0, "a withheld record counted as dropped");
+
+        drop(listener);
+        drop(writer);
+    }
+
+    /// A connection naming one topic under `ONLY` receives that topic and
+    /// every `LIFECYCLE` topic and no other, over a socket against the
+    /// real writer: a record on another topic and one on no topic are
+    /// withheld, the ones it does receive follow each other with no gap
+    /// in `seq`, the pass-overs are counted as filtered by the topic, and
+    /// `records_dropped_total` does not move, and a refused `SetTopicFilter`
+    /// in between leaves that filter in force. The stub behind the
+    /// transport registers nothing, so the name is admitted by the record
+    /// that carries it alone.
+    #[test]
+    fn a_narrowed_connection_receives_its_topic_and_every_lifecycle_topic_and_no_other() {
+        const NAMED: &str = "dcsbridge.builtin.sim.UnitDestroyed";
+        const OTHER: &str = "dcsbridge.builtin.sim.Gauge";
+        const BOUNDARY: &str = "dcsbridge.builtin.hook.EpochClosed";
+        const WITHHELD: i64 = 999;
+        const LAST: i64 = 1000;
+        assert_eq!(NAMED.as_bytes(), TOPIC);
+
+        let (writer, mut commit, connections) = Writer::spawn(64);
+        let listener = Listener::spawn(
+            "127.0.0.1:0",
+            connections,
+            Capacities::each(64),
+            Arc::new(Stub),
+        )
+        .unwrap();
+        let mut client = client(listener.local_addr());
+        let first = first_frame(&mut commit, &mut client);
+        assert_eq!(first.seq, 3);
+
+        // Reads until a frame satisfies `until`, checking each one's
+        // number follows the last and that no withheld record is among
+        // them, and returns the topic and value of every record read.
+        let mut last_seq = first.seq;
+        let mut read_until =
+            |client: &mut TcpStream, until: &dyn Fn(&Envelope) -> bool| -> Vec<(String, i64)> {
+                let mut seen: Vec<(String, i64)> = Vec::new();
+                loop {
+                    let frame = read_frame(client);
+                    assert_eq!(
+                        frame.seq,
+                        last_seq + 1,
+                        "seq skipped: a withheld record was numbered"
+                    );
+                    last_seq = frame.seq;
+                    let url = frame.payload.as_ref().unwrap().type_url.clone();
+                    assert_ne!(
+                        url,
+                        type_url(OTHER),
+                        "the narrowed connection received a topic it did not name"
+                    );
+                    if url == type_url(NAMED) {
+                        assert_ne!(value(&frame), WITHHELD, "a record on no topic was sent");
+                        seen.push((NAMED.into(), value(&frame)));
+                    } else if url == type_url(BOUNDARY) {
+                        seen.push((BOUNDARY.into(), value(&frame)));
+                    }
+                    if until(&frame) {
+                        return seen;
+                    }
+                }
+            };
+
+        // Whatever `first_frame` committed in flight arrives ahead of the
+        // result, so the filter is in force once the result is read.
+        let set = inbound::SetTopicFilter {
+            mode: inbound::TopicFilterMode::Only as i32,
+            topic_id: vec![NAMED.into()],
+        }
+        .encode_to_vec();
+        client
+            .write_all(&inbound(2, topic::SET_TOPIC_FILTER, &set))
+            .expect("the filter is sent");
+        let _ = read_until(&mut client, &|frame| {
+            frame.payload.as_ref().unwrap().type_url == type_url(topic::TOPIC_FILTER_RESULT)
+        });
+
+        // A refused filter leaves the one above in force: what is withheld
+        // below is withheld under it.
+        let refused = inbound::SetTopicFilter {
+            mode: inbound::TopicFilterMode::All as i32,
+            topic_id: vec![OTHER.into()],
+        }
+        .encode_to_vec();
+        client
+            .write_all(&inbound(3, topic::SET_TOPIC_FILTER, &refused))
+            .expect("the filter is sent");
+        let _ = read_until(&mut client, &|frame| {
+            frame.payload.as_ref().unwrap().type_url == type_url(topic::TOPIC_FILTER_RESULT)
+        });
+
+        let name = |topic: &str| TopicName::from(topic);
+        commit.push_topic(READ, Class::Durable, None, name(NAMED), record_on(NAMED, 1));
+        commit.push_topic(
+            READ,
+            Class::Durable,
+            None,
+            name(OTHER),
+            record_on(OTHER, WITHHELD),
+        );
+        commit.push_topic(
+            READ,
+            Class::Lifecycle,
+            None,
+            name(BOUNDARY),
+            record_on(BOUNDARY, 2),
+        );
+        commit.push(READ, Class::Durable, record_on(NAMED, WITHHELD));
+        commit.push_topic(
+            READ,
+            Class::Lossy,
+            None,
+            name(NAMED),
+            record_on(NAMED, LAST),
+        );
+        let seen = read_until(&mut client, &|frame| {
+            frame.payload.as_ref().unwrap().type_url == type_url(NAMED) && value(frame) == LAST
+        });
+        assert_eq!(
+            seen,
+            vec![
+                (NAMED.into(), 1),
+                (BOUNDARY.into(), 2),
+                (NAMED.into(), LAST)
+            ],
+            "the named topic and the boundary were not what arrived, in order"
+        );
+        assert_eq!(
+            writer.filtered(),
+            2,
+            "two records withheld from one connection"
+        );
+        assert_eq!(writer.filtered_topic(), 2, "the cause was not the filter");
+        assert_eq!(commit.dropped(), 0, "a withheld record counted as dropped");
+        assert_eq!(
+            writer.dropped(),
+            Dropped::default(),
+            "records_dropped_total moved"
+        );
 
         drop(listener);
         drop(writer);
