@@ -53,6 +53,14 @@ topics! {
     SCHEMA = "Schema",
     /// A consumer's highest durably processed `seq`. Answered by nothing.
     SEQ_ACK = "SeqAck",
+    /// Asks which topics the token can see. Answered by the broker.
+    GET_TOPICS = "GetTopics",
+    /// What answers a `GetTopics`.
+    TOPICS = "Topics",
+    /// Narrows what a connection is sent. Answered by the broker.
+    SET_TOPIC_FILTER = "SetTopicFilter",
+    /// What answers a `SetTopicFilter`.
+    TOPIC_FILTER_RESULT = "TopicFilterResult",
     /// The kill switch. Answered by nothing.
     SET_ENABLED = "SetEnabled",
     /// The acknowledgement a handler addresses to one connection, and the

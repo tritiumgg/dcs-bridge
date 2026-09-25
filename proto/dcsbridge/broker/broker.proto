@@ -118,6 +118,82 @@ message Schema {
   optional string error = 2;
 }
 
+// Asks which topics this connection can see: every topic the class table
+// holds whose capability the token covers, with its class and, for an
+// inbound topic, its target. Nothing outside the token's set is listed, so
+// the answer discloses only what the connection could already send or
+// receive. Needs no capability of its own; requires authentication.
+message GetTopics {}
+
+// What answers a GetTopics. Until the hook driver registers the class table
+// there is no set to list, and error says so instead of an empty list that
+// would read as a correct answer; exactly one of the two is set. The answer
+// is point-in-time: registration is additive, so the set grows at a mission
+// reload and never shrinks.
+message Topics {
+  repeated TopicEntry topic = 1;
+  optional string error = 2;
+}
+
+message TopicEntry {
+  string topic_id = 1;
+  RecordClass record_class = 2;
+  // Inbound topics only.
+  optional Target target = 3;
+}
+
+// Narrows what a connection is sent. Capability decides what a connection
+// may see; the filter decides what it wants, and fan-out asks both. Each
+// message carries the whole set and replaces the last: ALL, the default,
+// admits every fan-out record the token covers, and ONLY admits the named
+// topics and every LIFECYCLE topic. Handled by the broker itself and never
+// reaches Lua. Needs no capability: it can only reduce what the connection
+// already had.
+message SetTopicFilter {
+  // Refused at 0.
+  TopicFilterMode mode = 1;
+  // The whole set under ONLY, empty under ALL.
+  repeated string topic_id = 2;
+}
+
+// What answers a SetTopicFilter. A named id the class table does not hold,
+// or whose capability the token does not cover, is listed in unknown; the
+// two cases are deliberately indistinguishable, so the field is no
+// registration oracle for ids outside the token's set. Such an id is kept
+// in the filter and admitted once registered. admitted counts the topics
+// the connection will now be sent, LIFECYCLE ones included; it is zero when
+// ok is false.
+message TopicFilterResult {
+  bool ok = 1;
+  // Set when ok is false.
+  optional TopicFilterRefusal refusal = 2;
+  uint32 admitted = 3;
+  // Named but not admissible now.
+  repeated string unknown = 4;
+}
+
+// NEVER EMITTED at 0. Not extensible: the broker implements each member.
+enum TopicFilterMode {
+  TOPIC_FILTER_MODE_UNSPECIFIED = 0;
+  TOPIC_FILTER_MODE_ALL = 1;
+  TOPIC_FILTER_MODE_ONLY = 2;
+}
+
+// Why a SetTopicFilter was refused whole, the previous filter left in
+// force. NO_MODE is mode 0, which proto3 cannot tell from an omitted field;
+// LIST_WITH_ALL states two intentions at once; TOO_MANY is a de-duplicated
+// list longer than topic_filter_max_topics; MALFORMED is a payload the
+// broker cannot parse.
+//
+// NEVER EMITTED at 0. Not extensible: the broker implements each member.
+enum TopicFilterRefusal {
+  TOPIC_FILTER_REFUSAL_UNSPECIFIED = 0;
+  TOPIC_FILTER_REFUSAL_NO_MODE = 1;
+  TOPIC_FILTER_REFUSAL_LIST_WITH_ALL = 2;
+  TOPIC_FILTER_REFUSAL_TOO_MANY = 3;
+  TOPIC_FILTER_REFUSAL_MALFORMED = 4;
+}
+
 // Consumer to broker: the highest seq this consumer has durably processed.
 // Consumed by the broker and answered by nothing. Nothing reads the number
 // until the replay spool ships; the record is on the wire now so that the
