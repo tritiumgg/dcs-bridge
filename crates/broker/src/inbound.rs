@@ -68,7 +68,7 @@ use prost::Message;
 use crate::config::Config;
 use crate::encode::Encoder;
 use crate::fanout::{Capabilities, ConnectionId, Connections, Filter};
-use crate::registry::{Capability, Member};
+use crate::registry::{Capability, Member, RecordClass, Target};
 use crate::transport::Record;
 
 /// The live keys the reader thread decides by, as of one moment.
@@ -255,6 +255,13 @@ pub trait Answers: Send + Sync + 'static {
                 }
             },
         }
+    }
+    /// The topics a session's connection can see, with their classes and
+    /// routes, or `None` until a class table is registered. With nothing
+    /// behind the transport none ever is.
+    fn get_topics(&self, session: &Session) -> Option<Vec<TopicEntry>> {
+        let _ = session;
+        None
     }
     /// A record was refused for `reason`, and the `Rejected` that says so
     /// was sent when `answered` is true and withheld by its cap when it is
@@ -742,6 +749,52 @@ pub fn topic_filter_result(result: Result<&Resolved, TopicFilterRefusal>) -> Rec
     Record::from(e.commit().expect("the answer fits"))
 }
 
+/// What `Topics` says while no class table has been registered.
+pub const NO_TOPICS: &str = "no class table has been registered with the broker";
+
+/// One topic a connection can see: what `GetTopics` lists.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TopicEntry {
+    /// The topic id, the payload's fully-qualified type name.
+    pub topic_id: String,
+    /// Its drop policy, as the class table holds it.
+    pub class: RecordClass,
+    /// Its destination state, for an inbound topic; `None` for one nothing
+    /// routes.
+    pub target: Option<Target>,
+}
+
+/// `dcsbridge.broker.Topics` as an envelope tail: the topics the token
+/// covers, or why there are none to list. An empty list is never sent in
+/// place of the error, since a consumer could not tell it from a correct
+/// answer. Sized for the names, which are the registrar's and bounded by
+/// what it registered.
+pub fn topics(entries: Option<&[TopicEntry]>) -> Record {
+    // An entry is its name and two small varints inside a nested message
+    // whose length the encoder pads to a fixed width.
+    let listed: usize = entries.map_or(0, |entries| {
+        entries.iter().map(|entry| entry.topic_id.len() + 16).sum()
+    });
+    let mut e = Encoder::with_capacity(ANSWER_BYTES + listed);
+    e.begin(topic::TOPICS.as_bytes(), None);
+    match entries {
+        Some(entries) => {
+            for entry in entries {
+                e.message(1).expect("the answer fits");
+                e.string(1, entry.topic_id.as_bytes())
+                    .expect("the answer fits");
+                e.integer(2, entry.class as i64).expect("the answer fits");
+                if let Some(target) = entry.target {
+                    e.integer(3, target as i64).expect("the answer fits");
+                }
+                e.end_message().expect("the answer fits");
+            }
+        }
+        None => e.string(2, NO_TOPICS.as_bytes()).expect("the answer fits"),
+    }
+    Record::from(e.commit().expect("the answer fits"))
+}
+
 /// What `Schema` says while there is no schema to serve.
 pub const NO_SCHEMA: &str = "no schema has been handed to the broker";
 
@@ -886,6 +939,12 @@ pub fn serve(
                         RejectedReason::NoCapability,
                     );
                 }
+            }
+            (topic::GET_TOPICS, Some(opened)) => {
+                // Needs no capability: the answer is bounded by the
+                // token's set, so it discloses nothing the connection
+                // could not already send or receive.
+                connections.answer(id, topics(answers.get_topics(opened).as_deref()));
             }
             (topic::SET_TOPIC_FILTER, Some(opened)) => {
                 // A payload that does not decode is a refusal and not a
@@ -1442,6 +1501,75 @@ mod tests {
         }
         .encode_to_vec();
         assert_eq!(Auth::decode(&auth[..]).unwrap().token, "s3cret");
+    }
+
+    /// `Topics` carries the entries when there are any and the error when
+    /// there is no class table, never both; an inbound topic carries its
+    /// target and an outbound one none; and a list the size of a real
+    /// registration fits.
+    #[test]
+    fn topics_carries_the_entries_or_the_error() {
+        use crate::registry::Target;
+
+        #[derive(Clone, PartialEq, Message)]
+        struct Entry {
+            #[prost(string, tag = "1")]
+            topic_id: String,
+            #[prost(int32, tag = "2")]
+            record_class: i32,
+            #[prost(int32, optional, tag = "3")]
+            target: Option<i32>,
+        }
+        #[derive(Clone, PartialEq, Message)]
+        struct Topics {
+            #[prost(message, repeated, tag = "1")]
+            topic: Vec<Entry>,
+            #[prost(string, optional, tag = "2")]
+            error: Option<String>,
+        }
+        #[derive(Clone, PartialEq, Message)]
+        struct Tail {
+            #[prost(message, optional, tag = "4")]
+            payload: Option<Payload>,
+        }
+        let decode = |tail: Record| {
+            let any = Tail::decode(&tail[..]).unwrap().payload.unwrap();
+            assert_eq!(any.type_url, type_url(topic::TOPICS));
+            Topics::decode(&any.value[..]).unwrap()
+        };
+
+        assert_eq!(
+            decode(topics(None)),
+            Topics {
+                topic: Vec::new(),
+                error: Some(NO_TOPICS.into()),
+            }
+        );
+        let entries: Vec<TopicEntry> = (0..200)
+            .map(|n| TopicEntry {
+                topic_id: format!("dcsbridge.builtin.sim.Registered{n}"),
+                class: if n % 2 == 0 {
+                    RecordClass::Durable
+                } else {
+                    RecordClass::Command
+                },
+                target: (n % 2 == 1).then_some(Target::SimDriver),
+            })
+            .collect();
+        assert_eq!(
+            decode(topics(Some(&entries))),
+            Topics {
+                topic: entries
+                    .iter()
+                    .map(|entry| Entry {
+                        topic_id: entry.topic_id.clone(),
+                        record_class: entry.class as i32,
+                        target: entry.target.map(|target| target as i32),
+                    })
+                    .collect(),
+                error: None,
+            }
+        );
     }
 
     /// `Schema` carries the set when there is one and the error when there

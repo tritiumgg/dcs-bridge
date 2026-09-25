@@ -36,7 +36,7 @@ use crate::fanout::{Capacities, Class, Commit, ConnectionId, Dropped, Filter, To
 use crate::handshake;
 use crate::inbound::{
     Answers, AuthError, Command, Delivery, Limits, Liveness, RejectedReason, Resolved, Session,
-    Window,
+    TopicEntry, Window,
 };
 use crate::registry::{Capability, Member, RecordClass, Refusal, Registry, Target, Topic};
 use crate::ring::{Consumer, Producer, Push, Ring};
@@ -474,6 +474,10 @@ impl Answers for Global {
 
     fn set_topic_filter(&self, session: &Session, filter: &Filter) -> Resolved {
         bridge().set_topic_filter(session, filter)
+    }
+
+    fn get_topics(&self, session: &Session) -> Option<Vec<TopicEntry>> {
+        bridge().get_topics(session)
     }
 
     fn rejected(&self, reason: RejectedReason, answered: bool) {
@@ -984,6 +988,38 @@ impl Bridge {
     /// The effective value of the `enabled` key.
     pub fn enabled(&self) -> bool {
         self.config().enabled
+    }
+
+    /// The topics a session's connection can see, in name order: every
+    /// topic the class table holds whose row in the capability table the
+    /// token covers, with its class and, for a routed topic, its target.
+    /// A topic with a class and no capability is withheld at fan-out and
+    /// so is not listed. `None` until a class table is registered, since
+    /// an empty list would read as a correct answer for a token covering
+    /// nothing. Registration is additive, so the list grows at a mission
+    /// reload and never shrinks, and a consumer re-asks to see that.
+    pub fn get_topics(&self, session: &Session) -> Option<Vec<TopicEntry>> {
+        let registry = self.registry();
+        if registry.classes().is_empty() {
+            return None;
+        }
+        let mut entries: Vec<TopicEntry> = registry
+            .classes()
+            .iter()
+            .filter(|(topic, _)| {
+                registry
+                    .caps()
+                    .get(*topic)
+                    .is_some_and(|cap| session.caps.contains(cap))
+            })
+            .map(|(topic, class)| TopicEntry {
+                topic_id: topic.clone(),
+                class: *class,
+                target: registry.routes().get(topic).copied(),
+            })
+            .collect();
+        entries.sort_unstable_by(|a, b| a.topic_id.cmp(&b.topic_id));
+        Some(entries)
     }
 
     /// What a session's connection will now be sent under `filter`, and
@@ -1526,6 +1562,85 @@ mod tests {
                 .unwrap_or_else(|| panic!("{member} is not in {path}"));
             assert_eq!(theirs, ours, "{member} is {theirs} in the schema");
         }
+    }
+
+    /// `GetTopics` is answered with nothing until a class table exists,
+    /// then with every topic the token's set covers and no other, an
+    /// inbound topic carrying its target; a registration after the first
+    /// answer is in the next one.
+    #[test]
+    fn get_topics_lists_what_the_token_covers_and_no_other() {
+        const EVENT: &str = "dcsbridge.builtin.sim.UnitDestroyed";
+        const COMMAND: &str = "dcsbridge.builtin.sim.SetFlag";
+        const CAPLESS: &str = "dcsbridge.builtin.sim.Uncapped";
+        const LATER: &str = "adopter.Later";
+        let bridge = Bridge::new(45);
+        let reader = Session {
+            token_id: "reader".into(),
+            caps: [Capability::Read].into_iter().collect(),
+        };
+        let commander = Session {
+            token_id: "commander".into(),
+            caps: [Capability::Read, Capability::Command]
+                .into_iter()
+                .collect(),
+        };
+        assert_eq!(
+            bridge.get_topics(&reader),
+            None,
+            "an empty table was listed"
+        );
+
+        bridge
+            .register_classes([
+                (EVENT.to_string(), RecordClass::Durable),
+                (COMMAND.to_string(), RecordClass::Command),
+                (CAPLESS.to_string(), RecordClass::Durable),
+            ])
+            .expect("classes");
+        bridge
+            .register_routes([(COMMAND.to_string(), Target::SimDriver)])
+            .expect("routes");
+        bridge
+            .register_caps([
+                (EVENT.to_string(), Capability::Read),
+                (COMMAND.to_string(), Capability::Command),
+            ])
+            .expect("caps");
+        let event = TopicEntry {
+            topic_id: EVENT.into(),
+            class: RecordClass::Durable,
+            target: None,
+        };
+        let command = TopicEntry {
+            topic_id: COMMAND.into(),
+            class: RecordClass::Command,
+            target: Some(Target::SimDriver),
+        };
+        assert_eq!(bridge.get_topics(&reader), Some(vec![event.clone()]));
+        assert_eq!(
+            bridge.get_topics(&commander),
+            Some(vec![command, event.clone()])
+        );
+
+        bridge
+            .register_classes([(LATER.to_string(), RecordClass::Lossy)])
+            .expect("classes");
+        bridge
+            .register_caps([(LATER.to_string(), Capability::Read)])
+            .expect("caps");
+        assert_eq!(
+            bridge.get_topics(&reader),
+            Some(vec![
+                TopicEntry {
+                    topic_id: LATER.into(),
+                    class: RecordClass::Lossy,
+                    target: None,
+                },
+                event,
+            ]),
+            "a later registration did not grow the list"
+        );
     }
 
     /// A filter is resolved against the class table and the token: a

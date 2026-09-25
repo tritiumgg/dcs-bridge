@@ -1736,6 +1736,136 @@ mod tests {
         drop(writer);
     }
 
+    /// `GetTopics` is answered on the reader thread with what stands
+    /// behind the transport lists for the token: the error while there is
+    /// nothing, and the entries once there are, in order. Before
+    /// authentication it closes the connection like any other message.
+    #[test]
+    fn get_topics_is_answered_with_the_entries_or_the_error() {
+        use crate::registry::{RecordClass, Target};
+
+        #[derive(Clone, PartialEq, Message)]
+        struct Entry {
+            #[prost(string, tag = "1")]
+            topic_id: String,
+            #[prost(int32, tag = "2")]
+            record_class: i32,
+            #[prost(int32, optional, tag = "3")]
+            target: Option<i32>,
+        }
+        #[derive(Clone, PartialEq, Message)]
+        struct Topics {
+            #[prost(message, repeated, tag = "1")]
+            topic: Vec<Entry>,
+            #[prost(string, optional, tag = "2")]
+            error: Option<String>,
+        }
+        /// The stub that lists two topics for every token.
+        struct Listing;
+        impl Answers for Listing {
+            fn handshake(&self) -> Record {
+                Stub.handshake()
+            }
+            fn liveness(&self) -> inbound::Liveness {
+                Stub.liveness()
+            }
+            fn authenticate(&self, secret: &[u8]) -> Result<Session, AuthError> {
+                Stub.authenticate(secret)
+            }
+            fn disconnected(&self, _: &Session) {}
+            fn schema(&self) -> Option<Record> {
+                None
+            }
+            fn seq_ack(&self, _: u64) {}
+            fn set_enabled(&self, _: bool) {}
+            fn get_topics(&self, _: &Session) -> Option<Vec<inbound::TopicEntry>> {
+                Some(vec![
+                    inbound::TopicEntry {
+                        topic_id: "dcsbridge.builtin.sim.SetFlag".into(),
+                        class: RecordClass::Command,
+                        target: Some(Target::SimDriver),
+                    },
+                    inbound::TopicEntry {
+                        topic_id: "dcsbridge.builtin.sim.UnitDestroyed".into(),
+                        class: RecordClass::Durable,
+                        target: None,
+                    },
+                ])
+            }
+        }
+        let ask = |client: &mut TcpStream, seq: u64| {
+            client
+                .write_all(&inbound(seq, topic::GET_TOPICS, &[]))
+                .expect("the request is sent");
+            let frame = read_frame(client);
+            let any = frame.payload.expect("a payload");
+            assert_eq!(any.type_url, type_url(topic::TOPICS));
+            Topics::decode(&any.value[..]).expect("the topics decode")
+        };
+
+        let (writer, _commit, connections) = Writer::spawn(64);
+        let listener = Listener::spawn(
+            "127.0.0.1:0",
+            connections,
+            Capacities::each(64),
+            Arc::new(Stub),
+        )
+        .unwrap();
+        let mut client = client(listener.local_addr());
+        read_handshake(&mut client);
+        client
+            .write_all(&inbound(1, topic::GET_TOPICS, &[]))
+            .expect("the request is sent");
+        assert!(
+            is_closed(&mut client),
+            "an unauthenticated request was answered"
+        );
+        let mut client = self::client(listener.local_addr());
+        read_handshake(&mut client);
+        assert!(authenticate(&mut client, SECRET).1.ok);
+        assert_eq!(
+            ask(&mut client, 2),
+            Topics {
+                topic: Vec::new(),
+                error: Some(inbound::NO_TOPICS.into()),
+            }
+        );
+        drop(listener);
+        drop(writer);
+
+        let (writer, _commit, connections) = Writer::spawn(64);
+        let listener = Listener::spawn(
+            "127.0.0.1:0",
+            connections,
+            Capacities::each(64),
+            Arc::new(Listing),
+        )
+        .unwrap();
+        let mut client = self::client(listener.local_addr());
+        read_handshake(&mut client);
+        assert!(authenticate(&mut client, SECRET).1.ok);
+        assert_eq!(
+            ask(&mut client, 2),
+            Topics {
+                topic: vec![
+                    Entry {
+                        topic_id: "dcsbridge.builtin.sim.SetFlag".into(),
+                        record_class: RecordClass::Command as i32,
+                        target: Some(Target::SimDriver as i32),
+                    },
+                    Entry {
+                        topic_id: "dcsbridge.builtin.sim.UnitDestroyed".into(),
+                        record_class: RecordClass::Durable as i32,
+                        target: None,
+                    },
+                ],
+                error: None,
+            }
+        );
+        drop(listener);
+        drop(writer);
+    }
+
     /// `dcsbridge.broker.TopicFilterResult` as a consumer decodes it.
     #[derive(Clone, PartialEq, Message)]
     struct TopicFilterResult {
