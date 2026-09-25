@@ -1330,6 +1330,7 @@ impl Bridge {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::inbound::{TopicFilterMode, TopicFilterRefusal};
 
     /// The whole point of the process-global rule: two registrars in two Lua
     /// states have to see each other's entries, which they only can through one
@@ -1399,7 +1400,7 @@ mod tests {
         );
     }
 
-    /// The three enums are hand-copied from the schema and their numbers cross
+    /// The enums are hand-copied from the schema and their numbers cross
     /// the wire, so a renumber on either side has to be a test failure rather
     /// than a consumer's problem.
     #[test]
@@ -1411,7 +1412,7 @@ mod tests {
         let schema =
             std::fs::read_to_string(path).unwrap_or_else(|e| panic!("could not read {path}: {e}"));
 
-        let pairs: [(&str, i32); 16] = [
+        let pairs: [(&str, i32); 22] = [
             (
                 "REJECTED_REASON_UNKNOWN_TOPIC",
                 RejectedReason::UnknownTopic as i32,
@@ -1440,6 +1441,24 @@ mod tests {
             ("CAPABILITY_READ", Capability::Read as i32),
             ("CAPABILITY_COMMAND", Capability::Command as i32),
             ("CAPABILITY_RELOAD", Capability::Reload as i32),
+            ("TOPIC_FILTER_MODE_ALL", TopicFilterMode::All as i32),
+            ("TOPIC_FILTER_MODE_ONLY", TopicFilterMode::Only as i32),
+            (
+                "TOPIC_FILTER_REFUSAL_NO_MODE",
+                TopicFilterRefusal::NoMode as i32,
+            ),
+            (
+                "TOPIC_FILTER_REFUSAL_LIST_WITH_ALL",
+                TopicFilterRefusal::ListWithAll as i32,
+            ),
+            (
+                "TOPIC_FILTER_REFUSAL_TOO_MANY",
+                TopicFilterRefusal::TooMany as i32,
+            ),
+            (
+                "TOPIC_FILTER_REFUSAL_MALFORMED",
+                TopicFilterRefusal::Malformed as i32,
+            ),
         ];
 
         for (member, ours) in pairs {

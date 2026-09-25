@@ -1736,6 +1736,218 @@ mod tests {
         drop(writer);
     }
 
+    /// `dcsbridge.broker.TopicFilterResult` as a consumer decodes it.
+    #[derive(Clone, PartialEq, Message)]
+    struct TopicFilterResult {
+        #[prost(bool, tag = "1")]
+        ok: bool,
+        #[prost(int32, optional, tag = "2")]
+        refusal: Option<i32>,
+        #[prost(uint32, tag = "3")]
+        admitted: u32,
+        #[prost(string, repeated, tag = "4")]
+        unknown: Vec<String>,
+    }
+
+    /// Send a `SetTopicFilter` from raw parts and read the result, which is
+    /// the next frame: the filter itself is answered by nothing.
+    fn set_topic_filter(
+        client: &mut TcpStream,
+        seq: u64,
+        mode: i32,
+        ids: &[&str],
+    ) -> TopicFilterResult {
+        let set = inbound::SetTopicFilter {
+            mode,
+            topic_id: ids.iter().map(|id| (*id).to_string()).collect(),
+        }
+        .encode_to_vec();
+        client
+            .write_all(&inbound(seq, topic::SET_TOPIC_FILTER, &set))
+            .expect("the filter is sent");
+        read_topic_filter_result(client)
+    }
+
+    /// The next frame, which must be a `TopicFilterResult`, decoded.
+    fn read_topic_filter_result(client: &mut TcpStream) -> TopicFilterResult {
+        let frame = read_frame(client);
+        let any = frame.payload.as_ref().expect("a payload");
+        assert_eq!(any.type_url, type_url(topic::TOPIC_FILTER_RESULT));
+        TopicFilterResult::decode(&any.value[..]).expect("the result decodes")
+    }
+
+    /// A refused `SetTopicFilter`, as it is answered.
+    fn refused(refusal: inbound::TopicFilterRefusal) -> TopicFilterResult {
+        TopicFilterResult {
+            ok: false,
+            refusal: Some(refusal as i32),
+            admitted: 0,
+            unknown: Vec::new(),
+        }
+    }
+
+    /// A `SetTopicFilter` is answered on the reader thread with what stands
+    /// behind the transport says of it: with nothing there, every name is
+    /// unknown and nothing admitted, and the filter is applied all the
+    /// same. The four refused shapes are each answered `ok` false with
+    /// their reason and keep the connection: mode zero, `ALL` with a
+    /// list, more distinct names than the cap, and a payload that does
+    /// not decode. A list of duplicates is folded before the cap. After
+    /// every one, a `Ping` is answered and a `Rejected` for the
+    /// connection's own record reaches it, narrowed to nothing as it is.
+    #[test]
+    fn a_topic_filter_is_answered_and_the_four_shapes_are_refused() {
+        use inbound::{TopicFilterMode as Mode, TopicFilterRefusal as Refusal};
+        const SIM_COMMAND: &str = "dcsbridge.builtin.sim.SetFlag";
+        let read_only = Arc::new(Switch {
+            reload: false,
+            enabled: Arc::new(AtomicBool::new(true)),
+            acked: Arc::new(AtomicU64::new(0)),
+            refused: Arc::new(AtomicU64::new(0)),
+        });
+        let (writer, _commit, connections) = Writer::spawn(64);
+        let listener =
+            Listener::spawn("127.0.0.1:0", connections, Capacities::each(64), read_only).unwrap();
+        let mut client = client(listener.local_addr());
+        read_handshake(&mut client);
+        assert!(authenticate(&mut client, SECRET).1.ok);
+
+        assert_eq!(
+            set_topic_filter(&mut client, 2, Mode::Only as i32, &["t.B", "t.A"]),
+            TopicFilterResult {
+                ok: true,
+                refusal: None,
+                admitted: 0,
+                unknown: vec!["t.A".into(), "t.B".into()],
+            },
+            "a filter with nothing behind the transport was not answered as unknown"
+        );
+        assert_eq!(
+            set_topic_filter(&mut client, 3, 0, &[]),
+            refused(Refusal::NoMode)
+        );
+        assert_eq!(
+            set_topic_filter(&mut client, 4, Mode::All as i32, &["t.A"]),
+            refused(Refusal::ListWithAll)
+        );
+        let cap = inbound::Limits::default().topic_filter_max_topics as usize;
+        let names: Vec<String> = (0..=cap).map(|n| format!("t.N{n}")).collect();
+        let over: Vec<&str> = names.iter().map(String::as_str).collect();
+        assert_eq!(
+            set_topic_filter(&mut client, 5, Mode::Only as i32, &over),
+            refused(Refusal::TooMany)
+        );
+        let repeated = vec!["t.A"; cap + 1];
+        assert!(
+            set_topic_filter(&mut client, 6, Mode::Only as i32, &repeated).ok,
+            "duplicates counted against the cap"
+        );
+        assert_eq!(
+            set_topic_filter(&mut client, 7, 3, &[]),
+            refused(Refusal::Malformed),
+            "a mode no member has was not malformed"
+        );
+        client
+            .write_all(&inbound(8, topic::SET_TOPIC_FILTER, b"\xff\xff"))
+            .expect("the garbage is sent");
+        assert_eq!(
+            read_topic_filter_result(&mut client),
+            refused(Refusal::Malformed)
+        );
+        assert_eq!(
+            set_topic_filter(&mut client, 9, Mode::All as i32, &[]),
+            TopicFilterResult {
+                ok: true,
+                refusal: None,
+                admitted: 0,
+                unknown: Vec::new(),
+            }
+        );
+
+        // Narrowed to nothing, the connection still gets its own answers.
+        assert!(set_topic_filter(&mut client, 10, Mode::Only as i32, &[]).ok);
+        client
+            .write_all(&inbound(11, topic::PING, &[]))
+            .expect("the ping is sent");
+        let frame = read_frame(&mut client);
+        assert_eq!(
+            frame.payload.unwrap().type_url,
+            type_url(topic::PONG),
+            "a refusal closed the connection"
+        );
+        client
+            .write_all(&inbound(12, SIM_COMMAND, b"set"))
+            .expect("the record is sent");
+        assert_rejected(&mut client, 12, SIM_COMMAND, RejectedReason::NoCapability);
+
+        drop(listener);
+        drop(writer);
+    }
+
+    /// `topic_filter_max_topics` is read as each `SetTopicFilter` arrives:
+    /// a list that fit under the default is refused once the cap is
+    /// lowered under its length, on the same connection.
+    #[test]
+    fn a_topic_cap_lowered_under_load_binds_on_the_next_filter() {
+        use inbound::{TopicFilterMode as Mode, TopicFilterRefusal as Refusal};
+        let limits = Arc::new(RwLock::new(inbound::Limits::default()));
+        let (writer, _commit, connections) = Writer::spawn(64);
+        let listener = Listener::spawn(
+            "127.0.0.1:0",
+            connections,
+            Capacities::each(64),
+            Arc::new(Live(Arc::clone(&limits))),
+        )
+        .unwrap();
+        let mut client = client(listener.local_addr());
+        read_handshake(&mut client);
+        assert!(authenticate(&mut client, SECRET).1.ok);
+
+        let three = ["t.A", "t.B", "t.C"];
+        assert!(set_topic_filter(&mut client, 2, Mode::Only as i32, &three).ok);
+        limits.write().unwrap().topic_filter_max_topics = 2;
+        assert_eq!(
+            set_topic_filter(&mut client, 3, Mode::Only as i32, &three),
+            refused(Refusal::TooMany),
+            "the lowered cap did not bind on the next filter"
+        );
+        assert!(set_topic_filter(&mut client, 4, Mode::Only as i32, &three[..2]).ok);
+
+        drop(listener);
+        drop(writer);
+    }
+
+    /// A `SetTopicFilter` before authentication closes the connection, as
+    /// every message but `Ping` and `Auth` does.
+    #[test]
+    fn a_topic_filter_before_authentication_closes_the_connection() {
+        let (writer, _commit, connections) = Writer::spawn(64);
+        let listener = Listener::spawn(
+            "127.0.0.1:0",
+            connections,
+            Capacities::each(64),
+            Arc::new(Stub),
+        )
+        .unwrap();
+        let mut client = client(listener.local_addr());
+        read_handshake(&mut client);
+        let set = inbound::SetTopicFilter {
+            mode: inbound::TopicFilterMode::All as i32,
+            topic_id: Vec::new(),
+        }
+        .encode_to_vec();
+        client
+            .write_all(&inbound(1, topic::SET_TOPIC_FILTER, &set))
+            .expect("the filter is sent");
+        assert!(
+            is_closed(&mut client),
+            "an unauthenticated filter was taken"
+        );
+
+        drop(listener);
+        drop(writer);
+    }
+
     /// A record for Lua from a token without the capability its topic
     /// requires is answered with `Rejected` reason `NO_CAPABILITY` carrying
     /// the sender's `seq` and the topic, counted, and the connection is
@@ -1874,6 +2086,29 @@ mod tests {
         drop(writer);
     }
 
+    /// The stub whose limits a test swaps while a connection is open.
+    struct Live(Arc<RwLock<inbound::Limits>>);
+    impl Answers for Live {
+        fn handshake(&self) -> Record {
+            Stub.handshake()
+        }
+        fn liveness(&self) -> inbound::Liveness {
+            Stub.liveness()
+        }
+        fn limits(&self) -> inbound::Limits {
+            *self.0.read().unwrap_or_else(PoisonError::into_inner)
+        }
+        fn authenticate(&self, secret: &[u8]) -> Result<Session, AuthError> {
+            Stub.authenticate(secret)
+        }
+        fn disconnected(&self, _: &Session) {}
+        fn schema(&self) -> Option<Record> {
+            None
+        }
+        fn seq_ack(&self, _: u64) {}
+        fn set_enabled(&self, _: bool) {}
+    }
+
     /// A cap lowered while a connection is open binds on that connection's
     /// next frame: the reader asks for the limits as each frame arrives,
     /// not once at accept and not before it waits. A `Ping` that passed
@@ -1882,27 +2117,6 @@ mod tests {
     /// first, so the handshake deadline cannot be what closes it.
     #[test]
     fn a_cap_lowered_under_load_binds_on_the_next_frame() {
-        struct Live(Arc<RwLock<inbound::Limits>>);
-        impl Answers for Live {
-            fn handshake(&self) -> Record {
-                Stub.handshake()
-            }
-            fn liveness(&self) -> inbound::Liveness {
-                Stub.liveness()
-            }
-            fn limits(&self) -> inbound::Limits {
-                *self.0.read().unwrap_or_else(PoisonError::into_inner)
-            }
-            fn authenticate(&self, secret: &[u8]) -> Result<Session, AuthError> {
-                Stub.authenticate(secret)
-            }
-            fn disconnected(&self, _: &Session) {}
-            fn schema(&self) -> Option<Record> {
-                None
-            }
-            fn seq_ack(&self, _: u64) {}
-            fn set_enabled(&self, _: bool) {}
-        }
         let limits = Arc::new(RwLock::new(inbound::Limits::default()));
         let (writer, _commit, connections) = Writer::spawn(64);
         let listener = Listener::spawn(

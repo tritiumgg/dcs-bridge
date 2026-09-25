@@ -67,7 +67,7 @@ use prost::Message;
 
 use crate::config::Config;
 use crate::encode::Encoder;
-use crate::fanout::{Capabilities, ConnectionId, Connections};
+use crate::fanout::{Capabilities, ConnectionId, Connections, Filter};
 use crate::registry::{Capability, Member};
 use crate::transport::Record;
 
@@ -99,6 +99,9 @@ pub struct Limits {
     /// The most `Rejected` one connection is sent in a second for a full
     /// ring, capped apart because it answers a well-behaved consumer.
     pub busy_max_per_sec: u32,
+    /// The most distinct topics one `SetTopicFilter` may name; a longer
+    /// list is refused whole.
+    pub topic_filter_max_topics: u32,
 }
 
 impl From<&Config> for Limits {
@@ -111,6 +114,7 @@ impl From<&Config> for Limits {
             inbound_records_per_sec_total: config.inbound_records_per_sec_total,
             rejected_max_per_sec: config.rejected_max_per_sec,
             busy_max_per_sec: config.busy_max_per_sec,
+            topic_filter_max_topics: config.topic_filter_max_topics,
         }
     }
 }
@@ -232,6 +236,26 @@ pub trait Answers: Send + Sync + 'static {
     fn seq_ack(&self, seq: u64);
     /// A consumer with the `reload` capability sets the kill switch.
     fn set_enabled(&self, enabled: bool);
+    /// A session's connection asked to be sent `filter`: say what it will
+    /// now be sent and which named topics are not admissible. With nothing
+    /// behind the transport no topic is registered, so nothing is admitted
+    /// and every name is unknown; the filter itself still reaches the
+    /// writer thread, since a name is admitted by the record that carries
+    /// it and not by any table here.
+    fn set_topic_filter(&self, session: &Session, filter: &Filter) -> Resolved {
+        let _ = session;
+        Resolved {
+            admitted: 0,
+            unknown: match filter {
+                Filter::All => Vec::new(),
+                Filter::Only(topics) => {
+                    let mut named: Vec<String> = topics.iter().cloned().collect();
+                    named.sort_unstable();
+                    named
+                }
+            },
+        }
+    }
     /// A record was refused for `reason`, and the `Rejected` that says so
     /// was sent when `answered` is true and withheld by its cap when it is
     /// not. Every refusal is counted by reason; a withheld one is counted
@@ -634,6 +658,90 @@ pub struct SetEnabled {
     pub enabled: bool,
 }
 
+/// `dcsbridge.broker.SetTopicFilter` as the broker reads it.
+#[derive(Clone, PartialEq, Message)]
+pub struct SetTopicFilter {
+    /// A `TopicFilterMode`, refused at zero.
+    #[prost(int32, tag = "1")]
+    pub mode: i32,
+    /// The whole set under `ONLY`, empty under `ALL`.
+    #[prost(string, repeated, tag = "2")]
+    pub topic_id: Vec<String>,
+}
+
+/// How much of what its capabilities cover a connection asked to be sent.
+/// Mirrors `dcsbridge.broker.TopicFilterMode`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TopicFilterMode {
+    /// Every record the capability set covers.
+    All = 1,
+    /// The named topics and every `LIFECYCLE` topic.
+    Only = 2,
+}
+
+impl TopicFilterMode {
+    /// The member with this number, or `None` for zero, which proto3
+    /// cannot tell from an omitted field, and for a number no member has.
+    fn from_wire(mode: i32) -> Option<Self> {
+        match mode {
+            1 => Some(TopicFilterMode::All),
+            2 => Some(TopicFilterMode::Only),
+            _ => None,
+        }
+    }
+}
+
+/// Why a `SetTopicFilter` was refused whole, the previous filter left in
+/// force. Mirrors `dcsbridge.broker.TopicFilterRefusal`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TopicFilterRefusal {
+    /// Mode zero: a consumer that forgot the mode is told rather than
+    /// guessed at.
+    NoMode = 1,
+    /// `ALL` with a list, which states two intentions at once.
+    ListWithAll = 2,
+    /// More distinct names than `topic_filter_max_topics`.
+    TooMany = 3,
+    /// A payload the broker cannot parse, a mode no member has included:
+    /// the enum is not extensible.
+    Malformed = 4,
+}
+
+/// What the bridge says about a filter it was handed: how many topics the
+/// connection will now be sent, and which named ones it will not be.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct Resolved {
+    /// The admissible topics the filter admits, `LIFECYCLE` ones included.
+    pub admitted: u32,
+    /// The named topics not admissible now: not registered, or not covered
+    /// by the token, and the two are deliberately told apart by nothing.
+    pub unknown: Vec<String>,
+}
+
+/// `dcsbridge.broker.TopicFilterResult` as an envelope tail: a filter
+/// applied, with what it admits and what it named that is not admissible,
+/// or a filter refused and why. Sized for the names it echoes, which are
+/// the sender's own and under the topic cap in number.
+pub fn topic_filter_result(result: Result<&Resolved, TopicFilterRefusal>) -> Record {
+    let unknown: &[String] = result.map_or(&[], |resolved| &resolved.unknown);
+    // A string field is its tag, its length as a varint and its bytes.
+    let echoed: usize = unknown.iter().map(|name| name.len() + 8).sum();
+    let mut e = Encoder::with_capacity(ANSWER_BYTES + echoed);
+    e.begin(topic::TOPIC_FILTER_RESULT.as_bytes(), None);
+    e.boolean(1, result.is_ok()).expect("the answer fits");
+    match result {
+        Ok(resolved) => {
+            e.integer(3, i64::from(resolved.admitted))
+                .expect("the answer fits");
+            for name in unknown {
+                e.string(4, name.as_bytes()).expect("the answer fits");
+            }
+        }
+        Err(refusal) => e.integer(2, refusal as i64).expect("the answer fits"),
+    }
+    Record::from(e.commit().expect("the answer fits"))
+}
+
 /// What `Schema` says while there is no schema to serve.
 pub const NO_SCHEMA: &str = "no schema has been handed to the broker";
 
@@ -777,6 +885,49 @@ pub fn serve(
                         refused,
                         RejectedReason::NoCapability,
                     );
+                }
+            }
+            (topic::SET_TOPIC_FILTER, Some(opened)) => {
+                // A payload that does not decode is a refusal and not a
+                // close: the shape is answered, as the other three are,
+                // with the previous filter left in force. Needs no
+                // capability, since it can only narrow what the token
+                // already covers.
+                let filter = match SetTopicFilter::decode(payload(&envelope)) {
+                    Err(_) => Err(TopicFilterRefusal::Malformed),
+                    Ok(set) => match (TopicFilterMode::from_wire(set.mode), set.topic_id) {
+                        (None, _) if set.mode == 0 => Err(TopicFilterRefusal::NoMode),
+                        (None, _) => Err(TopicFilterRefusal::Malformed),
+                        (Some(TopicFilterMode::All), ids) if !ids.is_empty() => {
+                            Err(TopicFilterRefusal::ListWithAll)
+                        }
+                        (Some(TopicFilterMode::All), _) => Ok(Filter::All),
+                        (Some(TopicFilterMode::Only), ids) => {
+                            // Duplicates are folded before the cap is
+                            // applied, and the cap is read now, so a key
+                            // lowered under an open connection binds here.
+                            let topics: HashSet<String> = ids.into_iter().collect();
+                            let cap = answers.limits().topic_filter_max_topics as usize;
+                            if topics.len() > cap {
+                                Err(TopicFilterRefusal::TooMany)
+                            } else {
+                                Ok(Filter::Only(topics))
+                            }
+                        }
+                    },
+                };
+                match filter {
+                    Ok(filter) => {
+                        let resolved = answers.set_topic_filter(opened, &filter);
+                        // The filter first, the answer after, on the same
+                        // channel: every record numbered after the answer
+                        // obeys it.
+                        connections.topic_filter(id, filter);
+                        connections.answer(id, topic_filter_result(Ok(&resolved)));
+                    }
+                    Err(refusal) => {
+                        connections.answer(id, topic_filter_result(Err(refusal)));
+                    }
                 }
             }
             // Every other topic is a record for Lua, on the ring its route
