@@ -1,6 +1,6 @@
 # Working state
 
-**Last updated:** 2026-09-22
+**Last updated:** 2026-09-25
 
 The handoff between sessions. Read it first; update it before a session ends,
 not only when a task finishes. Stamp the date above each time; it carries a
@@ -18,7 +18,7 @@ is just deleted. Write entries as one or two lines, never paragraphs.
 
 ## In progress
 
-Nothing. 2.17 is closed; 2.20 is next.
+Nothing. 2.20 is closed; 2.C5 is next.
 
 *One task at most. Say what is done, what is not, and where to resume. Say what
 is committed and what is only in the working tree. Say what is knowingly
@@ -26,30 +26,26 @@ broken. Empty this when the task closes.*
 
 ## Just finished
 
+- **2.20** — `SetTopicFilter` and `GetTopics`. PR #87, ADR 0030 to 0032.
 - **2.17** — `LIFECYCLE` retention and replay under one frozen cap; the late
   `tail` verified over loopback, live with PR #86's hook script. ADR 0029.
 - **1.2** — ruleset 23835728 on `main` requires `Preflight`, `Linux`, `Windows`.
-- **2.18** — the drop rule on a ring per class. Opens M2.3. PR #85, ADR 0028.
 
 *The last three at most, one line each. Git log holds the rest.*
 
 ## Next
 
-**Task 2.20** — `SetTopicFilter` and `GetTopics` on the reader thread: `ALL`
-by default, replace rather than accumulate, `LIFECYCLE` always admitted, the
-four refused shapes, `topic_filter_max_topics`, the filter handed to the
-writer thread by pointer swap and applied at fan-out before `seq`, counted in
-`records_filtered_total`. The plan's row has the done-when.
+**Task 2.C5** — CLI `record` and `replay`: a captured session replays to a
+consumer with no DCS running. The plan's row has the done-when.
 
-**An agent verifies** over loopback that a connection under `ONLY` receives
-the named topic, every `LIFECYCLE` topic and no other with no `seq` gap, and
-that `GetTopics` lists the token's topics; **the maintainer verifies** nothing
-live until 6.1 emits records.
+**An agent verifies** over loopback that a session `dcsb record` wrote is
+read back by `dcsb replay` and reaches a consumer, frame for frame; **the
+maintainer verifies** nothing live until 6.1 emits records.
 
 ## After that
 
-- **M2.3**: 2.C5, 2.C6 after 2.20, in that order. Phase 2 ends
-  with it, and the rows ahead are re-measured there.
+- **M2.3**: 2.C6 after 2.C5. Phase 2 ends with it, and the rows ahead are
+  re-measured there.
 - **Phase 3** opens on 3.1, `protoc-gen-dcsbridge-lua`, which the `generator`
   crate stubs; ADR 0016.
 
@@ -84,12 +80,13 @@ entries at most: an eleventh means something here is finished, or belongs in
   reopens at 9.7. The by-class drop counts wait for `stats` to report them.
 - **SPEC §17's *Any (native module)* rows land with their behaviour.** Task 2.1
   built the carrier, `mise run lua`, and closed on that. Each row is owed by
-  the task implementing what it describes: topic filter at 2.20. The plan's
+  the task implementing what it describes. The plan's
   2.1 done-when reads as though all seventeen run at 2.1, which none of
   them can. Point-to-point landed at 2.8 on the acknowledgement, at 2.16 on
   the typed replies and at 2.12 on `poll` returning the id; capability at
-  2.14 and late join at 2.17, in the Rust loopback tests, since a bare Lua
-  5.1 opens no socket. ADR 0017, ADR 0023, ADR 0027, ADR 0029.
+  2.14, late join at 2.17 and topic filter and topic discovery at 2.20, in
+  the Rust loopback tests, since a bare Lua
+  5.1 opens no socket. ADR 0017, ADR 0023, ADR 0027, ADR 0029, ADR 0030.
 - **Task 2.2's load banner is owed by 4.1.** SPEC §13 addresses the banner to
   the Lua side and SPEC §15 has `doctor` check it. Nothing makes the DLL write
   one, and SPEC §4 leaves it no `io`. Delete this when 4.1 closes.
@@ -97,8 +94,7 @@ entries at most: an eleventh means something here is finished, or belongs in
   `Config` since 2.15, and nothing reads these yet: SPEC §17 "Broker
   hardening" (`max_unauthenticated_connections`, `auth_failures_per_min`,
   revocation dropping sessions) has no owner: a later `configure` swaps the
-  token table and leaves a session under a dropped token open. `GetTopics`
-  and `SetTopicFilter` route as records until 2.20. `commit` allocates once
+  token table and leaves a session under a dropped token open. `commit` allocates once
   per record and a connection drains one frame per socket call, one record
   in forty at a 20000-record burst on Windows loopback; PROBE-7 at 9.7
   prices both. ADR 0014. The sim driver's schema hash SPEC §8.3 has ride
