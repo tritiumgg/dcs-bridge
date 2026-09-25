@@ -100,6 +100,12 @@ a topic its token does not cover is refused. The `tokens` key holds one entry
 per consumer. Reading it from the file is not yet built; until then a hook
 script hands the table to the bridge with `shim.configure`.
 
+A consumer that wants less than its token covers sends `SetTopicFilter` with
+the whole set of topics it wants; each message replaces the last, and
+`LIFECYCLE` topics arrive whatever it names. `GetTopics` answers which topics
+this install registered that the token can see. `topic_filter_max_topics`,
+256 by default, bounds one list and is a live key.
+
 The loader has an `ENABLED` flag. Set it to `false` to keep the bridge
 installed but inactive.
 
