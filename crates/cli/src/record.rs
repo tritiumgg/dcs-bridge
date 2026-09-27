@@ -311,6 +311,7 @@ mod tests {
         consumer.write_all(&auth_frame("anything")).unwrap();
         let mut replayed = Vec::new();
         consumer.read_to_end(&mut replayed).unwrap();
+        drop(consumer);
         replaying.join().unwrap().unwrap();
         assert_eq!(replayed, capture, "the consumer did not read the capture");
 

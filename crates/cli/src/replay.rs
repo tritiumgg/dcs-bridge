@@ -12,7 +12,7 @@ use std::net::{Shutdown, TcpListener, TcpStream};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::wire::read_frame_bytes;
 
@@ -28,9 +28,16 @@ pub struct Summary {
 }
 
 /// How long the inbound reader waits on one read before it looks at whether
-/// the capture has been served. It bounds how long a consumer that never
-/// closes its side holds the process after the last frame.
+/// the capture has been served.
 const READ_SLICE: Duration = Duration::from_millis(200);
+
+/// How long after the last frame the close waits for the consumer to close
+/// its side. A consumer still working through its receive buffer may write
+/// in that time, and a close before it does draws the reset the drain is
+/// there to avoid; one that neither closes nor goes quiet past this is
+/// closed on regardless, so a consumer that never closes cannot hold the
+/// process.
+const DRAIN_MAX: Duration = Duration::from_secs(5);
 
 /// Accept one consumer on `listener`, serve `capture` to it, and return.
 pub fn run(listener: &TcpListener, capture: impl Read) -> io::Result<Summary> {
@@ -86,27 +93,29 @@ pub fn write_frames(mut capture: impl Read, out: &mut impl Write) -> io::Result<
 }
 
 /// Read `inbound` until the consumer closes its side, counting the bytes,
-/// or until the capture has been served and one more read slice passes
-/// with nothing to read.
+/// or until the capture has been served and [`DRAIN_MAX`] has passed.
 fn discard(mut inbound: TcpStream, served: &AtomicBool, discarded: &AtomicU64) {
     let mut chunk = [0u8; 1 << 12];
+    let mut served_at = None;
     loop {
+        if served.load(Ordering::SeqCst) {
+            let since = *served_at.get_or_insert_with(Instant::now);
+            if since.elapsed() >= DRAIN_MAX {
+                return;
+            }
+        }
         match inbound.read(&mut chunk) {
             Ok(0) => return,
             Ok(n) => {
                 discarded.fetch_add(n as u64, Ordering::SeqCst);
             }
-            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
             Err(error)
                 if matches!(
                     error.kind(),
-                    io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
-                ) =>
-            {
-                if served.load(Ordering::SeqCst) {
-                    return;
-                }
-            }
+                    io::ErrorKind::Interrupted
+                        | io::ErrorKind::WouldBlock
+                        | io::ErrorKind::TimedOut
+                ) => {}
             Err(_) => return,
         }
     }
@@ -184,6 +193,9 @@ mod tests {
         let mut out = Vec::new();
         let summary = tail::run(&consumer, &mut out).unwrap();
         let out = String::from_utf8(out).unwrap();
+        // The close waits for the consumer's side to close, as `tail`'s
+        // exit closes it.
+        drop(consumer);
         let served = replay.join().unwrap().unwrap();
 
         assert_eq!(summary.frames, 3, "{out}");
@@ -195,6 +207,33 @@ mod tests {
         );
         assert_eq!(served.frames, 3);
         assert_eq!(served.bytes, capture().concat().len() as u64);
+        assert_eq!(served.discarded, auth.len() as u64);
+    }
+
+    /// A consumer that writes only after the whole capture has been sent,
+    /// as one working through its receive buffer would, still ends cleanly:
+    /// its bytes are read before the close, and its read reaches the end of
+    /// stream rather than a reset.
+    #[test]
+    fn a_consumer_that_writes_late_reads_to_a_clean_end() {
+        let whole: Vec<u8> = capture().concat();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let replay = thread::spawn(move || run(&listener, &whole[..]));
+
+        let mut consumer = TcpStream::connect(addr).unwrap();
+        consumer
+            .set_read_timeout(Some(Duration::from_secs(30)))
+            .unwrap();
+        thread::sleep(READ_SLICE * 3);
+        let auth = auth_frame("anything");
+        consumer.write_all(&auth).unwrap();
+        let mut read = Vec::new();
+        consumer.read_to_end(&mut read).unwrap();
+        drop(consumer);
+        let served = replay.join().unwrap().unwrap();
+
+        assert_eq!(read, capture().concat());
         assert_eq!(served.discarded, auth.len() as u64);
     }
 }

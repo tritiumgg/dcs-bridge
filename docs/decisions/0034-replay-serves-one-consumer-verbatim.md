@@ -41,7 +41,9 @@ The close is a write-side shutdown followed by a read to the consumer's end
 of stream. A close over unread inbound bytes is answered with a reset on
 Linux, and a reset can take the frames still in the consumer's receive
 buffer with it, so the consumer's last frames would vanish there and
-nowhere else.
+nowhere else. The read waits five seconds at most after the last frame, so
+a consumer that never closes its side cannot hold the process; one that is
+still writing past that is closed on, reset and all.
 
 Alternatives:
 
