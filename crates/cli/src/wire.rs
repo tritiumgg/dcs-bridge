@@ -181,13 +181,17 @@ pub fn frame(seq: u64, topic: &str, value: Vec<u8>) -> Vec<u8> {
     bytes
 }
 
-/// Read one frame, or `None` at a clean end of stream.
+/// Read one frame's bytes, length prefix included, or `None` at a clean
+/// end of stream.
 ///
 /// An end of stream inside a frame is an error, because the bridge closes a
 /// connection between frames and a cut mid-frame means bytes were lost.
-pub fn read_frame(reader: &mut impl Read) -> io::Result<Option<Envelope>> {
-    let mut length = [0u8; 4];
-    match fill(reader, &mut length)? {
+/// The bytes come back as the wire carried them, so a verb that copies
+/// frames rather than reading them loses nothing the CLI's own `Envelope`
+/// leaves undeclared.
+pub fn read_frame_bytes(reader: &mut impl Read) -> io::Result<Option<Vec<u8>>> {
+    let mut bytes = vec![0u8; 4];
+    match fill(reader, &mut bytes)? {
         0 => return Ok(None),
         4 => {}
         n => {
@@ -197,7 +201,7 @@ pub fn read_frame(reader: &mut impl Read) -> io::Result<Option<Envelope>> {
             ));
         }
     }
-    let length = u32::from_le_bytes(length);
+    let length = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
     if length > FRAME_MAX {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -205,16 +209,24 @@ pub fn read_frame(reader: &mut impl Read) -> io::Result<Option<Envelope>> {
         ));
     }
 
-    let mut body = vec![0u8; length as usize];
-    let got = fill(reader, &mut body)?;
-    if got != body.len() {
+    bytes.resize(4 + length as usize, 0);
+    let got = fill(reader, &mut bytes[4..])?;
+    if got != length as usize {
         return Err(io::Error::new(
             io::ErrorKind::UnexpectedEof,
             format!("the stream ended {got} bytes into a {length}-byte frame"),
         ));
     }
+    Ok(Some(bytes))
+}
 
-    Envelope::decode(&body[..])
+/// Read one frame, or `None` at a clean end of stream, as
+/// [`read_frame_bytes`] reads it, decoded.
+pub fn read_frame(reader: &mut impl Read) -> io::Result<Option<Envelope>> {
+    let Some(bytes) = read_frame_bytes(reader)? else {
+        return Ok(None);
+    };
+    Envelope::decode(&bytes[4..])
         .map(Some)
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
 }
@@ -293,6 +305,24 @@ mod tests {
         assert_eq!(error.kind(), io::ErrorKind::UnexpectedEof);
 
         let error = read_frame(&mut &whole[..2]).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::UnexpectedEof);
+    }
+
+    /// The bytes read back are the bytes written, prefix included, so a
+    /// copy of them is the frame the wire carried; a cut inside one is the
+    /// same error the decoding read gives.
+    #[test]
+    fn a_frames_bytes_come_back_as_written() {
+        let whole = frame(3, TOPIC, vec![0x08, 0x2a]);
+        let mut stream = whole.clone();
+        stream.extend(&whole);
+        let mut reader = &stream[..];
+        assert_eq!(read_frame_bytes(&mut reader).unwrap().unwrap(), whole);
+        assert_eq!(read_frame_bytes(&mut reader).unwrap().unwrap(), whole);
+        assert!(read_frame_bytes(&mut reader).unwrap().is_none());
+
+        let cut = &whole[..whole.len() - 1];
+        let error = read_frame_bytes(&mut &cut[..]).unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::UnexpectedEof);
     }
 
