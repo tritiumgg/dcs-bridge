@@ -9,17 +9,20 @@
 //! against the deployed one. `send` puts one record on a topic, so a
 //! command can be seen to reach the Lua state its route names. `record`
 //! appends every frame a bridge sends to a file, as the wire carried it, so
-//! a session can be kept and read back with no DCS running.
+//! a session can be kept and read back with no DCS running. `replay`
+//! serves a capture to one consumer, so that consumer can be run against
+//! the session with no DCS running.
 
 mod ping;
 mod record;
+mod replay;
 mod schema;
 mod send;
 mod tail;
 mod wire;
 
 use std::io::{self, BufReader, Write};
-use std::net::TcpStream;
+use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Duration;
@@ -47,6 +50,8 @@ enum Verb {
     Send(SendArgs),
     /// Append every frame a bridge sends to a file, until it closes.
     Record(RecordArgs),
+    /// Serve a capture to the first consumer that connects, then exit.
+    Replay(ReplayArgs),
 }
 
 /// The address the bridge listens on.
@@ -56,6 +61,18 @@ struct Addr {
     ///
     /// The default is the module's, until its first `configure` can move it.
     #[arg(long, default_value = "127.0.0.1:7742")]
+    addr: String,
+}
+
+/// The address `replay` listens on.
+#[derive(Args)]
+struct Listen {
+    /// The address to listen on for the one consumer.
+    ///
+    /// The default is beside the bridge's, so a bridge and a replay can run
+    /// on one machine. Port 0 takes a free one, which the `listening on`
+    /// line names.
+    #[arg(long, default_value = "127.0.0.1:7743")]
     addr: String,
 }
 
@@ -146,6 +163,16 @@ struct RecordArgs {
     token: TokenFile,
 }
 
+#[derive(Args)]
+struct ReplayArgs {
+    /// The capture to serve, as `record` wrote it.
+    #[arg(value_name = "PATH")]
+    capture: PathBuf,
+
+    #[command(flatten)]
+    listen: Listen,
+}
+
 /// The environment variable a secret is read from when no file names one.
 const TOKEN_ENV: &str = "DCSB_TOKEN";
 
@@ -162,6 +189,59 @@ fn main() -> ExitCode {
         Verb::Schema(args) => schema_verb(&args),
         Verb::Send(args) => send_verb(&args),
         Verb::Record(args) => record_verb(&args),
+        Verb::Replay(args) => replay_verb(&args),
+    }
+}
+
+/// Listen, accept one consumer, serve it the capture, and exit.
+///
+/// The capture served whole exits 0, after one line naming the frames and
+/// bytes. A capture that ends inside a frame, or a consumer that leaves
+/// before the end, exits 1, after every whole frame before it was sent. A
+/// capture that cannot be opened or an address that cannot be bound exits
+/// 2, because nothing was served. The `listening on` line goes to stdout
+/// once the address is bound and before the accept, so a script that asked
+/// for port 0 can read which port it got.
+fn replay_verb(args: &ReplayArgs) -> ExitCode {
+    let path = &args.capture;
+    let capture = match fs::File::open(path) {
+        Ok(file) => BufReader::with_capacity(1 << 16, file),
+        Err(error) => {
+            eprintln!("cannot open {}: {error}", path.display());
+            return ExitCode::from(2);
+        }
+    };
+    let addr = &args.listen.addr;
+    let listener = match TcpListener::bind(addr) {
+        Ok(listener) => listener,
+        Err(error) => {
+            eprintln!("cannot listen on {addr}: {error}");
+            return ExitCode::from(2);
+        }
+    };
+    match listener.local_addr() {
+        Ok(bound) => println!("listening on {bound}"),
+        Err(error) => {
+            eprintln!("cannot listen on {addr}: {error}");
+            return ExitCode::from(2);
+        }
+    }
+    let _ = io::stdout().flush();
+
+    match replay::run(&listener, capture) {
+        Ok(summary) => {
+            eprintln!(
+                "replayed {} frames, {} bytes from {}",
+                summary.frames,
+                summary.bytes,
+                path.display()
+            );
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("replay: {error}");
+            ExitCode::from(1)
+        }
     }
 }
 
