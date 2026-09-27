@@ -13,6 +13,8 @@
 //! serves a capture to one consumer, so that consumer can be run against
 //! the session with no DCS running.
 
+#[cfg(test)]
+mod loopback;
 mod ping;
 mod record;
 mod replay;
