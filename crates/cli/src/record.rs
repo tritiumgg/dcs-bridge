@@ -74,10 +74,17 @@ pub fn whole_frames(mut reader: impl Read) -> io::Result<Result<u64, u64>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::wire::{self, AuthResult};
+    use crate::loopback::{READ, TOPIC, client, record};
+    use crate::replay;
+    use crate::tail;
+    use crate::wire::{self, AuthResult, auth_frame, read_frame};
+    use dcsbridge_broker::fanout::{Capacities, Class, Writer};
+    use dcsbridge_broker::transport::Listener;
     use dcsbridge_topic as topic;
-
-    const TOPIC: &str = "dcsbridge.builtin.sim.UnitDestroyed";
+    use std::net::{Shutdown, TcpListener, TcpStream};
+    use std::sync::{Arc, Mutex};
+    use std::thread;
+    use std::time::{Duration, Instant};
 
     /// Frames of three sizes, numbered from one.
     fn frames() -> Vec<Vec<u8>> {
@@ -188,5 +195,147 @@ mod tests {
             whole_frames(&garbage[..]).unwrap_err().kind(),
             io::ErrorKind::InvalidData
         );
+    }
+
+    /// A sink shared with the thread `run` writes on, so the test can watch
+    /// the capture grow.
+    #[derive(Clone, Default)]
+    struct Shared(Arc<Mutex<Vec<u8>>>);
+
+    impl Shared {
+        fn bytes(&self) -> Vec<u8> {
+            self.0.lock().unwrap().clone()
+        }
+    }
+
+    impl Write for Shared {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// Wait until `sink` holds a frame whose payload is `bytes` long, or
+    /// fail after a while.
+    fn wait_for_payload(sink: &Shared, bytes: usize) {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while !payload_sizes(&sink.bytes()).contains(&bytes) {
+            assert!(
+                Instant::now() < deadline,
+                "no frame of {bytes} bytes arrived"
+            );
+            thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    /// The payload size of each whole frame in `capture`.
+    fn payload_sizes(capture: &[u8]) -> Vec<usize> {
+        let mut reader = capture;
+        let mut sizes = Vec::new();
+        while let Ok(Some(envelope)) = read_frame(&mut reader) {
+            sizes.push(envelope.payload.map_or(0, |any| any.value.len()));
+        }
+        sizes
+    }
+
+    /// The whole round trip, with no DCS and no bridge on the replay side:
+    /// a session `record` captured off the broker's own listener,
+    /// handshake and token answer included, is served by `replay` to a
+    /// consumer that reads it through `tail` frame for frame, with no gap.
+    /// The recorded records have distinct sizes, and each size is read
+    /// back, so a frame missing from the capture or the replay would show.
+    #[test]
+    fn a_session_recorded_off_the_bridge_replays_frame_for_frame() {
+        const SIZES: [usize; 4] = [16, 300, 5000, 20000];
+        let (writer, mut commit, connections) = Writer::spawn(4096);
+        let answers = Arc::new(dcsbridge_broker::state::Global);
+        let listener =
+            Listener::spawn("127.0.0.1:0", connections, Capacities::each(64), answers).unwrap();
+        // Nothing is read off the socket here: the handshake and the token
+        // answer are `record`'s to read, so the capture starts at seq 1.
+        let socket = client(listener.local_addr());
+        let control = socket.try_clone().unwrap();
+        let sink = Shared::default();
+        let recording = thread::spawn({
+            let sink = sink.clone();
+            move || run(&socket, sink)
+        });
+
+        // A record committed before the writer thread knows the connection
+        // has authenticated is passed over, and nothing outside that thread
+        // says when that is; a third frame in the capture does.
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while payload_sizes(&sink.bytes()).len() < 3 {
+            assert!(Instant::now() < deadline, "no record reached the capture");
+            drop(commit.push(READ, Class::Durable, record(1)));
+            thread::sleep(Duration::from_millis(5));
+        }
+        // The payload the wire carries is the record's `Any` value, a few
+        // bytes over the string inside it.
+        let sizes: Vec<usize> = SIZES
+            .into_iter()
+            .map(|bytes| {
+                let record = record(bytes);
+                drop(commit.push(READ, Class::Durable, Arc::clone(&record)));
+                let tail = Envelope::decode(&record[..]).unwrap();
+                tail.payload.unwrap().value.len()
+            })
+            .collect();
+        wait_for_payload(&sink, sizes[SIZES.len() - 1]);
+
+        // A shutdown of the consumer's own socket ends the stream between
+        // frames, which `run` reads as a clean close.
+        control.shutdown(Shutdown::Both).unwrap();
+        let recorded = recording.join().unwrap().unwrap();
+        drop(listener);
+        drop(writer);
+        let capture = sink.bytes();
+        assert!(!recorded.refused, "the token was refused");
+        assert_eq!(recorded.bytes, capture.len() as u64);
+        assert_eq!(recorded.frames, payload_sizes(&capture).len() as u64);
+
+        let replay_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = replay_listener.local_addr().unwrap();
+        let replaying = thread::spawn({
+            let capture = capture.clone();
+            move || replay::run(&replay_listener, &capture[..])
+        });
+        let mut consumer = TcpStream::connect(addr).unwrap();
+        consumer
+            .set_read_timeout(Some(Duration::from_secs(30)))
+            .unwrap();
+        consumer.write_all(&auth_frame("anything")).unwrap();
+        let mut replayed = Vec::new();
+        consumer.read_to_end(&mut replayed).unwrap();
+        replaying.join().unwrap().unwrap();
+        assert_eq!(replayed, capture, "the consumer did not read the capture");
+
+        let mut out = Vec::new();
+        let summary = tail::run(&replayed[..], &mut out).unwrap();
+        let out = String::from_utf8(out).unwrap();
+        assert!(!summary.refused, "{out}");
+        assert_eq!(summary.frames, recorded.frames, "{out}");
+        assert_eq!(summary.gaps, 0, "{out}");
+        assert!(!out.contains("out of order"), "{out}");
+        let lines: Vec<&str> = out.lines().collect();
+        assert!(
+            lines[0].starts_with("seq=1 ")
+                && lines[0].contains(&format!(" topic={} ", topic::HANDSHAKE)),
+            "the handshake is not first:\n{out}"
+        );
+        assert!(
+            lines[1].starts_with("seq=2 ") && lines[1].ends_with(" ok=true"),
+            "the token answer is not second:\n{out}"
+        );
+        for bytes in sizes {
+            assert!(
+                out.contains(&format!(" topic={TOPIC} bytes={bytes}\n")),
+                "the {bytes}-byte record did not come back:\n{out}"
+            );
+        }
     }
 }
