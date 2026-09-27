@@ -210,3 +210,41 @@ fn record_replay_and_tail_round_trip_a_capture_as_processes() {
         "{tailer_err}"
     );
 }
+
+/// `record` refuses a file that ends inside a frame before it connects to
+/// anything, naming where the last whole frame ends, and leaves the file as
+/// it found it.
+#[test]
+fn record_refuses_a_file_that_ends_inside_a_frame() {
+    let dir = std::env::temp_dir().join(format!("dcsb-partial-{}", std::process::id()));
+    fs::create_dir_all(&dir).unwrap();
+    let capture = dir.join("capture.bin");
+    // One whole frame of four zero bytes, an empty envelope, then a frame
+    // whose length prefix promises more than follows.
+    let mut bytes = 0u32.to_le_bytes().to_vec();
+    bytes.extend(64u32.to_le_bytes());
+    bytes.extend([1, 2, 3]);
+    fs::write(&capture, &bytes).unwrap();
+
+    let output = dcsb()
+        .arg("record")
+        .arg("--addr")
+        .arg("127.0.0.1:1")
+        .arg(&capture)
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    let left = fs::read(&capture).unwrap();
+    fs::remove_dir_all(&dir).unwrap();
+
+    assert_eq!(output.status.code(), Some(2), "{stderr}");
+    assert!(
+        stderr.contains("ends inside a frame, after 4 whole bytes"),
+        "{stderr}"
+    );
+    assert!(
+        !stderr.contains("cannot connect"),
+        "record connected first: {stderr}"
+    );
+    assert_eq!(left, bytes, "the file was changed");
+}
