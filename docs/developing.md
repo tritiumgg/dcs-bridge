@@ -57,7 +57,9 @@ beside the pinned one; run it before a push. `mise tasks` lists the rest.
 default address, `127.0.0.1:7742`, and prints one line per frame and one line
 per gap in its numbering. `--addr` names another. `cargo run -p dcsb -- ping`
 sends one `Ping` with no token and exits by the `Pong`: 0 alive, 1 not, 2
-when nothing answered.
+when nothing answered. A session `dcsb record` captured replays through
+`dcsb replay` to any consumer, `tail` included, so a change on the consumer
+side can be checked with no DCS present.
 
 Rust is the one tool `mise.toml` does not name a version for. `rust-toolchain.toml`
 does, and mise reads it — `mise ls` shows rust sourced from that file, and

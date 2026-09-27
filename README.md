@@ -234,6 +234,9 @@ dcsb send dcsbridge.builtin.sim.SetFlag --hex 082a
                                    Send one record, its bytes given as hex.
 dcsb send dcsbridge.builtin.sim.SetFlag --file record.bin --wait 2
                                    Send the file's bytes and print what answers.
+dcsb record session.bin            Append each record the bridge sends to a file.
+dcsb replay session.bin            Serve that file to one consumer, with no DCS.
+dcsb tail --addr 127.0.0.1:7743    Read the replayed session.
 dcsb --help                        List the available commands.
 ```
 
@@ -296,8 +299,31 @@ consumer that pushes the total over is disconnected. A consumer hears of at
 most `rejected_max_per_sec` refusals a second, and `busy_max_per_sec` for a
 full queue; the rest are counted and not answered.
 
-`tail`, `ping`, `schema` and `send` are built. The others are planned:
-`doctor`, `stats`, `record`, `replay` and `mock`.
+`record` authenticates like `tail` and appends every frame the bridge sends
+to the file named, byte for byte as the wire carried it, handshake first,
+until the bridge closes the connection or the process is stopped. Each
+frame is written whole before the next is read, so a stopped run leaves
+whole frames. A second run onto the same file appends, and `tail` reads
+the join as `seq` going back to 1. A file that ends inside a frame is
+refused, naming where its last whole frame ends, because a session
+appended after a partial frame reads as garbage from the join on. It prints
+`recorded <n> frames, <n> bytes to <file>` when the bridge closes, exits 1
+when the token is refused or the stream is cut mid-frame, and exits 2 when
+there was nothing to record.
+
+`replay` serves a capture to the first consumer that connects, frame for
+frame, then exits. It listens on `127.0.0.1:7743` unless `--addr` names
+another, beside the bridge's port so both can run on one machine, and
+prints `listening on <address>` once it is bound. It checks no token: the
+consumer's own bytes are read and discarded, and the recorded bridge's
+answer is what the consumer reads. The consumer sees the recorded bridge's
+handshake, epochs and mission times, not this machine's clock, and reads
+frames as fast as it can take them. A capture that ends inside a frame
+serves the whole frames before the cut and exits 1; a file that cannot be
+opened or an address that cannot be bound exits 2.
+
+`tail`, `ping`, `schema`, `send`, `record` and `replay` are built. The
+others are planned: `doctor`, `stats` and `mock`.
 
 ## Build from source
 
