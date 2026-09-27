@@ -1,6 +1,6 @@
 # Working state
 
-**Last updated:** 2026-09-25
+**Last updated:** 2026-09-26
 
 The handoff between sessions. Read it first; update it before a session ends,
 not only when a task finishes. Stamp the date above each time; it carries a
@@ -18,7 +18,7 @@ is just deleted. Write entries as one or two lines, never paragraphs.
 
 ## In progress
 
-Nothing. 2.20 is closed; 2.C5 is next.
+Nothing. 2.C5 is closed; 2.C6 is next.
 
 *One task at most. Say what is done, what is not, and where to resume. Say what
 is committed and what is only in the working tree. Say what is knowingly
@@ -26,26 +26,25 @@ broken. Empty this when the task closes.*
 
 ## Just finished
 
+- **2.C5** — `record` and `replay`, proved over loopback. PR #88, ADR 0033, 0034.
 - **2.20** — `SetTopicFilter` and `GetTopics`. PR #87, ADR 0030 to 0032.
-- **2.17** — `LIFECYCLE` retention and replay under one frozen cap; the late
-  `tail` verified over loopback, live with PR #86's hook script. ADR 0029.
-- **1.2** — ruleset 23835728 on `main` requires `Preflight`, `Linux`, `Windows`.
+- **2.17** — `LIFECYCLE` retention and replay; live with PR #86. ADR 0029.
 
 *The last three at most, one line each. Git log holds the rest.*
 
 ## Next
 
-**Task 2.C5** — CLI `record` and `replay`: a captured session replays to a
-consumer with no DCS running. The plan's row has the done-when.
+**Task 2.C6** — CLI `mock`: synthetic traffic at a configurable rate, so a
+consumer can be written before any capture exists and 9.8 has its load
+generator. The plan's row has the done-when.
 
-**An agent verifies** over loopback that a session `dcsb record` wrote is
-read back by `dcsb replay` and reaches a consumer, frame for frame; **the
-maintainer verifies** nothing live until 6.1 emits records.
+**An agent verifies** over loopback that `dcsb mock` serves schema-shaped
+records at the rate asked for and `tail` reads them with no gap; **the
+maintainer verifies** nothing live, since `mock` needs no DCS.
 
 ## After that
 
-- **M2.3**: 2.C6 after 2.C5. Phase 2 ends with it, and the rows ahead are
-  re-measured there.
+- **M2.3** closes with 2.C6, and the rows ahead are re-measured there.
 - **Phase 3** opens on 3.1, `protoc-gen-dcsbridge-lua`, which the `generator`
   crate stubs; ADR 0016.
 
