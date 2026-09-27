@@ -7,9 +7,12 @@
 //! alive and exits by the answer, so a script can ask too. `schema` fetches
 //! the set the bridge serves and writes it to a file, so it can be checked
 //! against the deployed one. `send` puts one record on a topic, so a
-//! command can be seen to reach the Lua state its route names.
+//! command can be seen to reach the Lua state its route names. `record`
+//! appends every frame a bridge sends to a file, as the wire carried it, so
+//! a session can be kept and read back with no DCS running.
 
 mod ping;
+mod record;
 mod schema;
 mod send;
 mod tail;
@@ -42,6 +45,8 @@ enum Verb {
     Schema(SchemaArgs),
     /// Send one record on a topic, and exit 1 when the token is refused.
     Send(SendArgs),
+    /// Append every frame a bridge sends to a file, until it closes.
+    Record(RecordArgs),
 }
 
 /// The address the bridge listens on.
@@ -125,6 +130,22 @@ struct SendArgs {
     token: TokenFile,
 }
 
+#[derive(Args)]
+struct RecordArgs {
+    /// The file to append the capture to, created if it does not exist.
+    ///
+    /// Each frame is written as the wire carried it, handshake first, so
+    /// the file is what `replay` serves and what `tail` would have read.
+    #[arg(value_name = "PATH")]
+    out: PathBuf,
+
+    #[command(flatten)]
+    addr: Addr,
+
+    #[command(flatten)]
+    token: TokenFile,
+}
+
 /// The environment variable a secret is read from when no file names one.
 const TOKEN_ENV: &str = "DCSB_TOKEN";
 
@@ -140,6 +161,90 @@ fn main() -> ExitCode {
         Verb::Ping(args) => ping_verb(&args),
         Verb::Schema(args) => schema_verb(&args),
         Verb::Send(args) => send_verb(&args),
+        Verb::Record(args) => record_verb(&args),
+    }
+}
+
+/// Connect, authenticate, then append frames to the file until the bridge
+/// closes the connection.
+///
+/// A refused connection, no token to send, a token that could not be sent,
+/// or a file that cannot be opened exits 2, because there is nothing to
+/// record. So does a file that ends inside a frame, because a capture
+/// appended after a partial frame reads as garbage from the join on. A
+/// token the bridge refuses exits 1, after its answer has been written. A
+/// stream that ends mid-frame exits 1, after every whole frame before it
+/// has been written.
+fn record_verb(args: &RecordArgs) -> ExitCode {
+    let secret = match token(args.token.token_file.as_deref()) {
+        Ok(secret) => secret,
+        Err(error) => {
+            eprintln!("{error}");
+            return ExitCode::from(2);
+        }
+    };
+    let path = &args.out;
+    match fs::File::open(path).map(record::whole_frames) {
+        Ok(Ok(Ok(_))) => {}
+        Ok(Ok(Err(offset))) => {
+            eprintln!(
+                "{} ends inside a frame, after {offset} whole bytes; move it, or truncate it to {offset} bytes",
+                path.display()
+            );
+            return ExitCode::from(2);
+        }
+        Ok(Err(error)) => {
+            eprintln!("{} is not a capture: {error}", path.display());
+            return ExitCode::from(2);
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => {
+            eprintln!("cannot read {}: {error}", path.display());
+            return ExitCode::from(2);
+        }
+    }
+    let sink = match fs::OpenOptions::new().append(true).create(true).open(path) {
+        Ok(file) => file,
+        Err(error) => {
+            eprintln!("cannot open {}: {error}", path.display());
+            return ExitCode::from(2);
+        }
+    };
+    let addr = &args.addr.addr;
+    let mut stream = match TcpStream::connect(addr) {
+        Ok(stream) => stream,
+        Err(error) => {
+            eprintln!("cannot connect to {addr}: {error}");
+            return ExitCode::from(2);
+        }
+    };
+    if let Err(error) = stream.write_all(&wire::auth_frame(&secret)) {
+        eprintln!("cannot send the token to {addr}: {error}");
+        return ExitCode::from(2);
+    }
+    // The socket is read through a buffer for the reason `tail` reads it
+    // through one: a burst is thousands of frames and one system call per
+    // frame is what the reader falls behind on.
+    let reader = BufReader::with_capacity(1 << 16, stream);
+
+    match record::run(reader, sink) {
+        Ok(summary) if summary.refused => {
+            eprintln!("the bridge refused the token; its answer is in the file");
+            ExitCode::from(1)
+        }
+        Ok(summary) => {
+            eprintln!(
+                "recorded {} frames, {} bytes to {}",
+                summary.frames,
+                summary.bytes,
+                path.display()
+            );
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("record: {error}");
+            ExitCode::from(1)
+        }
     }
 }
 
