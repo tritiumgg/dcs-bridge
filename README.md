@@ -323,7 +323,7 @@ serves the whole frames before the cut and exits 1; a file that cannot be
 opened or an address that cannot be bound exits 2.
 
 `tail`, `ping`, `schema`, `send`, `record` and `replay` are built. The
-others are planned: `doctor`, `stats` and `mock`.
+others are planned: `doctor` and `stats`.
 
 ## Build from source
 
