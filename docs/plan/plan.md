@@ -31,7 +31,6 @@ Section 1.1 gives the CLI's arc across the phases.
 | `schema` | 2.C3 | `GetSchema` exists and its bytes must be compared to `schema.pb` |
 | `send` | 2.C4 | Inbound rings exist and routing has to be exercised |
 | `record`, `replay` | 2.C5 | The frame format is settled; captures let later phases test with no DCS |
-| `mock` | 2.C6 | The schema is settled; a consumer can now be written before any capture |
 | `stats` | 5.C1 | `shim.stats` publishes counters worth reading |
 | `doctor` | 4.C1, 5.C2, 8.C1, 9.C1 | It can only check what exists, so it grows in four increments |
 
@@ -89,7 +88,6 @@ states which hosts build what.
 | 2.19 | Landed with 2.9: `SeqAck` is consumed and counted, with no spool behind it and no per-connection tracking (PR #55). Nothing reads an acknowledged `seq` until the spool ships (SPEC §11). | The wire carries it and the broker accepts it without error. |
 | 2.20 | `SetTopicFilter` and `GetTopics` on the reader thread: `ALL` as the default, replace rather than accumulate, `LIFECYCLE` always admitted, the four refused shapes with `ok` false and a `refusal` reason, `topic_filter_max_topics`, and the filter published to the writer thread by pointer swap. Filtering runs at fan-out before `seq` and counts in `records_filtered_total`. | A connection naming one topic under `ONLY` receives that topic and every `LIFECYCLE` topic and no other. `records_dropped_total` does not move and the consumer sees no `seq` gap. `GetTopics` lists every topic the token's capability set covers and no topic outside it. |
 | 2.C5 | CLI `record` and `replay`. | A captured session replays to a consumer with no DCS running. |
-| 2.C6 | CLI `mock` — synthetic traffic at a configurable rate. | A consumer can be written before any capture exists, and 9.8 has its load generator. |
 
 **Phase 2 from 2.15 on runs in three milestones.** A milestone is something
 a person sees, not a count of rows. A task's ordered commit list, with a size
@@ -104,7 +102,7 @@ the milestone before it is reached.
 |---|---|---|
 | **M2.1 — A configured, live bridge** | `dcsb ping` on an install reports the sim alive and the configured values in force, and `dcsb schema` returns `schema.pb`. | 2.15, 2.C2, 2.10, 2.C3, 2.11 |
 | **M2.2 — A command reaches Lua** | `dcsb send` lands a record on the ring its registered route names, and an unrouted one is answered with `Rejected`. | 2.16, 2.12, 2.C4, 2.13, 2.14 |
-| **M2.3 — The drop policy holds** | A late `dcsb tail` receives `EpochOpened` first, an `EpochClosed` survives a `LOSSY` flood, and a capture replays with no DCS. 2.18 comes before 2.17 so that replay is built onto the rings it will fill rather than reworked for them. | 2.18, 2.17, 2.20, 2.C5, 2.C6 |
+| **M2.3 — The drop policy holds** | A late `dcsb tail` receives `EpochOpened` first, an `EpochClosed` survives a `LOSSY` flood, and a capture replays with no DCS. 2.18 comes before 2.17 so that replay is built onto the rings it will fill rather than reworked for them. | 2.18, 2.17, 2.20, 2.C5 |
 
 2.19 is in no milestone: it landed with 2.9, and its row stays for the id.
 
@@ -207,7 +205,7 @@ the milestone before it is reached.
 | 9.6 | Inbound rate limits, per connection and aggregate, answering differently: `inbound_records_per_sec` refuses with `Rejected` and keeps the connection, `inbound_records_per_sec_total` disconnects. Drop-newest on a full ring. | A flooding consumer is refused, then disconnected. `max_connections` legal consumers cannot together exceed dispatch capacity. |
 | 9.C1 | CLI `doctor`, fourth increment: policy-refusal detection and the union `autoexec.cfg`, under both `net.allow_unsafe_api` and `net.allow_dostring_in`. | Pasting its output breaks no other installed tool. |
 | 9.7 | Run PROBE-7, ring sizing at peak record rate, now that a real rate exists. | `ring_out_lossy_records`, `ring_out_durable_records`, `ring_out_lifecycle_records`, `ring_in_sim_driver_records` and `ring_in_hook_driver_records` have a measured basis rather than a provisional one. |
-| 9.8 | Load test at 10× a captured stream's rate, driven by `dcsb mock` or `dcsb replay`. | Budgets hold. Drops behave as specified. |
+| 9.8 | Load test at 10× a captured stream's rate: a Rust test commits into the broker in its own process, and `dcsb replay` drives the consumer side. ADR 0035. | Budgets hold. Drops behave as specified. |
 | 9.9 | Live public session with metrics recorded. | Real figures under real load. |
 | 9.10 | Run PROBE-9: does `DCS.getTaintedFiles` react to the shipped DLL, and does `others` move. | The release notes state the answer rather than calling it unmeasured. |
 
@@ -247,7 +245,7 @@ an ID is a name, not a position.
 
 ## 2. What ships alongside
 
-Adoption fails on friction, not on capability. Seven artifacts, in order of
+Adoption fails on friction, not on capability. Six artifacts, in order of
 importance.
 
 **Prebuilt binaries in every release.** Ship the broker, the CLI, and a zip
@@ -259,9 +257,6 @@ feeds that file to a consumer with no DCS running.
 This matters most. Without it, every contributor needs a DCS install, a
 licensed map, and a running mission to change one line. The cost is a file
 format you already have: framed records, appended.
-
-**A mock producer.** Synthetic traffic conforming to the schema at a
-configurable rate. Also the load generator for the Section 1 load test.
 
 **A CLI, and `doctor` among its verbs.** SPEC §15 specifies both: the verbs,
 the schema reflection that makes `send` work for uncompiled record types, and
