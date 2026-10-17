@@ -1,6 +1,6 @@
 # Working state
 
-**Last updated:** 2026-09-26
+**Last updated:** 2026-10-17
 
 The handoff between sessions. Read it first; update it before a session ends,
 not only when a task finishes. Stamp the date above each time; it carries a
@@ -18,7 +18,7 @@ is just deleted. Write entries as one or two lines, never paragraphs.
 
 ## In progress
 
-Nothing. 2.C5 is closed; 2.C6 is next.
+Nothing. 2.C6 is dropped; 3.1 is next.
 
 *One task at most. Say what is done, what is not, and where to resume. Say what
 is committed and what is only in the working tree. Say what is knowingly
@@ -26,27 +26,20 @@ broken. Empty this when the task closes.*
 
 ## Just finished
 
+- **2.C6** — dropped, no `mock`, and M2.3's rows ahead re-measured. PR #89, ADR 0035.
 - **2.C5** — `record` and `replay`, proved over loopback. PR #88, ADR 0033, 0034.
 - **2.20** — `SetTopicFilter` and `GetTopics`. PR #87, ADR 0030 to 0032.
-- **2.17** — `LIFECYCLE` retention and replay; live with PR #86. ADR 0029.
 
 *The last three at most, one line each. Git log holds the rest.*
 
 ## Next
 
-**Task 2.C6** — CLI `mock`: synthetic traffic at a configurable rate, so a
-consumer can be written before any capture exists and 9.8 has its load
-generator. The plan's row has the done-when.
-
-**An agent verifies** over loopback that `dcsb mock` serves schema-shaped
-records at the rate asked for and `tail` reads them with no gap; **the
-maintainer verifies** nothing live, since `mock` needs no DCS.
+**Task 3.1** — `protoc-gen-dcsbridge-lua`, which the `generator` crate stubs;
+ADR 0016. The plan's row has the done-when. Its brief settles who verifies.
 
 ## After that
 
-- **M2.3** closes with 2.C6, and the rows ahead are re-measured there.
-- **Phase 3** opens on 3.1, `protoc-gen-dcsbridge-lua`, which the `generator`
-  crate stubs; ADR 0016.
+- **Phase 3** runs 3.1, 3.3 and 3.6, then Phase 4; 3.5 waits behind 7.6.
 
 ## Carries forward
 
@@ -55,11 +48,6 @@ resolved, and say where. Mark an entry only the maintainer can settle. Ten
 entries at most: an eleventh means something here is finished, or belongs in
 `docs/decisions/` or `CLAUDE.md` instead.
 
-- **What 2.17 left to `stats`.** `lifecycle_replayed_total`,
-  `lifecycle_oversize_total` and `lifecycle_evicted_total` are one number
-  each until `stats` reports them. A boundary the commit ring evicts under a
-  burst before the writer thread keeps it is counted, not prevented; the
-  commit ring's class is PROBE-7's question at 9.7. ADR 0029.
 - **Maintainer decision — the policy gate is unmeasured and no probe covers
   it.** Tasks 4.8, 4.9, 9.C1 and 10.2 rest on which `net.allow_dostring_in`
   value list is correct. Measure it, or ship the wider union and state the
@@ -89,15 +77,13 @@ entries at most: an eleventh means something here is finished, or belongs in
 - **Task 2.2's load banner is owed by 4.1.** SPEC §13 addresses the banner to
   the Lua side and SPEC §15 has `doctor` check it. Nothing makes the DLL write
   one, and SPEC §4 leaves it no `io`. Delete this when 4.1 closes.
-- **What 2.4 to 2.16 left to 9.7 and nobody.** Every broker key is in
-  `Config` since 2.15, and nothing reads these yet: SPEC §17 "Broker
-  hardening" (`max_unauthenticated_connections`, `auth_failures_per_min`,
-  revocation dropping sessions) has no owner: a later `configure` swaps the
-  token table and leaves a session under a dropped token open. `commit` allocates once
+- **What 2.4 to 2.16 left to 9.7 and nobody.** Until 9.1 and 9.5, a
+  `configure` that drops a token leaves its session open, and
+  `max_unauthenticated_connections` and `auth_failures_per_min` bind nothing.
+  `commit` allocates once
   per record and a connection drains one frame per socket call, one record
   in forty at a 20000-record burst on Windows loopback; PROBE-7 at 9.7
-  prices both. ADR 0014. The sim driver's schema hash SPEC §8.3 has ride
-  `shim.classes` has no owner; 4.3 carries the hook driver's on `configure`.
+  prices both. ADR 0014.
   The registry refuses an adopter's capability, and the fan-out mask holds
   numbers below 64 (ADR 0027); SPEC §14.4's range has no task. On Windows a
   full `LIFECYCLE` ring's close leaves the drainer blocked in `send` until
