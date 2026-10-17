@@ -1,4 +1,4 @@
-# dcsb is one binary with nine verbs. It runs outside the DCS process and links
+# dcsb is one binary with eight verbs. It runs outside the DCS process and links
 # no part of the broker: what it knows of the wire it decodes through a stock
 # protobuf library, so a misreading in the encoder cannot be shared by the tool
 # that checks it. The broker is reached only by the tests, which stand a real

@@ -1,6 +1,6 @@
 //! `dcsb`, the DCS-Bridge CLI.
 //!
-//! Nine verbs are planned and they arrive one at a time, each with the broker
+//! Eight verbs are planned and they arrive one at a time, each with the broker
 //! behaviour it is there to observe. `tail` connects to a running bridge and
 //! prints each frame as it arrives, with a line wherever the sequence
 //! numbers show that records were dropped. `ping` asks whether the sim is
