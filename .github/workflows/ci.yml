@@ -222,6 +222,13 @@ jobs:
       - name: Schema
         run: sh tools/mkschema.sh
 
+      # The plugin protocol end to end: buf hands the generator the request
+      # it builds over proto/, with the plugin the Build step compiled, and
+      # the script checks both files carry the hash of the schema.pb above.
+      # The golden test under Test covers what the files say.
+      - name: Generate
+        run: sh tools/mkgen.sh
+
       - name: Test
         run: cargo test --workspace --no-default-features
 

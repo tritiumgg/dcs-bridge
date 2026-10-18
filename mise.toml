@@ -75,6 +75,14 @@ run = [
   "sh tools/mkschema.sh",
 ]
 
+[tasks.generate]
+description = "Generate the Lua files from the .proto tree into target/gen"
+depends = ["schema"]
+run = [
+  "cargo build -p protoc-gen-dcsbridge-lua",
+  "sh tools/mkgen.sh",
+]
+
 [tasks.loom]
 description = "Enumerate the ring's and the writer's interleavings with Loom"
 env = { RUSTFLAGS = "--cfg loom -D warnings" }
@@ -89,8 +97,8 @@ run = "sh tools/miri.sh"
 # CI run that passes, Windows aside; a push that starts a run which fails is
 # a run nobody needed.
 [tasks.ci]
-description = "Everything CI gates a pull request on: check, schema, docs, loom, miri"
-depends = ["check", "schema", "docs", "loom", "miri"]
+description = "Everything CI gates a pull request on: check, schema, generate, docs, loom, miri"
+depends = ["check", "schema", "generate", "docs", "loom", "miri"]
 
 [tasks.bench-fanout]
 description = "Time logic-thread cost per commit against zero to eight consumers"

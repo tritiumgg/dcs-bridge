@@ -1,0 +1,14 @@
+version: v2
+plugins:
+  # The bridge's protoc plugin, built by cargo. tools/mkgen.sh runs this.
+  #
+  # strategy all hands the plugin every file in one request. The default
+  # runs it once per directory, and each run would write both .gen.lua files
+  # over half the schema.
+  #
+  # schema= names the compiled schema.pb, whose hash both files carry, so
+  # tools/mkschema.sh runs first. ADR 0039.
+  - local: target/debug/protoc-gen-dcsbridge-lua
+    out: target/gen
+    opt: schema=target/schema.pb
+    strategy: all
