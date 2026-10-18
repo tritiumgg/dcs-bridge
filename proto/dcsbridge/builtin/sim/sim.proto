@@ -19,6 +19,7 @@ import "dcsbridge/broker/broker.proto";
 // follows.
 message UnitDestroyed {
   option (dcsbridge.broker.record_class) = RECORD_CLASS_DURABLE;
+  option (dcsbridge.broker.required_capability) = CAPABILITY_READ;
 
   string unit_name = 1;
   int32 coalition = 2;
