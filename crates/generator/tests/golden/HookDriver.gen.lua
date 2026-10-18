@@ -25,4 +25,8 @@ gen.replies = {}
 
 gen.emit = {}
 
+gen.send = {}
+
+gen.send_to = {}
+
 return gen

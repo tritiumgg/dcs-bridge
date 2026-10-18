@@ -118,9 +118,30 @@ assert(sim.emit.GetPosition == nil, 'a command has an emitter')
 queued('the adopter hook emit.Chat', adopter_hook.emit.Chat('hello'))
 assert(next(hook.emit) == nil, 'the shipped hook file has an emitter for no record')
 
+-- A wrapper hands its emitter and arguments to the buffer the runtime puts
+-- on the table after loading. Until the runtime exists, this buffer calls
+-- the emitter at once and records what it was handed.
+local handed
+local function buffer(emit, ...)
+  handed = select('#', ...)
+  return emit(...)
+end
+sim.buffer = buffer
+adopter_hook.buffer = buffer
+queued('send.UnitDestroyed', sim.send.UnitDestroyed('x', 1))
+queued('send.RocketImpact', sim.send.RocketImpact('S-8', { 4 }, { point }, nil, false, 1, '', point))
+assert(handed == 8, 'send.RocketImpact handed the buffer ' .. handed .. ' arguments, not 8')
+queued('send_to.Position', sim.send_to.Position(1, 7, point))
+assert(handed == 3, 'send_to.Position handed the buffer ' .. handed .. ' arguments, not 3')
+queued('the adopter hook send.Chat', adopter_hook.send.Chat('hello'))
+assert(sim.send.Position == nil, 'a reply has a send wrapper')
+assert(sim.send_to.RocketImpact == nil, 'a fan-out record has a send_to wrapper')
+assert(sim.send.GetPosition == nil and sim.send_to.GetPosition == nil, 'a command has a wrapper')
+
 print('ok  every generated file loads, each carrying the schema hash')
 print('ok  the sim files write into DCSBridge.code and the hook files touch no global')
 print('ok  an adopter slice adds its topics beside the shipped ones')
 print('ok  their tables register through the four calls with nothing refused')
 print('ok  a reload registers the same rows and adds none')
 print('ok  each emitter commits through the shim, a reply through begin_to')
+print('ok  send and send_to hand their emitter and every argument to the buffer')

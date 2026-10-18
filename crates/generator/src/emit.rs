@@ -173,6 +173,15 @@ pub fn file(set: Set<'_>, side: Side, records: &[&Record], run: &Run<'_>) -> Str
     for record in &outbound {
         emitter(&mut out, owner, side, record, run);
     }
+    let is_reply = |r: &&Record| run.replies.contains(&r.topic.as_str());
+    for (sub, replies) in [("send", false), ("send_to", true)] {
+        if table != "slice" {
+            let _ = writeln!(out, "\n{owner}.{sub} = {{}}");
+        }
+        for record in outbound.iter().filter(|r| is_reply(r) == replies) {
+            wrapper(&mut out, owner, sub, record, replies);
+        }
+    }
 
     let _ = writeln!(out, "\nreturn {table}");
     out
@@ -242,6 +251,25 @@ fn emitter(out: &mut String, owner: &str, side: Side, record: &Record, run: &Run
         field_puts(out, field, name, 1);
     }
     out.push_str("  return shim.commit()\nend\n");
+}
+
+/// One send wrapper: the emitter's parameters, handed with the emitter to
+/// the `buffer` the runtime puts on the table, which the drain later calls.
+/// The wrapper reads `buffer` when called, so the runtime may set it after
+/// the file loads. ADR 0040.
+fn wrapper(out: &mut String, owner: &str, sub: &str, record: &Record, reply: bool) {
+    let names = params(record, reply);
+    let args = names.join(", ");
+    out.push('\n');
+    param_docs(out, record, &names, reply);
+    let _ = writeln!(
+        out,
+        "{} = function({args})",
+        member(owner, sub, &record.name)
+    );
+    let emit = member(owner, "emit", &record.name);
+    let separator = if args.is_empty() { "" } else { ", " };
+    let _ = writeln!(out, "  return {owner}.buffer({emit}{separator}{args})\nend");
 }
 
 /// The emitter's parameters: the connection id for a reply, then one per
@@ -702,6 +730,57 @@ code.emit.Position = function(conn_id, request_id, note, path, at)
             text.contains("\n---@param value a.Point\nput['a.Point'] = function(shim, value)\n"),
             "{text}"
         );
+    }
+
+    #[test]
+    fn a_fan_out_record_has_a_send_wrapper_and_a_reply_a_send_to() {
+        let records = [
+            with(
+                record("a.Impact", 2, 0, 1),
+                vec![field("weapon", 1, Kind::String, Label::Single)],
+            ),
+            with(
+                record("a.Position", 1, 0, 1),
+                vec![field("request_id", 1, Kind::Integer, Label::Single)],
+            ),
+            record("a.Empty", 2, 0, 1),
+        ];
+        let records: Vec<_> = records.iter().collect();
+        let replies = ["a.Position"];
+        let run = Run {
+            replies: &replies,
+            ..run("h")
+        };
+        let text = file(Set::Shipped, Side::Sim, &records, &run);
+        let send = "
+---@param weapon string
+code.send.Impact = function(weapon)
+  return code.buffer(code.emit.Impact, weapon)
+end
+";
+        assert!(text.contains(send), "{text}");
+        let send_to = "
+---@param conn_id integer
+---@param request_id integer
+code.send_to.Position = function(conn_id, request_id)
+  return code.buffer(code.emit.Position, conn_id, request_id)
+end
+";
+        assert!(text.contains(send_to), "{text}");
+        assert!(
+            text.contains(
+                "code.send.Empty = function()\n  return code.buffer(code.emit.Empty)\nend"
+            ),
+            "{text}"
+        );
+        assert!(!text.contains("code.send.Position"), "{text}");
+        assert!(!text.contains("code.send_to.Impact"), "{text}");
+        assert!(text.contains("\ncode.send = {}\n"), "{text}");
+        assert!(text.contains("\ncode.send_to = {}\n"), "{text}");
+
+        let adopter = file(Set::Adopter("a"), Side::Sim, &records, &run);
+        assert!(!adopter.contains("code.send = {}"), "{adopter}");
+        assert!(adopter.contains("code.send.Impact = function"), "{adopter}");
     }
 
     #[test]

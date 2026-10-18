@@ -41,4 +41,13 @@ gen.emit.Chat = function(text)
   return shim.commit()
 end
 
+gen.send = {}
+
+---@param text string
+gen.send.Chat = function(text)
+  return gen.buffer(gen.emit.Chat, text)
+end
+
+gen.send_to = {}
+
 return gen

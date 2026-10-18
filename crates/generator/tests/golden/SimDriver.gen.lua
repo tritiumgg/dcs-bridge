@@ -42,4 +42,14 @@ code.emit.UnitDestroyed = function(unit_name, coalition)
   return shim.commit()
 end
 
+code.send = {}
+
+---@param unit_name string
+---@param coalition integer
+code.send.UnitDestroyed = function(unit_name, coalition)
+  return code.buffer(code.emit.UnitDestroyed, unit_name, coalition)
+end
+
+code.send_to = {}
+
 return code

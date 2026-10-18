@@ -121,4 +121,23 @@ code.emit.RocketImpact = function(weapon, hit_ids, craters, yield, fused, fuze, 
   return shim.commit()
 end
 
+---@param weapon string
+---@param hit_ids integer[]
+---@param craters fixture.adopter.Point[]
+---@param yield number?
+---@param fused boolean
+---@param fuze integer
+---@param tag string
+---@param at fixture.adopter.Point?
+code.send.RocketImpact = function(weapon, hit_ids, craters, yield, fused, fuze, tag, at)
+  return code.buffer(code.emit.RocketImpact, weapon, hit_ids, craters, yield, fused, fuze, tag, at)
+end
+
+---@param conn_id integer
+---@param request_id integer
+---@param at fixture.adopter.Point?
+code.send_to.Position = function(conn_id, request_id, at)
+  return code.buffer(code.emit.Position, conn_id, request_id, at)
+end
+
 return slice
