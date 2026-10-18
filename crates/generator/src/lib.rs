@@ -11,6 +11,7 @@ use std::fmt;
 use prost_types::compiler::CodeGeneratorResponse;
 use prost_types::compiler::code_generator_response::{Feature, File};
 
+pub mod emit;
 pub mod records;
 
 /// Why generation refused the request, worded for the person who wrote the
