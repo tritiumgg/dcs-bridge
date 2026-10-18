@@ -157,8 +157,9 @@ ADR 0021 says which five packages there are and what each holds.
 ### Generator
 
 `protoc-gen-dcsbridge-lua` writes `SimDriver.gen.lua` and `HookDriver.gen.lua`
-from the schema, and `mise run generate` runs it through buf into
-`target/gen`, after compiling `target/schema.pb`:
+from the schema: the registration tables, the emitters and the send wrappers.
+`mise run generate` runs it through buf into `target/gen`, after compiling
+`target/schema.pb`:
 
 ```sh
 mise run generate
@@ -170,21 +171,39 @@ a `required_capability` or generation fails. A message with no option is a
 field type and generates nothing. ADR 0037. Each file returns its tables and
 makes no `shim` call, and the driver that loads it registers them (ADR 0038).
 
-The plugin takes `schema=<path>` naming the compiled `schema.pb`, and both files
-carry that file's SHA-256, which is what the broker hashes (ADR 0039).
-`buf.gen.yaml` passes it, and `tools/mkgen.sh` fails unless both files carry it.
+Each outbound record, every class but `COMMAND`, gets an emitter under `emit`
+and a wrapper under `send`, or under `send_to` for a reply, which takes a
+connection id first. An emitter writes one put per field in declaration order,
+skips a nil, and returns what `commit` returns. A wrapper hands its emitter and
+arguments to the `buffer` function the driver sets on the file's table. The
+sim file's emitters reach the shim through `DCSBridge.shim`; the hook file is
+loaded with the shim as its argument, `loadfile(path)(shim)`. Both shipped
+files carry `send_to.CommandAck`. A field kind the shim has no put for, such as
+`sint32`, `float` or a map, fails generation. ADR 0040.
 
-`crates/generator/tests/golden` holds both files as the generator writes them
-over the shipped schema, with the hash of the three-byte `tests/abc.pb`, and
-`cargo test` fails naming the first line that differs. When a change to the
-generator or the schema is meant, rewrite them:
+Records in `dcsbridge` or a package under it write the shipped pair. Each other
+package named for generation writes `<package>.sim.gen.lua` and
+`<package>.hook.gen.lua`; the sim file adds to `DCSBridge.code` and returns a
+slice for the driver to register. ADR 0041.
+
+The plugin takes `schema=<path>` naming the compiled `schema.pb`, and every
+file carries that file's SHA-256, which is what the broker hashes (ADR 0039).
+`buf.gen.yaml` passes it, and `tools/mkgen.sh` fails unless both shipped files
+carry it.
+
+`crates/generator/tests/golden` holds the files as the generator writes them
+over the shipped schema and over `tests/proto/fixture/adopter.proto`, with the
+hash of the three-byte `tests/abc.pb`, and `cargo test` fails naming the first
+line that differs. When a change to the generator or the schema is meant,
+rewrite them:
 
 ```sh
 DCSBRIDGE_UPDATE_GOLDEN=1 cargo test -p protoc-gen-dcsbridge-lua --test golden
 ```
 
-`tests/lua/generated.lua` loads the same copies under a stock Lua 5.1 and
-registers their tables.
+`tests/lua/generated.lua` loads the same copies under a stock Lua 5.1,
+registers their tables, and calls each emitter and wrapper through the
+host-native module.
 
 ## Releases
 
