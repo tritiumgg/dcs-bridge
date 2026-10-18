@@ -16,6 +16,10 @@ name = "protoc-gen-dcsbridge-lua"
 path = "src/main.rs"
 
 [dependencies]
+# The plugin runs on the build machine and never inside DCS, so it takes the
+# protobuf runtime it needs (ADR 0016).
+prost = "0.14"
+prost-types = "0.14"
 
 [lints]
 workspace = true

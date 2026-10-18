@@ -382,6 +382,10 @@ dependencies = [
 [[package]]
 name = "protoc-gen-dcsbridge-lua"
 version = "0.1.0"
+dependencies = [
+ "prost",
+ "prost-types",
+]
 
 [[package]]
 name = "quote"
