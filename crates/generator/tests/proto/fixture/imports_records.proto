@@ -1,0 +1,15 @@
+syntax = "proto3";
+
+// A record in a file that imports another file of records. Only this file is
+// named for generation, so the imported records generate nothing.
+package fixture.imports_records;
+
+import "dcsbridge/broker/broker.proto";
+import "fixture/records.proto";
+
+message Seen {
+  option (dcsbridge.broker.record_class) = RECORD_CLASS_DURABLE;
+  option (dcsbridge.broker.required_capability) = CAPABILITY_READ;
+
+  fixture.records.Point at = 1;
+}

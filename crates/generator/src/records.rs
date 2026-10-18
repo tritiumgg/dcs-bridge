@@ -245,10 +245,10 @@ mod tests {
 
     #[test]
     fn the_imports_are_never_read() {
-        // broker.proto and descriptor.proto are in the request as imports,
-        // and SetEnabled in broker.proto carries a capability and no class.
-        let records = read(&request(&["fixture/records.proto"], None)).unwrap();
-        assert!(records.iter().all(|r| r.topic.starts_with("fixture.")));
+        // records.proto is in the request as an import, with two records of
+        // its own, and only the file importing it is named for generation.
+        let records = read(&request(&["fixture/imports_records.proto"], None)).unwrap();
+        assert_eq!(topics(&records), ["fixture.imports_records.Seen"]);
     }
 
     #[test]
