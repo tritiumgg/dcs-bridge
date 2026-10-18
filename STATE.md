@@ -18,7 +18,7 @@ is just deleted. Write entries as one or two lines, never paragraphs.
 
 ## In progress
 
-Nothing. 2.C6 is dropped; 3.1 is next.
+Nothing. 3.1 is built; 3.3 is next.
 
 *One task at most. Say what is done, what is not, and where to resume. Say what
 is committed and what is only in the working tree. Say what is knowingly
@@ -26,20 +26,21 @@ broken. Empty this when the task closes.*
 
 ## Just finished
 
+- **3.1** — the generator's tables, golden-tested and loaded by stock Lua; agent-verified. PR #90, ADR 0036 to 0039.
 - **2.C6** — dropped, no `mock`, and M2.3's rows ahead re-measured. PR #89, ADR 0035.
 - **2.C5** — `record` and `replay`, proved over loopback. PR #88, ADR 0033, 0034.
-- **2.20** — `SetTopicFilter` and `GetTopics`. PR #87, ADR 0030 to 0032.
 
 *The last three at most, one line each. Git log holds the rest.*
 
 ## Next
 
-**Task 3.1** — `protoc-gen-dcsbridge-lua`, which the `generator` crate stubs;
-ADR 0016. The plan's row has the done-when. Its brief settles who verifies.
+**Task 3.3** — emitters, `send` and `send_to` wrappers and split output, on
+the record rows and by-target files 3.1 left in `crates/generator`; ADR 0038.
+The plan's row has the done-when. Its brief settles who verifies.
 
 ## After that
 
-- **Phase 3** runs 3.1, 3.3 and 3.6, then Phase 4; 3.5 waits behind 7.6.
+- **Phase 3** runs 3.3 and 3.6, then Phase 4; 3.5 waits behind 7.6.
 
 ## Carries forward
 
@@ -84,8 +85,9 @@ entries at most: an eleventh means something here is finished, or belongs in
   per record and a connection drains one frame per socket call, one record
   in forty at a 20000-record burst on Windows loopback; PROBE-7 at 9.7
   prices both. ADR 0014.
-  The registry refuses an adopter's capability, and the fan-out mask holds
-  numbers below 64 (ADR 0027); SPEC §14.4's range has no task. On Windows a
+  The registry refuses an adopter's capability, which the generator writes
+  by number, and the fan-out mask holds numbers below 64 (ADR 0027); SPEC
+  §14.4's range has no task. On Windows a
   full `LIFECYCLE` ring's close leaves the drainer blocked in `send` until
   the peer reads or resets; aborting it has no task (ADR 0028).
 - **The loading flag has no setter until 6.5.** `Bridge::set_loading` picks
