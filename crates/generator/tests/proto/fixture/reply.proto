@@ -1,0 +1,29 @@
+syntax = "proto3";
+
+// Two requests naming one reply, by bare name and by full name.
+package fixture.reply;
+
+import "dcsbridge/broker/broker.proto";
+
+message GetPosition {
+  option (dcsbridge.broker.record_class) = RECORD_CLASS_COMMAND;
+  option (dcsbridge.broker.required_capability) = CAPABILITY_COMMAND;
+  option (dcsbridge.broker.reply_to) = "Position";
+
+  uint64 request_id = 1;
+}
+
+message GetLastPosition {
+  option (dcsbridge.broker.record_class) = RECORD_CLASS_COMMAND;
+  option (dcsbridge.broker.required_capability) = CAPABILITY_COMMAND;
+  option (dcsbridge.broker.reply_to) = "fixture.reply.Position";
+
+  uint64 request_id = 1;
+}
+
+message Position {
+  option (dcsbridge.broker.record_class) = RECORD_CLASS_DURABLE;
+  option (dcsbridge.broker.required_capability) = CAPABILITY_READ;
+
+  uint64 request_id = 1;
+}

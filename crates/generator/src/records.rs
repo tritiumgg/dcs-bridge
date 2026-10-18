@@ -6,9 +6,9 @@
 //! raw bytes instead. ADR 0036.
 //!
 //! A record is a top-level message, in a file the request names for
-//! generation, that carries any of the four options. A message carrying none
-//! is a field type, which never crosses into or out of Lua on its own.
-//! ADR 0037.
+//! generation and outside the broker's own package, that carries any of the
+//! four options. A message carrying none is a field type, which never crosses
+//! into or out of Lua on its own. ADR 0037.
 
 use prost::Message;
 use prost_reflect::{DescriptorPool, ExtensionDescriptor, MessageDescriptor};
@@ -31,9 +31,14 @@ pub struct Record {
     pub target: i32,
     /// `Capability`, never zero.
     pub capability: i32,
-    /// The `reply_to` option as the schema spells it.
+    /// The topic id of the record `reply_to` names, resolved against this
+    /// record's package when the schema spells a bare name.
     pub reply_to: Option<String>,
 }
+
+/// The broker frames, answers or knows by name every message in its own
+/// package, so none of them is generated. ADR 0037.
+const BROKER_PACKAGE: &str = "dcsbridge.broker";
 
 /// The extension names, spelled as `broker.proto` declares them.
 const RECORD_CLASS: &str = "dcsbridge.broker.record_class";
@@ -85,13 +90,58 @@ pub fn read(request: &[u8]) -> Result<Vec<Record>, Error> {
                 "{name} is named for generation and is not in the request"
             ))
         })?;
+        if file.package_name() == BROKER_PACKAGE {
+            continue;
+        }
         for message in file.messages() {
             if let Some(record) = record(&message, &options)? {
                 records.push(record);
             }
         }
     }
+    distinct_names(&records)?;
+    resolve_replies(&mut records)?;
     Ok(records)
+}
+
+/// The topics table is keyed by name, so two packages may not share one.
+/// ADR 0021.
+fn distinct_names(records: &[Record]) -> Result<(), Error> {
+    for (index, record) in records.iter().enumerate() {
+        if let Some(earlier) = records[..index].iter().find(|r| r.name == record.name) {
+            return Err(Error(format!(
+                "{} and {} share the name {}, which the topics table is keyed by",
+                earlier.topic, record.topic, record.name
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Turns each `reply_to` into the topic id of the record it names, and fails
+/// one that names anything else.
+fn resolve_replies(records: &mut [Record]) -> Result<(), Error> {
+    let topics: Vec<String> = records.iter().map(|r| r.topic.clone()).collect();
+    for record in records.iter_mut() {
+        let Some(spelled) = record.reply_to.take() else {
+            continue;
+        };
+        let package = &record.topic[..record.topic.len() - record.name.len()];
+        let topic = if spelled.contains('.') {
+            spelled.clone()
+        } else {
+            format!("{package}{spelled}")
+        };
+        if !topics.contains(&topic) {
+            return Err(Error(format!(
+                "{} names {spelled} in ({REPLY_TO}), which is not a record \
+                 in the files named for generation",
+                record.topic
+            )));
+        }
+        record.reply_to = Some(topic);
+    }
+    Ok(())
 }
 
 fn extensions(pool: &DescriptorPool) -> Option<Options> {
@@ -185,7 +235,7 @@ mod tests {
                 class: 3,
                 target: 2,
                 capability: 2,
-                reply_to: Some("Spotted".into()),
+                reply_to: Some("fixture.records.Spotted".into()),
             }
         );
     }
@@ -215,6 +265,48 @@ mod tests {
         let err = err.to_string();
         assert!(err.contains("fixture.no_class.Spotted"), "{err}");
         assert!(err.contains("(dcsbridge.broker.record_class)"), "{err}");
+    }
+
+    #[test]
+    fn the_broker_package_is_never_generated() {
+        // buf names broker.proto for generation, and its SetEnabled and
+        // CommandAck each carry one option of the two a record needs.
+        let records = read(&request(&["dcsbridge/broker/broker.proto"], None)).unwrap();
+        assert!(records.is_empty(), "{records:?}");
+    }
+
+    #[test]
+    fn two_packages_may_not_share_a_record_name() {
+        let files = ["fixture/collision_a.proto", "fixture/collision_b.proto"];
+        let err = read(&request(&files, None)).unwrap_err().to_string();
+        assert!(err.contains("fixture.collision_a.Spotted"), "{err}");
+        assert!(err.contains("fixture.collision_b.Spotted"), "{err}");
+    }
+
+    #[test]
+    fn a_reply_resolves_by_bare_name_and_by_full_name() {
+        let records = read(&request(&["fixture/reply.proto"], None)).unwrap();
+        let replies: Vec<_> = records.iter().map(|r| r.reply_to.as_deref()).collect();
+        assert_eq!(
+            replies,
+            [
+                Some("fixture.reply.Position"),
+                Some("fixture.reply.Position"),
+                None
+            ]
+        );
+    }
+
+    #[test]
+    fn a_reply_that_names_a_field_type_fails() {
+        let err = read(&request(&["fixture/reply_to_field_type.proto"], None)).unwrap_err();
+        let err = err.to_string();
+        assert!(
+            err.contains("fixture.reply_to_field_type.GetPosition"),
+            "{err}"
+        );
+        assert!(err.contains("Point"), "{err}");
+        assert!(err.contains("(dcsbridge.broker.reply_to)"), "{err}");
     }
 
     #[test]

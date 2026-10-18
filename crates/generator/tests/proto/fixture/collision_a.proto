@@ -1,0 +1,13 @@
+syntax = "proto3";
+
+// One of two packages declaring a record under the same name.
+package fixture.collision_a;
+
+import "dcsbridge/broker/broker.proto";
+
+message Spotted {
+  option (dcsbridge.broker.record_class) = RECORD_CLASS_LOSSY;
+  option (dcsbridge.broker.required_capability) = CAPABILITY_READ;
+
+  string name = 1;
+}

@@ -1,0 +1,18 @@
+syntax = "proto3";
+
+// A request whose reply_to names a field type rather than a record.
+package fixture.reply_to_field_type;
+
+import "dcsbridge/broker/broker.proto";
+
+message GetPosition {
+  option (dcsbridge.broker.record_class) = RECORD_CLASS_COMMAND;
+  option (dcsbridge.broker.required_capability) = CAPABILITY_COMMAND;
+  option (dcsbridge.broker.reply_to) = "Point";
+
+  uint64 request_id = 1;
+}
+
+message Point {
+  double x = 1;
+}
