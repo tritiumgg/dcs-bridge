@@ -62,10 +62,9 @@ struct Options {
 }
 
 /// Reads every record in the files the request names for generation, in
-/// file order and then declaration order.
-pub fn read(request: &[u8]) -> Result<Vec<Record>, Error> {
-    let decoded = CodeGeneratorRequest::decode(request)
-        .map_err(|err| Error(format!("the plugin request does not decode: {err}")))?;
+/// file order and then declaration order. `decoded` is `request` already
+/// decoded through `prost-types`.
+pub fn read(request: &[u8], decoded: &CodeGeneratorRequest) -> Result<Vec<Record>, Error> {
     let raw = RawProtoFiles::decode(request)
         .map_err(|err| Error(format!("the plugin request does not decode: {err}")))?;
 
@@ -199,6 +198,10 @@ fn record(message: &MessageDescriptor, options: &Options) -> Result<Option<Recor
 mod tests {
     use super::*;
     use crate::testing::request;
+
+    fn read(request: &[u8]) -> Result<Vec<Record>, Error> {
+        super::read(request, &CodeGeneratorRequest::decode(request).unwrap())
+    }
 
     fn topics(records: &[Record]) -> Vec<&str> {
         records.iter().map(|r| r.topic.as_str()).collect()

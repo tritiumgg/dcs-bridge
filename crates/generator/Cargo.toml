@@ -22,6 +22,7 @@ path = "src/main.rs"
 prost = "0.14"
 prost-reflect = "0.16"
 prost-types = "0.14"
+sha2 = "0.10"
 
 [dev-dependencies]
 # Compiles the fixture schemas into the request protoc or buf would send.

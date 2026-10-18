@@ -459,6 +459,7 @@ dependencies = [
  "prost-reflect",
  "prost-types",
  "protox",
+ "sha2",
 ]
 
 [[package]]
