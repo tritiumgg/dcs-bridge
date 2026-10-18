@@ -154,6 +154,38 @@ payload's fully-qualified type name and a `dcsbridge` package cannot take a
 version suffix without renaming every topic. ADR 0004 has the argument, and
 ADR 0021 says which five packages there are and what each holds.
 
+### Generator
+
+`protoc-gen-dcsbridge-lua` writes `SimDriver.gen.lua` and `HookDriver.gen.lua`
+from the schema, and `mise run generate` runs it through buf into
+`target/gen`, after compiling `target/schema.pb`:
+
+```sh
+mise run generate
+```
+
+A record is a top-level message outside `dcsbridge.broker` that carries any of
+the four options `broker.proto` declares, and it must name a `record_class` and
+a `required_capability` or generation fails. A message with no option is a
+field type and generates nothing. ADR 0037. Each file returns its tables and
+makes no `shim` call, and the driver that loads it registers them (ADR 0038).
+
+The plugin takes `schema=<path>` naming the compiled `schema.pb`, and both files
+carry that file's SHA-256, which is what the broker hashes (ADR 0039).
+`buf.gen.yaml` passes it, and `tools/mkgen.sh` fails unless both files carry it.
+
+`crates/generator/tests/golden` holds both files as the generator writes them
+over the shipped schema, with the hash of the three-byte `tests/abc.pb`, and
+`cargo test` fails naming the first line that differs. When a change to the
+generator or the schema is meant, rewrite them:
+
+```sh
+DCSBRIDGE_UPDATE_GOLDEN=1 cargo test -p protoc-gen-dcsbridge-lua --test golden
+```
+
+`tests/lua/generated.lua` loads the same copies under a stock Lua 5.1 and
+registers their tables.
+
 ## Releases
 
 A tag carries four assets: `lua-dcsbridge.dll`, `dcsb.exe`,
