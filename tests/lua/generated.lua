@@ -1,11 +1,12 @@
 -- The generated files, loaded by a stock Lua 5.1 and registered.
 --
--- The generator's golden copies are what it writes over the shipped schema.
--- This loads both the way the drivers will: the sim driver's file into
--- DCSBridge.code, the hook driver's into a table of its own with no global
--- touched. It then registers their tables through the four calls and checks
--- that nothing is refused, that each call adds the rows the schema has, and
--- that loading and registering the sim file again adds nothing.
+-- The generator's golden copies are what it writes over the shipped schema
+-- and over an adopter's. This loads them the way the drivers will: the sim
+-- driver's files into DCSBridge.code, the shipped one first, and the hook
+-- driver's into tables of their own with no global touched. It then
+-- registers their tables through the four calls and checks that nothing is
+-- refused, that each call adds the rows the schema has, and that loading
+-- and registering the sim files again adds nothing.
 --
 -- Run it through tools/luatest.sh, which builds the module and finds it.
 
@@ -67,14 +68,40 @@ shaped('HookDriver.gen.lua', hook)
 register('SimDriver.gen.lua', sim, { 1, 0, 1, 0 })
 register('HookDriver.gen.lua', hook, { 0, 0, 0, 0 })
 
--- A sim driver reload loads its file again into the same DCSBridge.code and
--- registers the same rows: a no-op that succeeds.
+-- An adopter's pair loads after the shipped pair. Its sim file adds its
+-- topics to DCSBridge.code beside the shipped ones and returns a slice of
+-- its own, which registers the adopter's rows and nothing else.
+DCSBridge = { code = sim }
+local adopter = 'fixture.adopter.'
+local slice = dofile(golden .. adopter .. 'sim.gen.lua')
+shaped(adopter .. 'sim.gen.lua', slice)
+assert(slice ~= sim, 'the adopter file returned DCSBridge.code, not its slice')
+assert(sim.topics.UnitDestroyed == unit, 'the adopter file dropped a shipped topic')
+for _, name in ipairs({ 'RocketImpact', 'GetPosition', 'Position' }) do
+  assert(sim.topics[name] == adopter .. name, 'DCSBridge.code.topics has no ' .. name)
+end
+assert(slice.topics.UnitDestroyed == nil, 'the slice holds a shipped topic')
+register(adopter .. 'sim.gen.lua', slice, { 3, 1, 3, 1 })
+
+DCSBridge = nil
+local adopter_hook = dofile(golden .. adopter .. 'hook.gen.lua')
+assert(DCSBridge == nil, 'the adopter hook file wrote a global')
+shaped(adopter .. 'hook.gen.lua', adopter_hook)
+register(adopter .. 'hook.gen.lua', adopter_hook, { 1, 0, 1, 0 })
+
+-- A sim driver reload loads the shipped file and then the adopter's again,
+-- into the same DCSBridge.code, and registers the same rows: a no-op that
+-- succeeds, with both sets of topics in place.
 DCSBridge = { code = sim }
 local reloaded = dofile(golden .. 'SimDriver.gen.lua')
 assert(reloaded == sim, 'a reload did not write into the same DCSBridge.code')
 register('SimDriver.gen.lua reloaded', reloaded, { 0, 0, 0, 0 })
+register(adopter .. 'sim.gen.lua reloaded', dofile(golden .. adopter .. 'sim.gen.lua'), { 0, 0, 0, 0 })
+assert(sim.topics.UnitDestroyed == unit and sim.topics.RocketImpact == adopter .. 'RocketImpact',
+  'a reload lost a topic')
 
-print('ok  both generated files load, each carrying the schema hash')
-print('ok  the sim file writes into DCSBridge.code and the hook file touches no global')
+print('ok  every generated file loads, each carrying the schema hash')
+print('ok  the sim files write into DCSBridge.code and the hook files touch no global')
+print('ok  an adopter slice adds its topics beside the shipped ones')
 print('ok  their tables register through the four calls with nothing refused')
 print('ok  a reload registers the same rows and adds none')

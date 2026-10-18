@@ -1,5 +1,9 @@
-//! The generated files over the shipped schema, compared byte for byte with
-//! the copies under `tests/golden`.
+//! The generated files over the shipped schema and over an adopter's,
+//! compared byte for byte with the copies under `tests/golden`.
+//!
+//! The adopter's schema is `tests/proto/fixture/adopter.proto`. The shipped
+//! one has no repeated field, reply or hook-side record, and the adopter's
+//! has each, so its copies show what the shipped ones cannot.
 //!
 //! A change to the generator or to the schema shows up here as a diff a
 //! reviewer reads. When the change is meant, rewrite the copies:
@@ -42,19 +46,20 @@ const SCHEMA: [&str; 2] = [
     "dcsbridge/builtin/sim/sim.proto",
 ];
 
-/// The request buf sends over the shipped tree: the bridge's files named for
-/// generation, and the google imports in `proto_file` before them.
-fn request(root: &Path) -> Vec<u8> {
-    let mut compiler =
-        protox::Compiler::new([root.join("../../proto")]).expect("the include path resolves");
+/// The adopter's schema, which imports the shipped tree.
+const ADOPTER: [&str; 1] = ["fixture/adopter.proto"];
+
+/// The request buf sends over `files`: those named for generation, and every
+/// import in `proto_file` before them.
+fn request(root: &Path, files: &[&str]) -> Vec<u8> {
+    let mut compiler = protox::Compiler::new([root.join("tests/proto"), root.join("../../proto")])
+        .expect("the include paths resolve");
     compiler.include_imports(true);
-    compiler
-        .open_files(SCHEMA)
-        .expect("the shipped schema compiles");
+    compiler.open_files(files).expect("the schema compiles");
     let set = Set::decode(compiler.encode_file_descriptor_set().as_slice())
         .expect("protox wrote a descriptor set");
     Request {
-        file_to_generate: SCHEMA.iter().map(|f| (*f).to_owned()).collect(),
+        file_to_generate: files.iter().map(|f| (*f).to_owned()).collect(),
         parameter: Some(format!("schema={}", root.join("tests/abc.pb").display())),
         proto_file: set.file,
     }
@@ -83,15 +88,29 @@ fn first_difference(expected: &str, actual: &str) -> Option<String> {
 }
 
 #[test]
-fn the_shipped_schema_generates_the_golden_files() {
+fn the_shipped_and_adopter_schemas_generate_the_golden_files() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let response = protoc_gen_dcsbridge_lua::respond(&request(root));
-    assert_eq!(response.error, None);
-    assert_eq!(response.file.len(), 2, "{response:?}");
+    let mut files = Vec::new();
+    for (schema, names) in [
+        (&SCHEMA[..], ["SimDriver.gen.lua", "HookDriver.gen.lua"]),
+        (
+            &ADOPTER[..],
+            [
+                "fixture.adopter.sim.gen.lua",
+                "fixture.adopter.hook.gen.lua",
+            ],
+        ),
+    ] {
+        let response = protoc_gen_dcsbridge_lua::respond(&request(root, schema));
+        assert_eq!(response.error, None);
+        let written: Vec<_> = response.file.iter().map(|f| f.name.as_deref()).collect();
+        assert_eq!(written, names.map(Some), "{schema:?}");
+        files.extend(response.file);
+    }
 
     let update = std::env::var_os("DCSBRIDGE_UPDATE_GOLDEN").is_some();
     let mut failures = Vec::new();
-    for file in &response.file {
+    for file in &files {
         let name = file.name.as_deref().expect("every file is named");
         let actual = file.content.as_deref().unwrap_or_default();
         let path = root.join("tests/golden").join(name);

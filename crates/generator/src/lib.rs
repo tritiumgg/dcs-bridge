@@ -14,7 +14,7 @@ use prost_types::compiler::code_generator_response::{Feature, File};
 use prost_types::compiler::{CodeGeneratorRequest, CodeGeneratorResponse};
 use sha2::{Digest, Sha256};
 
-use emit::Side;
+use emit::{Set, Side};
 
 pub mod emit;
 pub mod records;
@@ -57,15 +57,30 @@ fn generate(request: &[u8]) -> Result<Vec<File>, Error> {
     let decoded = CodeGeneratorRequest::decode(request)
         .map_err(|err| Error(format!("the plugin request does not decode: {err}")))?;
     let schema_sha256 = schema_sha256(decoded.parameter.as_deref().unwrap_or_default())?;
-    let records = records::read(request, &decoded)?.records;
-    Ok([(emit::SIM_FILE, Side::Sim), (emit::HOOK_FILE, Side::Hook)]
-        .into_iter()
-        .map(|(name, side)| File {
-            name: Some(name.to_owned()),
-            content: Some(emit::file(side, &records, &schema_sha256)),
-            ..Default::default()
-        })
-        .collect())
+    let schema = records::read(request, &decoded)?;
+
+    // Every package named for generation writes its set's pair, with or
+    // without records, so the files a run writes follow from the files it
+    // was given. ADR 0041.
+    let mut sets: Vec<Set<'_>> = schema.packages.iter().map(|p| Set::of(p)).collect();
+    sets.sort_unstable();
+    sets.dedup();
+    let mut files = Vec::new();
+    for set in sets {
+        let records: Vec<_> = schema
+            .records
+            .iter()
+            .filter(|r| Set::of(r.package()) == set)
+            .collect();
+        for side in [Side::Sim, Side::Hook] {
+            files.push(File {
+                name: Some(set.file_name(side)),
+                content: Some(emit::file(set, side, &records, &schema_sha256)),
+                ..Default::default()
+            });
+        }
+    }
+    Ok(files)
 }
 
 /// The plugin parameter's key naming the compiled schema.
@@ -156,6 +171,56 @@ mod tests {
         format!("{SCHEMA}={}/tests/abc.pb", env!("CARGO_MANIFEST_DIR"))
     }
 
+    fn names(response: &CodeGeneratorResponse) -> Vec<&str> {
+        response
+            .file
+            .iter()
+            .map(|f| f.name.as_deref().unwrap_or_default())
+            .collect()
+    }
+
+    #[test]
+    fn an_adopter_package_writes_its_own_pair_and_never_the_shipped_names() {
+        let response = respond(&request(&["fixture/records.proto"], Some(&abc())));
+        assert_eq!(response.error, None);
+        assert_eq!(
+            names(&response),
+            [
+                "fixture.records.sim.gen.lua",
+                "fixture.records.hook.gen.lua"
+            ]
+        );
+    }
+
+    #[test]
+    fn the_shipped_pair_and_each_adopter_pair_are_written_once() {
+        let files = [
+            "fixture/reply.proto",
+            "dcsbridge/broker/broker.proto",
+            "fixture/records.proto",
+            "dcsbridge/builtin/sim/sim.proto",
+        ];
+        let response = respond(&request(&files, Some(&abc())));
+        assert_eq!(response.error, None);
+        assert_eq!(
+            names(&response),
+            [
+                emit::SIM_FILE,
+                emit::HOOK_FILE,
+                "fixture.records.sim.gen.lua",
+                "fixture.records.hook.gen.lua",
+                "fixture.reply.sim.gen.lua",
+                "fixture.reply.hook.gen.lua",
+            ]
+        );
+        let sim = response.file[0].content.as_deref().unwrap_or_default();
+        assert!(sim.contains("UnitDestroyed"), "{sim}");
+        assert!(
+            !sim.contains("fixture."),
+            "an adopter row in the shipped file: {sim}"
+        );
+    }
+
     #[test]
     fn a_request_emits_both_files_carrying_the_hash_of_the_named_schema() {
         let response = respond(&request(&["fixture/records.proto"], Some(&abc())));
@@ -164,8 +229,7 @@ mod tests {
             response.supported_features,
             Some(Feature::Proto3Optional as u64)
         );
-        let names: Vec<_> = response.file.iter().map(|f| f.name.as_deref()).collect();
-        assert_eq!(names, [Some(emit::SIM_FILE), Some(emit::HOOK_FILE)]);
+        assert_eq!(response.file.len(), 2);
         for file in &response.file {
             let content = file.content.as_deref().unwrap_or_default();
             assert!(

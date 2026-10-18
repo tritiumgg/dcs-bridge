@@ -25,6 +25,9 @@ use crate::Error;
 /// What a request describes: its records, and the field types they reach.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Schema {
+    /// The packages of the files named for generation, sorted, each once,
+    /// whether or not they hold a record.
+    pub packages: Vec<String>,
     /// In file order and then declaration order.
     pub records: Vec<Record>,
     /// Every message a record's fields reach, directly or through another
@@ -103,6 +106,16 @@ pub struct Record {
     pub fields: Vec<Field>,
 }
 
+impl Record {
+    /// The package the message is declared in, empty for none.
+    pub fn package(&self) -> &str {
+        self.topic
+            .strip_suffix(self.name.as_str())
+            .and_then(|rest| rest.strip_suffix('.'))
+            .unwrap_or_default()
+    }
+}
+
 /// The broker frames, answers or knows by name every message in its own
 /// package, so none of them is generated. ADR 0037.
 const BROKER_PACKAGE: &str = "dcsbridge.broker";
@@ -143,22 +156,33 @@ pub fn read(request: &[u8], decoded: &CodeGeneratorRequest) -> Result<Schema, Er
             .map_err(|err| Error(format!("a file in the plugin request is invalid: {err}")))?;
     }
 
+    let files = decoded
+        .file_to_generate
+        .iter()
+        .map(|name| {
+            pool.get_file_by_name(name).ok_or_else(|| {
+                Error(format!(
+                    "{name} is named for generation and is not in the request"
+                ))
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut packages: Vec<String> = files.iter().map(|f| f.package_name().to_owned()).collect();
+    packages.sort_unstable();
+    packages.dedup();
+
     // A schema that never imports broker.proto declares no option, so no
     // message in it is a record.
     let Some(options) = extensions(&pool) else {
         return Ok(Schema {
+            packages,
             records: Vec::new(),
             types: Vec::new(),
         });
     };
 
     let mut records = Vec::new();
-    for name in &decoded.file_to_generate {
-        let file = pool.get_file_by_name(name).ok_or_else(|| {
-            Error(format!(
-                "{name} is named for generation and is not in the request"
-            ))
-        })?;
+    for file in files {
         if file.package_name() == BROKER_PACKAGE {
             continue;
         }
@@ -171,7 +195,11 @@ pub fn read(request: &[u8], decoded: &CodeGeneratorRequest) -> Result<Schema, Er
     distinct_names(&records)?;
     resolve_replies(&mut records)?;
     let types = field_types(&pool, &records)?;
-    Ok(Schema { records, types })
+    Ok(Schema {
+        packages,
+        records,
+        types,
+    })
 }
 
 /// Every message the records' fields reach, followed through field types

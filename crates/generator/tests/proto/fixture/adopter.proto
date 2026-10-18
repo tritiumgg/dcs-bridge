@@ -1,0 +1,59 @@
+syntax = "proto3";
+
+// An adopter's schema, generated into a pair of files of its own beside the
+// shipped pair. It holds a record with a field of each kind and both
+// repeated kinds, a command with a typed reply, and a hook-side record.
+package fixture.adopter;
+
+import "dcsbridge/broker/broker.proto";
+
+message RocketImpact {
+  option (dcsbridge.broker.record_class) = RECORD_CLASS_LOSSY;
+  option (dcsbridge.broker.required_capability) = CAPABILITY_READ;
+
+  string weapon = 1;
+  repeated int32 hit_ids = 2;
+  repeated Point craters = 3;
+  optional double yield = 4;
+  bool fused = 5;
+  Fuze fuze = 6;
+  bytes tag = 7;
+  Point at = 8;
+}
+
+// A field type: it carries no option.
+message Point {
+  double x = 1;
+  double z = 2;
+}
+
+enum Fuze {
+  FUZE_UNSPECIFIED = 0;
+  FUZE_IMPACT = 1;
+  FUZE_PROXIMITY = 2;
+}
+
+message GetPosition {
+  option (dcsbridge.broker.record_class) = RECORD_CLASS_COMMAND;
+  option (dcsbridge.broker.required_capability) = CAPABILITY_COMMAND;
+  option (dcsbridge.broker.reply_to) = "Position";
+
+  uint64 request_id = 1;
+  string unit_name = 2;
+}
+
+message Position {
+  option (dcsbridge.broker.record_class) = RECORD_CLASS_DURABLE;
+  option (dcsbridge.broker.required_capability) = CAPABILITY_READ;
+
+  uint64 request_id = 1;
+  Point at = 2;
+}
+
+message Chat {
+  option (dcsbridge.broker.record_class) = RECORD_CLASS_DURABLE;
+  option (dcsbridge.broker.required_capability) = CAPABILITY_READ;
+  option (dcsbridge.broker.target) = TARGET_HOOK_DRIVER;
+
+  string text = 1;
+}
