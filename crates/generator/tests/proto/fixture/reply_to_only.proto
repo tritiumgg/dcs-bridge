@@ -1,0 +1,12 @@
+syntax = "proto3";
+
+// A record that names a reply and nothing else.
+package fixture.reply_to_only;
+
+import "dcsbridge/broker/broker.proto";
+
+message GetPosition {
+  option (dcsbridge.broker.reply_to) = "GetPosition";
+
+  uint64 request_id = 1;
+}

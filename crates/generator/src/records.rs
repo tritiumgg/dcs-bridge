@@ -313,6 +313,14 @@ mod tests {
     }
 
     #[test]
+    fn a_message_with_a_reply_alone_is_a_record_and_fails() {
+        let err = read(&request(&["fixture/reply_to_only.proto"], None)).unwrap_err();
+        let err = err.to_string();
+        assert!(err.contains("fixture.reply_to_only.GetPosition"), "{err}");
+        assert!(err.contains("(dcsbridge.broker.record_class)"), "{err}");
+    }
+
+    #[test]
     fn a_message_with_a_target_alone_is_a_record_and_fails() {
         let err = read(&request(&["fixture/target_only.proto"], None)).unwrap_err();
         assert!(
