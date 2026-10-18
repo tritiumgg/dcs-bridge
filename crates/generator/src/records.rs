@@ -30,8 +30,11 @@ pub struct Schema {
     pub packages: Vec<String>,
     /// In file order and then declaration order.
     pub records: Vec<Record>,
-    /// Every message a record's fields reach, directly or through another
-    /// field type, sorted by full name.
+    /// The broker's acknowledgement, when the request holds `broker.proto`.
+    /// The shipped files carry its emitter and its `send_to` wrapper.
+    pub ack: Option<Record>,
+    /// Every message the records' and the acknowledgement's fields reach,
+    /// directly or through another field type, sorted by full name.
     pub types: Vec<Type>,
 }
 
@@ -126,6 +129,9 @@ const REPLY_TO: &str = "dcsbridge.broker.reply_to";
 const TARGET: &str = "dcsbridge.broker.target";
 const REQUIRED_CAPABILITY: &str = "dcsbridge.broker.required_capability";
 
+/// The acknowledgement's topic.
+const ACKNOWLEDGEMENT: &str = "dcsbridge.broker.CommandAck";
+
 /// The request's `proto_file` field, kept as bytes so that the extension
 /// options inside each file survive to `prost-reflect`.
 #[derive(Clone, PartialEq, Message)]
@@ -177,6 +183,7 @@ pub fn read(request: &[u8], decoded: &CodeGeneratorRequest) -> Result<Schema, Er
         return Ok(Schema {
             packages,
             records: Vec::new(),
+            ack: None,
             types: Vec::new(),
         });
     };
@@ -194,19 +201,47 @@ pub fn read(request: &[u8], decoded: &CodeGeneratorRequest) -> Result<Schema, Er
     }
     distinct_names(&records)?;
     resolve_replies(&mut records)?;
-    let types = field_types(&pool, &records)?;
+    let ack = acknowledgement(&pool, &options)?;
+    let types = field_types(&pool, records.iter().chain(&ack))?;
     Ok(Schema {
         packages,
         records,
+        ack,
         types,
     })
 }
 
+/// The acknowledgement, the one message of the broker's package a handler
+/// sends. It is a reply with no table rows, since the broker knows it by
+/// name, and it carries no capability. ADR 0040.
+fn acknowledgement(pool: &DescriptorPool, options: &Options) -> Result<Option<Record>, Error> {
+    let Some(message) = pool.get_message_by_name(ACKNOWLEDGEMENT) else {
+        return Ok(None);
+    };
+    let class = message
+        .options()
+        .get_extension(&options.record_class)
+        .as_enum_number()
+        .unwrap_or(0);
+    Ok(Some(Record {
+        topic: ACKNOWLEDGEMENT.to_owned(),
+        name: message.name().to_owned(),
+        class,
+        target: 0,
+        capability: 0,
+        reply_to: None,
+        fields: fields(&message)?,
+    }))
+}
+
 /// Every message the records' fields reach, followed through field types
 /// until none is new.
-fn field_types(pool: &DescriptorPool, records: &[Record]) -> Result<Vec<Type>, Error> {
+fn field_types<'a>(
+    pool: &DescriptorPool,
+    records: impl IntoIterator<Item = &'a Record>,
+) -> Result<Vec<Type>, Error> {
     let mut pending: Vec<String> = records
-        .iter()
+        .into_iter()
         .flat_map(|r| message_kinds(&r.fields))
         .collect();
     let mut types: Vec<Type> = Vec::new();
@@ -570,6 +605,27 @@ mod tests {
         // CommandAck each carry one option of the two a record needs.
         let records = read(&request(&["dcsbridge/broker/broker.proto"], None)).unwrap();
         assert!(records.is_empty(), "{records:?}");
+    }
+
+    #[test]
+    fn the_acknowledgement_is_read_apart_from_the_records() {
+        // records.proto only imports broker.proto, and the acknowledgement
+        // is read from the import all the same.
+        let ack = schema(&request(&["fixture/records.proto"], None))
+            .unwrap()
+            .ack
+            .expect("no acknowledgement");
+        assert_eq!(ack.topic, "dcsbridge.broker.CommandAck");
+        assert_eq!(ack.name, "CommandAck");
+        assert_eq!(
+            ack.fields,
+            [
+                field("request_id", 1, Kind::Integer, Label::Optional),
+                field("idempotency_key", 2, Kind::String, Label::Optional),
+                field("outcome", 3, Kind::Integer, Label::Single),
+                field("detail", 4, Kind::String, Label::Single),
+            ]
+        );
     }
 
     #[test]

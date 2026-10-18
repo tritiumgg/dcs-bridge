@@ -69,10 +69,12 @@ fn generate(request: &[u8]) -> Result<Vec<File>, Error> {
         .records
         .iter()
         .filter_map(|r| r.reply_to.as_deref())
+        .chain(schema.ack.iter().map(|ack| ack.topic.as_str()))
         .collect();
     let run = emit::Run {
         types: &schema.types,
         replies: &replies,
+        ack: schema.ack.as_ref(),
         schema_sha256: &schema_sha256,
     };
     let mut files = Vec::new();

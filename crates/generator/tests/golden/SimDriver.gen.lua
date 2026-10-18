@@ -27,6 +27,30 @@ code.replies = {}
 
 code.emit = {}
 
+---@param conn_id integer
+---@param request_id integer?
+---@param idempotency_key string?
+---@param outcome integer
+---@param detail string
+---@return boolean queued what commit returns
+code.emit.CommandAck = function(conn_id, request_id, idempotency_key, outcome, detail)
+  local shim = DCSBridge.shim
+  shim.begin_to(conn_id, 'dcsbridge.broker.CommandAck')
+  if request_id ~= nil then
+    shim.integer(1, request_id)
+  end
+  if idempotency_key ~= nil then
+    shim.string(2, idempotency_key)
+  end
+  if outcome ~= nil then
+    shim.integer(3, outcome)
+  end
+  if detail ~= nil then
+    shim.string(4, detail)
+  end
+  return shim.commit()
+end
+
 ---@param unit_name string
 ---@param coalition integer
 ---@return boolean queued what commit returns
@@ -51,5 +75,14 @@ code.send.UnitDestroyed = function(unit_name, coalition)
 end
 
 code.send_to = {}
+
+---@param conn_id integer
+---@param request_id integer?
+---@param idempotency_key string?
+---@param outcome integer
+---@param detail string
+code.send_to.CommandAck = function(conn_id, request_id, idempotency_key, outcome, detail)
+  return code.buffer(code.emit.CommandAck, conn_id, request_id, idempotency_key, outcome, detail)
+end
 
 return code

@@ -116,7 +116,9 @@ queued('emit.RocketImpact with every argument nil', sim.emit.RocketImpact())
 queued('emit.Position', sim.emit.Position(1, 7, point))
 assert(sim.emit.GetPosition == nil, 'a command has an emitter')
 queued('the adopter hook emit.Chat', adopter_hook.emit.Chat('hello'))
-assert(next(hook.emit) == nil, 'the shipped hook file has an emitter for no record')
+for name in pairs(hook.emit) do
+  assert(name == 'CommandAck', 'the shipped hook file has an emitter for ' .. name)
+end
 
 -- A wrapper hands its emitter and arguments to the buffer the runtime puts
 -- on the table after loading. Until the runtime exists, this buffer calls
@@ -138,6 +140,13 @@ assert(sim.send.Position == nil, 'a reply has a send wrapper')
 assert(sim.send_to.RocketImpact == nil, 'a fan-out record has a send_to wrapper')
 assert(sim.send.GetPosition == nil and sim.send_to.GetPosition == nil, 'a command has a wrapper')
 
+-- The acknowledgement is in both shipped files, and commits from either:
+-- the broker knows it by name, so nothing registers it.
+hook.buffer = buffer
+queued('send_to.CommandAck', sim.send_to.CommandAck(1, nil, 'k', 1, 'done'))
+queued('the hook send_to.CommandAck', hook.send_to.CommandAck(1, 9, nil, 1, 'done'))
+assert(sim.topics.CommandAck == nil and hook.topics.CommandAck == nil, 'a table row for CommandAck')
+
 print('ok  every generated file loads, each carrying the schema hash')
 print('ok  the sim files write into DCSBridge.code and the hook files touch no global')
 print('ok  an adopter slice adds its topics beside the shipped ones')
@@ -145,3 +154,4 @@ print('ok  their tables register through the four calls with nothing refused')
 print('ok  a reload registers the same rows and adds none')
 print('ok  each emitter commits through the shim, a reply through begin_to')
 print('ok  send and send_to hand their emitter and every argument to the buffer')
+print('ok  both shipped files answer with send_to.CommandAck')

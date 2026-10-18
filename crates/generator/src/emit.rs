@@ -84,6 +84,10 @@ pub struct Run<'a> {
     pub types: &'a [Type],
     /// Every topic a record's `reply_to` names, across the whole run.
     pub replies: &'a [&'a str],
+    /// The acknowledgement, whose emitter and `send_to` wrapper both shipped
+    /// files carry, so a command handler on either side can answer with it.
+    /// It is among `replies`. ADR 0040.
+    pub ack: Option<&'a Record>,
     /// The hash each file carries.
     pub schema_sha256: &'a str,
 }
@@ -161,11 +165,15 @@ pub fn file(set: Set<'_>, side: Side, records: &[&Record], run: &Run<'_>) -> Str
         Side::Sim => "code",
         Side::Hook => "gen",
     };
-    let outbound: Vec<&Record> = rows
+    let mut outbound: Vec<&Record> = rows
         .iter()
         .copied()
         .filter(|r| r.class != RECORD_CLASS_COMMAND)
         .collect();
+    if let (Set::Shipped, Some(ack)) = (set, run.ack) {
+        outbound.push(ack);
+        outbound.sort_by(|a, b| a.topic.cmp(&b.topic));
+    }
     writers(&mut out, &outbound, run.types);
     if table != "slice" {
         let _ = writeln!(out, "\n{owner}.emit = {{}}");
@@ -555,6 +563,7 @@ mod tests {
         Run {
             types: &[],
             replies: &[],
+            ack: None,
             schema_sha256,
         }
     }
@@ -709,7 +718,7 @@ end
         let run = Run {
             types: &types,
             replies: &replies,
-            schema_sha256: "h",
+            ..run("h")
         };
         let text = file(Set::Shipped, Side::Sim, &[&position], &run);
         let docs = "
@@ -781,6 +790,43 @@ end
         let adopter = file(Set::Adopter("a"), Side::Sim, &records, &run);
         assert!(!adopter.contains("code.send = {}"), "{adopter}");
         assert!(adopter.contains("code.send.Impact = function"), "{adopter}");
+    }
+
+    #[test]
+    fn both_shipped_files_carry_the_acknowledgement_and_no_row_for_it() {
+        let ack = with(
+            record("dcsbridge.broker.CommandAck", 1, 0, 0),
+            vec![field("outcome", 3, Kind::Integer, Label::Single)],
+        );
+        let replies = ["dcsbridge.broker.CommandAck"];
+        let run = Run {
+            replies: &replies,
+            ack: Some(&ack),
+            ..run("h")
+        };
+        for (side, owner) in [(Side::Sim, "code"), (Side::Hook, "gen")] {
+            let text = file(Set::Shipped, side, &[], &run);
+            assert!(
+                text.contains(&format!(
+                    "{owner}.emit.CommandAck = function(conn_id, outcome)\n"
+                )),
+                "{text}"
+            );
+            assert!(
+                text.contains("shim.begin_to(conn_id, 'dcsbridge.broker.CommandAck')"),
+                "{text}"
+            );
+            assert!(
+                text.contains(&format!(
+                    "{owner}.send_to.CommandAck = function(conn_id, outcome)\n"
+                )),
+                "{text}"
+            );
+            assert!(text.contains(&format!("{owner}.topics = {{}}")), "{text}");
+            assert!(text.contains(&format!("{owner}.classes = {{}}")), "{text}");
+        }
+        let adopter = file(Set::Adopter("a"), Side::Sim, &[], &run);
+        assert!(!adopter.contains("CommandAck"), "{adopter}");
     }
 
     #[test]
