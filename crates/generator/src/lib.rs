@@ -8,14 +8,15 @@
 
 use std::fmt;
 
-use prost::Message;
+use prost_types::compiler::CodeGeneratorResponse;
 use prost_types::compiler::code_generator_response::{Feature, File};
-use prost_types::compiler::{CodeGeneratorRequest, CodeGeneratorResponse};
+
+pub mod records;
 
 /// Why generation refused the request, worded for the person who wrote the
 /// schema.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Error(String);
+pub struct Error(pub(crate) String);
 
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -47,14 +48,59 @@ pub fn respond(request: &[u8]) -> CodeGeneratorResponse {
 }
 
 fn generate(request: &[u8]) -> Result<Vec<File>, Error> {
-    let _request = CodeGeneratorRequest::decode(request)
-        .map_err(|err| Error(format!("the plugin request does not decode: {err}")))?;
+    let _records = records::read(request)?;
     Ok(Vec::new())
+}
+
+/// Builds plugin requests from the fixture schemas under `tests/proto`, the
+/// way protoc and buf build them: every file the named ones import is in
+/// `proto_file`, and `file_to_generate` names the fixtures alone.
+#[cfg(test)]
+pub(crate) mod testing {
+    use prost::Message;
+
+    /// A `CodeGeneratorRequest`, spelled so that each file stays the bytes
+    /// protox wrote, extension options included.
+    #[derive(Clone, PartialEq, Message)]
+    struct Request {
+        #[prost(string, repeated, tag = "1")]
+        file_to_generate: Vec<String>,
+        #[prost(string, optional, tag = "2")]
+        parameter: Option<String>,
+        #[prost(bytes = "vec", repeated, tag = "15")]
+        proto_file: Vec<Vec<u8>>,
+    }
+
+    /// A `FileDescriptorSet`, with the same files held as bytes.
+    #[derive(Clone, PartialEq, Message)]
+    struct Set {
+        #[prost(bytes = "vec", repeated, tag = "1")]
+        file: Vec<Vec<u8>>,
+    }
+
+    pub(crate) fn request(files: &[&str], parameter: Option<&str>) -> Vec<u8> {
+        let root = env!("CARGO_MANIFEST_DIR");
+        let mut compiler =
+            protox::Compiler::new([format!("{root}/tests/proto"), format!("{root}/../../proto")])
+                .expect("the include paths resolve");
+        compiler.include_imports(true);
+        compiler.open_files(files).expect("the fixtures compile");
+        let set = Set::decode(compiler.encode_file_descriptor_set().as_slice())
+            .expect("protox wrote a descriptor set");
+        Request {
+            file_to_generate: files.iter().map(|f| (*f).to_owned()).collect(),
+            parameter: parameter.map(str::to_owned),
+            proto_file: set.file,
+        }
+        .encode_to_vec()
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use prost::Message;
+    use prost_types::compiler::CodeGeneratorRequest;
 
     #[test]
     fn an_empty_request_advertises_proto3_optional_and_emits_nothing() {

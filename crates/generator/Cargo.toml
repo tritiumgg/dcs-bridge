@@ -17,9 +17,15 @@ path = "src/main.rs"
 
 [dependencies]
 # The plugin runs on the build machine and never inside DCS, so it takes the
-# protobuf runtime it needs (ADR 0016).
+# protobuf runtime it needs (ADR 0016). prost-reflect reads the extension
+# options prost-types drops (ADR 0036).
 prost = "0.14"
+prost-reflect = "0.16"
 prost-types = "0.14"
+
+[dev-dependencies]
+# Compiles the fixture schemas into the request protoc or buf would send.
+protox = "0.10"
 
 [lints]
 workspace = true

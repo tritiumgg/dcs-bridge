@@ -1,0 +1,12 @@
+syntax = "proto3";
+
+// A record that names a target and nothing else.
+package fixture.target_only;
+
+import "dcsbridge/broker/broker.proto";
+
+message Spotted {
+  option (dcsbridge.broker.target) = TARGET_SIM_DRIVER;
+
+  string name = 1;
+}

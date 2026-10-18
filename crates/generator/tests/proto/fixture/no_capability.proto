@@ -1,0 +1,12 @@
+syntax = "proto3";
+
+// A record that names a class and no capability.
+package fixture.no_capability;
+
+import "dcsbridge/broker/broker.proto";
+
+message Spotted {
+  option (dcsbridge.broker.record_class) = RECORD_CLASS_LOSSY;
+
+  string name = 1;
+}

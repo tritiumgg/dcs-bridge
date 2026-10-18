@@ -1,0 +1,35 @@
+syntax = "proto3";
+
+// Two records, a field type beside them and a type nested in one.
+package fixture.records;
+
+import "dcsbridge/broker/broker.proto";
+
+message Spotted {
+  option (dcsbridge.broker.record_class) = RECORD_CLASS_LOSSY;
+  option (dcsbridge.broker.required_capability) = CAPABILITY_READ;
+
+  Point at = 1;
+}
+
+// A field type: it carries no option.
+message Point {
+  double x = 1;
+  double z = 2;
+}
+
+message SetMark {
+  option (dcsbridge.broker.record_class) = RECORD_CLASS_COMMAND;
+  option (dcsbridge.broker.required_capability) = CAPABILITY_COMMAND;
+  option (dcsbridge.broker.target) = TARGET_HOOK_DRIVER;
+  option (dcsbridge.broker.reply_to) = "Spotted";
+
+  // Nested types are never records, whatever they carry.
+  message Label {
+    option (dcsbridge.broker.record_class) = RECORD_CLASS_LOSSY;
+
+    string text = 1;
+  }
+
+  Label label = 1;
+}
