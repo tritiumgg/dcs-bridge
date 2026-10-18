@@ -220,9 +220,12 @@ const CONN_ID: &str = "conn_id";
 fn emitter(out: &mut String, owner: &str, side: Side, record: &Record, run: &Run<'_>) {
     let reply = run.replies.contains(&record.topic.as_str());
     let names = params(record, reply);
+    out.push('\n');
+    param_docs(out, record, &names, reply);
+    out.push_str("---@return boolean queued what commit returns\n");
     let _ = writeln!(
         out,
-        "\n{} = function({})",
+        "{} = function({})",
         member(owner, "emit", &record.name),
         names.join(", ")
     );
@@ -257,6 +260,35 @@ fn params(record: &Record, reply: bool) -> Vec<String> {
         names.push(name);
     }
     names
+}
+
+/// A `---@param` line per parameter, typed from its field.
+fn param_docs(out: &mut String, record: &Record, names: &[String], reply: bool) {
+    if reply {
+        let _ = writeln!(out, "---@param {CONN_ID} integer");
+    }
+    for (field, name) in record.fields.iter().zip(&names[usize::from(reply)..]) {
+        let _ = writeln!(out, "---@param {name} {}", lua_type(field));
+    }
+}
+
+/// The LuaLS type of a field's argument. A field whose absence differs from
+/// zero, an `optional` scalar or a message, may be nil; a scalar that reads
+/// as zero when absent is marked required, though nil writes no put.
+fn lua_type(field: &Field) -> String {
+    let (base, nullable) = match &field.kind {
+        Kind::Integer => ("integer", false),
+        Kind::Double => ("number", false),
+        Kind::String => ("string", false),
+        Kind::Boolean => ("boolean", false),
+        Kind::Message(name) => (name.as_str(), true),
+    };
+    match field.label {
+        Label::Repeated => format!("{base}[]"),
+        Label::Optional => format!("{base}?"),
+        Label::Single if nullable => format!("{base}?"),
+        Label::Single => base.to_owned(),
+    }
 }
 
 /// The puts for one field holding `value`, skipped when it is nil. A
@@ -316,9 +348,18 @@ fn writers(out: &mut String, records: &[&Record], types: &[Type]) {
         return;
     }
     reached.sort_by(|a, b| a.name.cmp(&b.name));
+    // A class per field type, by full name: two packages may each declare a
+    // Point, and LuaLS merges classes of one name. ADR 0040.
+    for found in &reached {
+        let _ = writeln!(out, "\n---@class {}", found.name);
+        for field in &found.fields {
+            let _ = writeln!(out, "---@field {} {}", field.name, lua_type(field));
+        }
+    }
     out.push_str("\nlocal put = {}\n");
     for found in reached {
-        let _ = writeln!(out, "\nput[{}] = function(shim, value)", quote(&found.name));
+        let _ = writeln!(out, "\n---@param value {}", found.name);
+        let _ = writeln!(out, "put[{}] = function(shim, value)", quote(&found.name));
         for field in &found.fields {
             field_puts(out, field, &index("value", &field.name), 1);
         }
@@ -614,6 +655,52 @@ end
         assert!(
             hook.contains("\ngen.emit.Chat = function(end_)\n  shim.begin('a.Chat')\n"),
             "{hook}"
+        );
+    }
+
+    #[test]
+    fn an_emitter_and_each_field_type_carry_luals_annotations() {
+        let point = Kind::Message("a.Point".into());
+        let position = with(
+            record("a.Position", 1, 0, 1),
+            vec![
+                field("request_id", 1, Kind::Integer, Label::Single),
+                field("note", 2, Kind::String, Label::Optional),
+                field("path", 3, point.clone(), Label::Repeated),
+                field("at", 4, point, Label::Single),
+            ],
+        );
+        let types = [Type {
+            name: "a.Point".into(),
+            fields: vec![
+                field("x", 1, Kind::Double, Label::Single),
+                field("hit", 2, Kind::Boolean, Label::Single),
+            ],
+        }];
+        let replies = ["a.Position"];
+        let run = Run {
+            types: &types,
+            replies: &replies,
+            schema_sha256: "h",
+        };
+        let text = file(Set::Shipped, Side::Sim, &[&position], &run);
+        let docs = "
+---@param conn_id integer
+---@param request_id integer
+---@param note string?
+---@param path a.Point[]
+---@param at a.Point?
+---@return boolean queued what commit returns
+code.emit.Position = function(conn_id, request_id, note, path, at)
+";
+        assert!(text.contains(docs), "{text}");
+        assert!(
+            text.contains("\n---@class a.Point\n---@field x number\n---@field hit boolean\n"),
+            "{text}"
+        );
+        assert!(
+            text.contains("\n---@param value a.Point\nput['a.Point'] = function(shim, value)\n"),
+            "{text}"
         );
     }
 

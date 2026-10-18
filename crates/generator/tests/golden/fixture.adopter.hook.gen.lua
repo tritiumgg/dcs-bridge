@@ -31,6 +31,8 @@ gen.replies = {}
 
 gen.emit = {}
 
+---@param text string
+---@return boolean queued what commit returns
 gen.emit.Chat = function(text)
   shim.begin('fixture.adopter.Chat')
   if text ~= nil then

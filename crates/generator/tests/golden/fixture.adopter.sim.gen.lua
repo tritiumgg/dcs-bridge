@@ -40,8 +40,13 @@ for name, topic in pairs(slice.topics) do
   code.topics[name] = topic
 end
 
+---@class fixture.adopter.Point
+---@field x number
+---@field z number
+
 local put = {}
 
+---@param value fixture.adopter.Point
 put['fixture.adopter.Point'] = function(shim, value)
   if value.x ~= nil then
     shim.double(1, value.x)
@@ -51,6 +56,10 @@ put['fixture.adopter.Point'] = function(shim, value)
   end
 end
 
+---@param conn_id integer
+---@param request_id integer
+---@param at fixture.adopter.Point?
+---@return boolean queued what commit returns
 code.emit.Position = function(conn_id, request_id, at)
   local shim = DCSBridge.shim
   shim.begin_to(conn_id, 'fixture.adopter.Position')
@@ -65,6 +74,15 @@ code.emit.Position = function(conn_id, request_id, at)
   return shim.commit()
 end
 
+---@param weapon string
+---@param hit_ids integer[]
+---@param craters fixture.adopter.Point[]
+---@param yield number?
+---@param fused boolean
+---@param fuze integer
+---@param tag string
+---@param at fixture.adopter.Point?
+---@return boolean queued what commit returns
 code.emit.RocketImpact = function(weapon, hit_ids, craters, yield, fused, fuze, tag, at)
   local shim = DCSBridge.shim
   shim.begin('fixture.adopter.RocketImpact')

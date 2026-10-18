@@ -27,6 +27,9 @@ code.replies = {}
 
 code.emit = {}
 
+---@param unit_name string
+---@param coalition integer
+---@return boolean queued what commit returns
 code.emit.UnitDestroyed = function(unit_name, coalition)
   local shim = DCSBridge.shim
   shim.begin('dcsbridge.builtin.sim.UnitDestroyed')
