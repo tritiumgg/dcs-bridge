@@ -1,6 +1,6 @@
 # Working state
 
-**Last updated:** 2026-10-17
+**Last updated:** 2026-10-18
 
 The handoff between sessions. Read it first; update it before a session ends,
 not only when a task finishes. Stamp the date above each time; it carries a
@@ -18,7 +18,7 @@ is just deleted. Write entries as one or two lines, never paragraphs.
 
 ## In progress
 
-Nothing. 3.1 is built; 3.3 is next.
+Nothing. 3.3 is built; 3.6 is next.
 
 *One task at most. Say what is done, what is not, and where to resume. Say what
 is committed and what is only in the working tree. Say what is knowingly
@@ -26,21 +26,22 @@ broken. Empty this when the task closes.*
 
 ## Just finished
 
+- **3.3** — emitters, `send`/`send_to`, `CommandAck` and split output, golden-tested and called through stock Lua; agent-verified. PR #91, ADR 0040 to 0042.
 - **3.1** — the generator's tables, golden-tested and loaded by stock Lua; agent-verified. PR #90, ADR 0036 to 0039.
 - **2.C6** — dropped, no `mock`, and M2.3's rows ahead re-measured. PR #89, ADR 0035.
-- **2.C5** — `record` and `replay`, proved over loopback. PR #88, ADR 0033, 0034.
 
 *The last three at most, one line each. Git log holds the rest.*
 
 ## Next
 
-**Task 3.3** — emitters, `send` and `send_to` wrappers and split output, on
-the record rows and by-target files 3.1 left in `crates/generator`; ADR 0038.
-The plan's row has the done-when. Its brief settles who verifies.
+**Task 3.6** — decoders, one per `COMMAND` message, placed by target, on the
+field rows and `fixture.adopter` goldens 3.3 left in `crates/generator`. Its
+depth and repetition bounds are generator constants from the schema, beside
+the broker's `MAX_DEPTH` (ADR 0012). Its brief settles who verifies.
 
 ## After that
 
-- **Phase 3** runs 3.3 and 3.6, then Phase 4; 3.5 waits behind 7.6.
+- **Phase 4** follows 3.6; 3.5 waits behind 7.6.
 
 ## Carries forward
 
