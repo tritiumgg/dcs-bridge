@@ -1,0 +1,17 @@
+syntax = "proto3";
+
+// A record reaching a field type with a field the shim has no put for.
+package fixture.float_field;
+
+import "dcsbridge/broker/broker.proto";
+
+message Spotted {
+  option (dcsbridge.broker.record_class) = RECORD_CLASS_LOSSY;
+  option (dcsbridge.broker.required_capability) = CAPABILITY_READ;
+
+  Point at = 1;
+}
+
+message Point {
+  float x = 1;
+}

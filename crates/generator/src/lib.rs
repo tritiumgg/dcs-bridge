@@ -57,7 +57,7 @@ fn generate(request: &[u8]) -> Result<Vec<File>, Error> {
     let decoded = CodeGeneratorRequest::decode(request)
         .map_err(|err| Error(format!("the plugin request does not decode: {err}")))?;
     let schema_sha256 = schema_sha256(decoded.parameter.as_deref().unwrap_or_default())?;
-    let records = records::read(request, &decoded)?;
+    let records = records::read(request, &decoded)?.records;
     Ok([(emit::SIM_FILE, Side::Sim), (emit::HOOK_FILE, Side::Hook)]
         .into_iter()
         .map(|(name, side)| File {

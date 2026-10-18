@@ -9,12 +9,77 @@
 //! generation and outside the broker's own package, that carries any of the
 //! four options. A message carrying none is a field type, which never crosses
 //! into or out of Lua on its own. ADR 0037.
+//!
+//! Every field of a record, and of each field type a record reaches, crosses
+//! as one of the shim's put calls. A field whose kind has no put fails
+//! generation. ADR 0040.
 
 use prost::Message;
-use prost_reflect::{DescriptorPool, ExtensionDescriptor, MessageDescriptor};
+use prost_reflect::{
+    DescriptorPool, ExtensionDescriptor, FieldDescriptor, Kind as ProtoKind, MessageDescriptor,
+};
 use prost_types::compiler::CodeGeneratorRequest;
 
 use crate::Error;
+
+/// What a request describes: its records, and the field types they reach.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Schema {
+    /// In file order and then declaration order.
+    pub records: Vec<Record>,
+    /// Every message a record's fields reach, directly or through another
+    /// field type, sorted by full name.
+    pub types: Vec<Type>,
+}
+
+/// A message a record's fields reach, which is encoded inside its record.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Type {
+    /// The message's fully-qualified name.
+    pub name: String,
+    /// In declaration order.
+    pub fields: Vec<Field>,
+}
+
+/// One field of a record or of a field type.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Field {
+    /// The schema's name, verbatim.
+    pub name: String,
+    /// The field number its put call names.
+    pub number: u32,
+    /// The put call it crosses through.
+    pub kind: Kind,
+    /// Whether it holds one value, an optional one or a list.
+    pub label: Label,
+}
+
+/// The put call a field's values cross through.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Kind {
+    /// `shim.integer`: every integer kind with a plain varint, and enums.
+    Integer,
+    /// `shim.double`.
+    Double,
+    /// `shim.string`: strings and bytes.
+    String,
+    /// `shim.boolean`.
+    Boolean,
+    /// `shim.message` and `shim.end_message` around the fields of the named
+    /// field type.
+    Message(String),
+}
+
+/// How many values a field holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Label {
+    /// One value, absent reading as zero.
+    Single,
+    /// One value, absent distinct from zero: proto3 `optional`.
+    Optional,
+    /// Any number of values, in order.
+    Repeated,
+}
 
 /// One record: the topic it travels on and the four options it carries.
 ///
@@ -34,6 +99,8 @@ pub struct Record {
     /// The topic id of the record `reply_to` names, resolved against this
     /// record's package when the schema spells a bare name.
     pub reply_to: Option<String>,
+    /// In declaration order.
+    pub fields: Vec<Field>,
 }
 
 /// The broker frames, answers or knows by name every message in its own
@@ -62,9 +129,9 @@ struct Options {
 }
 
 /// Reads every record in the files the request names for generation, in
-/// file order and then declaration order. `decoded` is `request` already
-/// decoded through `prost-types`.
-pub fn read(request: &[u8], decoded: &CodeGeneratorRequest) -> Result<Vec<Record>, Error> {
+/// file order and then declaration order, and the field types they reach.
+/// `decoded` is `request` already decoded through `prost-types`.
+pub fn read(request: &[u8], decoded: &CodeGeneratorRequest) -> Result<Schema, Error> {
     let raw = RawProtoFiles::decode(request)
         .map_err(|err| Error(format!("the plugin request does not decode: {err}")))?;
 
@@ -79,7 +146,10 @@ pub fn read(request: &[u8], decoded: &CodeGeneratorRequest) -> Result<Vec<Record
     // A schema that never imports broker.proto declares no option, so no
     // message in it is a record.
     let Some(options) = extensions(&pool) else {
-        return Ok(Vec::new());
+        return Ok(Schema {
+            records: Vec::new(),
+            types: Vec::new(),
+        });
     };
 
     let mut records = Vec::new();
@@ -100,7 +170,102 @@ pub fn read(request: &[u8], decoded: &CodeGeneratorRequest) -> Result<Vec<Record
     }
     distinct_names(&records)?;
     resolve_replies(&mut records)?;
-    Ok(records)
+    let types = field_types(&pool, &records)?;
+    Ok(Schema { records, types })
+}
+
+/// Every message the records' fields reach, followed through field types
+/// until none is new.
+fn field_types(pool: &DescriptorPool, records: &[Record]) -> Result<Vec<Type>, Error> {
+    let mut pending: Vec<String> = records
+        .iter()
+        .flat_map(|r| message_kinds(&r.fields))
+        .collect();
+    let mut types: Vec<Type> = Vec::new();
+    while let Some(name) = pending.pop() {
+        if types.iter().any(|t| t.name == name) {
+            continue;
+        }
+        // A field's kind names a message the pool resolved, so it is there.
+        let message = pool
+            .get_message_by_name(&name)
+            .ok_or_else(|| Error(format!("{name} is a field type and is not in the request")))?;
+        let fields = fields(&message)?;
+        pending.extend(message_kinds(&fields));
+        types.push(Type { name, fields });
+    }
+    types.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(types)
+}
+
+fn message_kinds(fields: &[Field]) -> impl Iterator<Item = String> + '_ {
+    fields.iter().filter_map(|f| match &f.kind {
+        Kind::Message(name) => Some(name.clone()),
+        _ => None,
+    })
+}
+
+/// The message's fields in declaration order, which is the order the
+/// emitter writes them in. `MessageDescriptor::fields` sorts by number, so
+/// the order comes from the descriptor proto instead.
+fn fields(message: &MessageDescriptor) -> Result<Vec<Field>, Error> {
+    message
+        .descriptor_proto()
+        .field
+        .iter()
+        .filter_map(|proto| message.get_field_by_name(proto.name()))
+        .map(|f| field(message, &f))
+        .collect()
+}
+
+/// One field, or a refusal naming it when no put call writes its kind: the
+/// shim writes every integer as a plain varint and has no zigzag, fixed-width
+/// or float put. ADR 0040.
+fn field(message: &MessageDescriptor, field: &FieldDescriptor) -> Result<Field, Error> {
+    let refuse = |what: &str| {
+        Err(Error(format!(
+            "{}.{} is a {what} field, and the shim has no put call for one",
+            message.full_name(),
+            field.name()
+        )))
+    };
+    if field.is_map() {
+        return refuse("map");
+    }
+    if field.is_group() {
+        return refuse("group");
+    }
+    let kind = match field.kind() {
+        ProtoKind::Int32
+        | ProtoKind::Int64
+        | ProtoKind::Uint32
+        | ProtoKind::Uint64
+        | ProtoKind::Enum(_) => Kind::Integer,
+        ProtoKind::Double => Kind::Double,
+        ProtoKind::String | ProtoKind::Bytes => Kind::String,
+        ProtoKind::Bool => Kind::Boolean,
+        ProtoKind::Message(of) => Kind::Message(of.full_name().to_owned()),
+        ProtoKind::Sint32 => return refuse("sint32"),
+        ProtoKind::Sint64 => return refuse("sint64"),
+        ProtoKind::Float => return refuse("float"),
+        ProtoKind::Fixed32 => return refuse("fixed32"),
+        ProtoKind::Fixed64 => return refuse("fixed64"),
+        ProtoKind::Sfixed32 => return refuse("sfixed32"),
+        ProtoKind::Sfixed64 => return refuse("sfixed64"),
+    };
+    let label = if field.is_list() {
+        Label::Repeated
+    } else if field.containing_oneof().is_some_and(|o| o.is_synthetic()) {
+        Label::Optional
+    } else {
+        Label::Single
+    };
+    Ok(Field {
+        name: field.name().to_owned(),
+        number: field.number(),
+        kind,
+        label,
+    })
 }
 
 /// The topics table is keyed by name, so two packages may not share one.
@@ -191,6 +356,7 @@ fn record(message: &MessageDescriptor, options: &Options) -> Result<Option<Recor
         target: number(&options.target),
         capability,
         reply_to,
+        fields: fields(message)?,
     }))
 }
 
@@ -199,8 +365,21 @@ mod tests {
     use super::*;
     use crate::testing::request;
 
-    fn read(request: &[u8]) -> Result<Vec<Record>, Error> {
+    fn schema(request: &[u8]) -> Result<Schema, Error> {
         super::read(request, &CodeGeneratorRequest::decode(request).unwrap())
+    }
+
+    fn read(request: &[u8]) -> Result<Vec<Record>, Error> {
+        schema(request).map(|s| s.records)
+    }
+
+    fn field(name: &str, number: u32, kind: Kind, label: Label) -> Field {
+        Field {
+            name: name.into(),
+            number,
+            kind,
+            label,
+        }
     }
 
     fn topics(records: &[Record]) -> Vec<&str> {
@@ -228,6 +407,12 @@ mod tests {
                 target: 0,
                 capability: 1,
                 reply_to: None,
+                fields: vec![field(
+                    "at",
+                    1,
+                    Kind::Message("fixture.records.Point".into()),
+                    Label::Single
+                )],
             }
         );
         assert_eq!(
@@ -239,8 +424,89 @@ mod tests {
                 target: 2,
                 capability: 2,
                 reply_to: Some("fixture.records.Spotted".into()),
+                fields: vec![field(
+                    "label",
+                    1,
+                    Kind::Message("fixture.records.SetMark.Label".into()),
+                    Label::Single
+                )],
             }
         );
+    }
+
+    #[test]
+    fn the_field_types_a_record_reaches_are_read_and_sorted() {
+        let types = schema(&request(&["fixture/records.proto"], None))
+            .unwrap()
+            .types;
+        assert_eq!(
+            types,
+            [
+                Type {
+                    name: "fixture.records.Point".into(),
+                    fields: vec![
+                        field("x", 1, Kind::Double, Label::Single),
+                        field("z", 2, Kind::Double, Label::Single),
+                    ],
+                },
+                Type {
+                    name: "fixture.records.SetMark.Label".into(),
+                    fields: vec![field("text", 1, Kind::String, Label::Single)],
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn each_kind_reads_as_its_put_and_fields_keep_declaration_order() {
+        let schema = schema(&request(&["fixture/kinds.proto"], None)).unwrap();
+        let point = Kind::Message("fixture.kinds.Point".into());
+        assert_eq!(
+            schema.records[0].fields,
+            [
+                field("count", 3, Kind::Integer, Label::Single),
+                field("total", 1, Kind::Integer, Label::Single),
+                field("seen", 2, Kind::Integer, Label::Single),
+                field("size", 4, Kind::Integer, Label::Single),
+                field("side", 5, Kind::Integer, Label::Single),
+                field("hit", 6, Kind::Boolean, Label::Single),
+                field("speed", 7, Kind::Double, Label::Single),
+                field("name", 8, Kind::String, Label::Single),
+                field("blob", 9, Kind::String, Label::Single),
+                field("note", 10, Kind::String, Label::Optional),
+                field("ids", 11, Kind::Integer, Label::Repeated),
+                field("path", 12, point.clone(), Label::Repeated),
+                field("at", 13, point, Label::Single),
+            ]
+        );
+        // Point reaches Grid, which a record names nowhere.
+        let names: Vec<_> = schema.types.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(names, ["fixture.kinds.Grid", "fixture.kinds.Point"]);
+    }
+
+    #[test]
+    fn a_kind_with_no_put_fails_naming_the_message_and_the_field() {
+        for (file, at, kind) in [
+            (
+                "fixture/sint_field.proto",
+                "fixture.sint_field.Spotted.offset",
+                "sint32",
+            ),
+            (
+                "fixture/float_field.proto",
+                "fixture.float_field.Point.x",
+                "float",
+            ),
+            (
+                "fixture/map_field.proto",
+                "fixture.map_field.Spotted.tags",
+                "map",
+            ),
+        ] {
+            let err = read(&request(&[file], None)).unwrap_err().to_string();
+            assert!(err.contains(at), "{err}");
+            assert!(err.contains(&format!("is a {kind} field")), "{err}");
+        }
     }
 
     #[test]

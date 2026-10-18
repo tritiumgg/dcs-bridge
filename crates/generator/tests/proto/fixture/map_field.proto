@@ -1,0 +1,13 @@
+syntax = "proto3";
+
+// A record with a map field, which the shim has no put for.
+package fixture.map_field;
+
+import "dcsbridge/broker/broker.proto";
+
+message Spotted {
+  option (dcsbridge.broker.record_class) = RECORD_CLASS_LOSSY;
+  option (dcsbridge.broker.required_capability) = CAPABILITY_READ;
+
+  map<string, string> tags = 1;
+}

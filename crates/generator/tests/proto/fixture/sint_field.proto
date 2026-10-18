@@ -1,0 +1,14 @@
+syntax = "proto3";
+
+// A record with a field the shim has no put for.
+package fixture.sint_field;
+
+import "dcsbridge/broker/broker.proto";
+
+message Spotted {
+  option (dcsbridge.broker.record_class) = RECORD_CLASS_LOSSY;
+  option (dcsbridge.broker.required_capability) = CAPABILITY_READ;
+
+  string name = 1;
+  sint32 offset = 2;
+}

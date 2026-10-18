@@ -194,6 +194,7 @@ mod tests {
             target,
             capability,
             reply_to: None,
+            fields: Vec::new(),
         }
     }
 

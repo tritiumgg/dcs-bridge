@@ -1,0 +1,41 @@
+syntax = "proto3";
+
+// One field of every kind the shim has a put for, numbered out of
+// declaration order.
+package fixture.kinds;
+
+import "dcsbridge/broker/broker.proto";
+
+message Seen {
+  option (dcsbridge.broker.record_class) = RECORD_CLASS_LOSSY;
+  option (dcsbridge.broker.required_capability) = CAPABILITY_READ;
+
+  int32 count = 3;
+  int64 total = 1;
+  uint32 seen = 2;
+  uint64 size = 4;
+  Side side = 5;
+  bool hit = 6;
+  double speed = 7;
+  string name = 8;
+  bytes blob = 9;
+  optional string note = 10;
+  repeated int32 ids = 11;
+  repeated Point path = 12;
+  Point at = 13;
+}
+
+enum Side {
+  SIDE_UNSPECIFIED = 0;
+  SIDE_RED = 1;
+}
+
+// A field type that reaches another.
+message Point {
+  double x = 1;
+  Grid grid = 2;
+}
+
+message Grid {
+  string square = 1;
+}
