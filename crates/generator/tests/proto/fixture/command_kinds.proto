@@ -1,0 +1,31 @@
+syntax = "proto2";
+
+// A command with one field of every kind the shim has no put for. A command
+// is decoded and never put, so none of them fails generation. proto2, for the
+// group.
+package fixture.command_kinds;
+
+import "dcsbridge/broker/broker.proto";
+
+message SetAltitude {
+  option (dcsbridge.broker.record_class) = RECORD_CLASS_COMMAND;
+  option (dcsbridge.broker.required_capability) = CAPABILITY_COMMAND;
+
+  optional sint32 a = 1;
+  optional sint64 b = 2;
+  optional float c = 3;
+  optional fixed32 d = 4;
+  optional fixed64 e = 5;
+  optional sfixed32 f = 6;
+  optional sfixed64 g = 7;
+  map<string, string> h = 8;
+  optional group I = 9 {
+    optional int32 n = 10;
+  }
+  optional Point at = 11;
+}
+
+// Reached only by the command.
+message Point {
+  optional float x = 1;
+}

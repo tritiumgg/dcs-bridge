@@ -318,6 +318,8 @@ fn lua_type(field: &Field) -> String {
         Kind::String => ("string", false),
         Kind::Boolean => ("boolean", false),
         Kind::Message(name) => (name.as_str(), true),
+        // Refused before any file is written; an emitter never reaches one.
+        Kind::Unwritable(_) => ("any", true),
     };
     match field.label {
         Label::Repeated => format!("{base}[]"),
@@ -352,6 +354,8 @@ fn put(out: &mut String, field: &Field, value: &str, depth: usize) {
         Kind::Double => "double",
         Kind::String => "string",
         Kind::Boolean => "boolean",
+        // Refused before any file is written; an emitter never reaches one.
+        Kind::Unwritable(_) => return,
         Kind::Message(name) => {
             let _ = writeln!(out, "{pad}shim.message({number})");
             let _ = writeln!(out, "{pad}put[{}](shim, {value})", quote(name));

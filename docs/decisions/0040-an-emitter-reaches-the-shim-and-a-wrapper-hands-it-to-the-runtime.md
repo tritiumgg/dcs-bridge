@@ -70,11 +70,13 @@ the file's table.
   field takes a table keyed by field name and writes one `message` and
   `end_message` pair around its own fields; a repeated one writes one pair
   per element.
-- **A field kind the shim has no put for fails generation**, naming the
-  message and the field: `sint32`, `sint64`, `float`, `fixed32`, `fixed64`,
-  `sfixed32`, `sfixed64`, a group and a map. The rule covers every message a
-  record's fields reach. `bytes` goes through `string`, an enum and every
-  other integer through `integer`, and `bool` through `boolean`.
+- **A field kind the shim has no put for fails generation where an emitter
+  would write it**, naming the message and the field: `sint32`, `sint64`,
+  `float`, `fixed32`, `fixed64`, `sfixed32`, `sfixed64`, a group and a map.
+  The rule covers an outbound record, the acknowledgement, and every message
+  their fields reach. A command is decoded and never put, so it may carry
+  any kind. `bytes` goes through `string`, an enum and every other integer
+  through `integer`, and `bool` through `boolean`.
 - **The acknowledgement is generated into both shipped files.** It is
   `dcsbridge.broker.CommandAck`, the one record of the broker's package that
   a handler sends. It gets an emitter and a `send_to` member on each side,

@@ -179,7 +179,8 @@ arguments to the `buffer` function the driver sets on the file's table. The
 sim file's emitters reach the shim through `DCSBridge.shim`; the hook file is
 loaded with the shim as its argument, `loadfile(path)(shim)`. Both shipped
 files carry `send_to.CommandAck`. A field kind the shim has no put for, such as
-`sint32`, `float` or a map, fails generation. ADR 0040.
+`sint32`, `float` or a map, fails generation where an emitter would write it; a
+command may carry one. ADR 0040.
 
 Records in `dcsbridge` or a package under it write the shipped pair. Each other
 package named for generation writes `<package>.sim.gen.lua` and

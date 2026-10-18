@@ -74,6 +74,10 @@ pub enum Kind {
     /// `shim.message` and `shim.end_message` around the fields of the named
     /// field type.
     Message(String),
+    /// A kind the shim has no put for, named as the schema spells it. An
+    /// outbound record that reaches one fails generation; a command, which
+    /// is decoded and never put, may carry one.
+    Unwritable(&'static str),
 }
 
 /// How many values a field holds.
@@ -128,6 +132,9 @@ const RECORD_CLASS: &str = "dcsbridge.broker.record_class";
 const REPLY_TO: &str = "dcsbridge.broker.reply_to";
 const TARGET: &str = "dcsbridge.broker.target";
 const REQUIRED_CAPABILITY: &str = "dcsbridge.broker.required_capability";
+
+/// `RecordClass`'s command member, the class an inbound record carries.
+const RECORD_CLASS_COMMAND: i32 = 3;
 
 /// The acknowledgement's topic.
 const ACKNOWLEDGEMENT: &str = "dcsbridge.broker.CommandAck";
@@ -203,6 +210,7 @@ pub fn read(request: &[u8], decoded: &CodeGeneratorRequest) -> Result<Schema, Er
     resolve_replies(&mut records)?;
     let ack = acknowledgement(&pool, &options)?;
     let types = field_types(&pool, records.iter().chain(&ack))?;
+    refuse_unwritable(&records, ack.as_ref(), &types)?;
     Ok(Schema {
         packages,
         records,
@@ -230,7 +238,7 @@ fn acknowledgement(pool: &DescriptorPool, options: &Options) -> Result<Option<Re
         target: 0,
         capability: 0,
         reply_to: None,
-        fields: fields(&message)?,
+        fields: fields(&message),
     }))
 }
 
@@ -253,7 +261,7 @@ fn field_types<'a>(
         let message = pool
             .get_message_by_name(&name)
             .ok_or_else(|| Error(format!("{name} is a field type and is not in the request")))?;
-        let fields = fields(&message)?;
+        let fields = fields(&message);
         pending.extend(message_kinds(&fields));
         types.push(Type { name, fields });
     }
@@ -271,34 +279,44 @@ fn message_kinds(fields: &[Field]) -> impl Iterator<Item = String> + '_ {
 /// The message's fields in declaration order, which is the order the
 /// emitter writes them in. `MessageDescriptor::fields` sorts by number, so
 /// the order comes from the descriptor proto instead.
-fn fields(message: &MessageDescriptor) -> Result<Vec<Field>, Error> {
+fn fields(message: &MessageDescriptor) -> Vec<Field> {
     message
         .descriptor_proto()
         .field
         .iter()
         .filter_map(|proto| message.get_field_by_name(proto.name()))
-        .map(|f| field(message, &f))
+        .map(|f| field(&f))
         .collect()
 }
 
-/// One field, or a refusal naming it when no put call writes its kind: the
-/// shim writes every integer as a plain varint and has no zigzag, fixed-width
-/// or float put. ADR 0040.
-fn field(message: &MessageDescriptor, field: &FieldDescriptor) -> Result<Field, Error> {
-    let refuse = |what: &str| {
-        Err(Error(format!(
-            "{}.{} is a {what} field, and the shim has no put call for one",
-            message.full_name(),
-            field.name()
-        )))
+/// One field, with the put call its kind crosses through, or the kind named
+/// when the shim has none: it writes every integer as a plain varint and has
+/// no zigzag, fixed-width or float put. ADR 0040.
+fn field(field: &FieldDescriptor) -> Field {
+    let kind = if field.is_map() {
+        Kind::Unwritable("map")
+    } else if field.is_group() {
+        Kind::Unwritable("group")
+    } else {
+        put_kind(field.kind())
     };
-    if field.is_map() {
-        return refuse("map");
+    let label = if field.is_list() {
+        Label::Repeated
+    } else if field.containing_oneof().is_some_and(|o| o.is_synthetic()) {
+        Label::Optional
+    } else {
+        Label::Single
+    };
+    Field {
+        name: field.name().to_owned(),
+        number: field.number(),
+        kind,
+        label,
     }
-    if field.is_group() {
-        return refuse("group");
-    }
-    let kind = match field.kind() {
+}
+
+fn put_kind(kind: ProtoKind) -> Kind {
+    match kind {
         ProtoKind::Int32
         | ProtoKind::Int64
         | ProtoKind::Uint32
@@ -308,27 +326,50 @@ fn field(message: &MessageDescriptor, field: &FieldDescriptor) -> Result<Field, 
         ProtoKind::String | ProtoKind::Bytes => Kind::String,
         ProtoKind::Bool => Kind::Boolean,
         ProtoKind::Message(of) => Kind::Message(of.full_name().to_owned()),
-        ProtoKind::Sint32 => return refuse("sint32"),
-        ProtoKind::Sint64 => return refuse("sint64"),
-        ProtoKind::Float => return refuse("float"),
-        ProtoKind::Fixed32 => return refuse("fixed32"),
-        ProtoKind::Fixed64 => return refuse("fixed64"),
-        ProtoKind::Sfixed32 => return refuse("sfixed32"),
-        ProtoKind::Sfixed64 => return refuse("sfixed64"),
-    };
-    let label = if field.is_list() {
-        Label::Repeated
-    } else if field.containing_oneof().is_some_and(|o| o.is_synthetic()) {
-        Label::Optional
-    } else {
-        Label::Single
-    };
-    Ok(Field {
-        name: field.name().to_owned(),
-        number: field.number(),
-        kind,
-        label,
-    })
+        ProtoKind::Sint32 => Kind::Unwritable("sint32"),
+        ProtoKind::Sint64 => Kind::Unwritable("sint64"),
+        ProtoKind::Float => Kind::Unwritable("float"),
+        ProtoKind::Fixed32 => Kind::Unwritable("fixed32"),
+        ProtoKind::Fixed64 => Kind::Unwritable("fixed64"),
+        ProtoKind::Sfixed32 => Kind::Unwritable("sfixed32"),
+        ProtoKind::Sfixed64 => Kind::Unwritable("sfixed64"),
+    }
+}
+
+/// Fails naming a field with no put call that an emitter would write:
+/// one on an outbound record, on the acknowledgement, or on a field type
+/// either reaches. A command is decoded and never put, so its fields are
+/// not checked here. ADR 0040.
+fn refuse_unwritable(
+    records: &[Record],
+    ack: Option<&Record>,
+    types: &[Type],
+) -> Result<(), Error> {
+    let mut pending: Vec<(&str, &Field)> = records
+        .iter()
+        .filter(|r| r.class != RECORD_CLASS_COMMAND)
+        .chain(ack)
+        .flat_map(|r| r.fields.iter().map(move |f| (r.topic.as_str(), f)))
+        .collect();
+    let mut seen: Vec<&str> = Vec::new();
+    while let Some((message, field)) = pending.pop() {
+        match &field.kind {
+            Kind::Unwritable(what) => {
+                return Err(Error(format!(
+                    "{message}.{} is a {what} field, and the shim has no put call for one",
+                    field.name
+                )));
+            }
+            Kind::Message(name) if !seen.contains(&name.as_str()) => {
+                seen.push(name);
+                if let Some(found) = types.iter().find(|t| &t.name == name) {
+                    pending.extend(found.fields.iter().map(|f| (found.name.as_str(), f)));
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(())
 }
 
 /// The topics table is keyed by name, so two packages may not share one.
@@ -419,7 +460,7 @@ fn record(message: &MessageDescriptor, options: &Options) -> Result<Option<Recor
         target: number(&options.target),
         capability,
         reply_to,
-        fields: fields(message)?,
+        fields: fields(message),
     }))
 }
 
@@ -570,6 +611,30 @@ mod tests {
             assert!(err.contains(at), "{err}");
             assert!(err.contains(&format!("is a {kind} field")), "{err}");
         }
+    }
+
+    #[test]
+    fn a_command_may_carry_every_kind_with_no_put_and_each_reads_as_its_name() {
+        let schema = schema(&request(&["fixture/command_kinds.proto"], None)).unwrap();
+        let kinds: Vec<_> = schema.records[0]
+            .fields
+            .iter()
+            .map(|f| f.kind.clone())
+            .collect();
+        assert_eq!(
+            kinds[..9],
+            [
+                "sint32", "sint64", "float", "fixed32", "fixed64", "sfixed32", "sfixed64", "map",
+                "group",
+            ]
+            .map(Kind::Unwritable)
+        );
+        // The field type only the command reaches is read, and not refused.
+        let point = schema
+            .types
+            .iter()
+            .find(|t| t.name == "fixture.command_kinds.Point");
+        assert_eq!(point.unwrap().fields[0].kind, Kind::Unwritable("float"));
     }
 
     #[test]
