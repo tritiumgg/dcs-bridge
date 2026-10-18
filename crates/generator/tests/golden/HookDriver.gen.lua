@@ -4,8 +4,12 @@
 -- The hook driver's tables. They stay out of DCSBridge.code, so a
 -- hook-driver topic works when no sim driver is loaded, and the hook driver
 -- registers them through the shim at DCS start. ADR 0038.
+--
+-- The hook driver loads it with the shim as its argument, which its
+-- emitters write through. ADR 0040.
 
 local gen = {}
+local shim = ...
 
 gen.schema_sha256 = 'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad'
 
@@ -18,5 +22,7 @@ gen.routes = {}
 gen.caps = {}
 
 gen.replies = {}
+
+gen.emit = {}
 
 return gen

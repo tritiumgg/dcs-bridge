@@ -60,7 +60,7 @@ assert(sim.topics.UnitDestroyed == unit, 'the topics table does not name UnitDes
 
 -- The hook file loads with no DCSBridge global at all.
 DCSBridge = nil
-local hook = dofile(golden .. 'HookDriver.gen.lua')
+local hook = assert(loadfile(golden .. 'HookDriver.gen.lua'))(shim)
 assert(DCSBridge == nil, 'the hook file wrote a global')
 shaped('HookDriver.gen.lua', hook)
 
@@ -84,7 +84,7 @@ assert(slice.topics.UnitDestroyed == nil, 'the slice holds a shipped topic')
 register(adopter .. 'sim.gen.lua', slice, { 3, 1, 3, 1 })
 
 DCSBridge = nil
-local adopter_hook = dofile(golden .. adopter .. 'hook.gen.lua')
+local adopter_hook = assert(loadfile(golden .. adopter .. 'hook.gen.lua'))(shim)
 assert(DCSBridge == nil, 'the adopter hook file wrote a global')
 shaped(adopter .. 'hook.gen.lua', adopter_hook)
 register(adopter .. 'hook.gen.lua', adopter_hook, { 1, 0, 1, 0 })
@@ -100,8 +100,27 @@ register(adopter .. 'sim.gen.lua reloaded', dofile(golden .. adopter .. 'sim.gen
 assert(sim.topics.UnitDestroyed == unit and sim.topics.RocketImpact == adopter .. 'RocketImpact',
   'a reload lost a topic')
 
+-- The emitters write through the real shim once it is configured: the sim
+-- files' through DCSBridge.shim, the hook files' through the shim each was
+-- loaded with. Each commit returning true says the shim took every put.
+local function queued(what, result)
+  assert(result == true, what .. ': commit returned ' .. tostring(result))
+end
+shim.configure({ port = 0 })
+DCSBridge = { code = sim, shim = shim }
+queued('emit.UnitDestroyed', sim.emit.UnitDestroyed('x', 1))
+local point = { x = 1.5, z = -2 }
+queued('emit.RocketImpact', sim.emit.RocketImpact(
+  'S-8', { 1, 2, 3 }, { point, { x = 0 } }, 4.5, true, 2, '\0\1', point))
+queued('emit.RocketImpact with every argument nil', sim.emit.RocketImpact())
+queued('emit.Position', sim.emit.Position(1, 7, point))
+assert(sim.emit.GetPosition == nil, 'a command has an emitter')
+queued('the adopter hook emit.Chat', adopter_hook.emit.Chat('hello'))
+assert(next(hook.emit) == nil, 'the shipped hook file has an emitter for no record')
+
 print('ok  every generated file loads, each carrying the schema hash')
 print('ok  the sim files write into DCSBridge.code and the hook files touch no global')
 print('ok  an adopter slice adds its topics beside the shipped ones')
 print('ok  their tables register through the four calls with nothing refused')
 print('ok  a reload registers the same rows and adds none')
+print('ok  each emitter commits through the shim, a reply through begin_to')

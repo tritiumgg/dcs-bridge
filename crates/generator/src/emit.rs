@@ -10,7 +10,7 @@
 
 use std::fmt::Write;
 
-use crate::records::Record;
+use crate::records::{Field, Kind, Label, Record, Type};
 
 /// The file the sim driver loads.
 pub const SIM_FILE: &str = "SimDriver.gen.lua";
@@ -77,9 +77,21 @@ impl Side {
     }
 }
 
+/// What every file of one run shares.
+#[derive(Debug, Clone, Copy)]
+pub struct Run<'a> {
+    /// Every field type the run's records reach.
+    pub types: &'a [Type],
+    /// Every topic a record's `reply_to` names, across the whole run.
+    pub replies: &'a [&'a str],
+    /// The hash each file carries.
+    pub schema_sha256: &'a str,
+}
+
 /// Writes one set's file for one side over the set's records, keeping that
 /// side's rows.
-pub fn file(set: Set<'_>, side: Side, records: &[&Record], schema_sha256: &str) -> String {
+pub fn file(set: Set<'_>, side: Side, records: &[&Record], run: &Run<'_>) -> String {
+    let schema_sha256 = run.schema_sha256;
     let mut rows: Vec<&Record> = records
         .iter()
         .copied()
@@ -143,8 +155,190 @@ pub fn file(set: Set<'_>, side: Side, records: &[&Record], schema_sha256: &str) 
         );
     }
 
+    // An adopter's sim file adds to the emitters the shipped file made; every
+    // other file makes its own.
+    let owner = match side {
+        Side::Sim => "code",
+        Side::Hook => "gen",
+    };
+    let outbound: Vec<&Record> = rows
+        .iter()
+        .copied()
+        .filter(|r| r.class != RECORD_CLASS_COMMAND)
+        .collect();
+    writers(&mut out, &outbound, run.types);
+    if table != "slice" {
+        let _ = writeln!(out, "\n{owner}.emit = {{}}");
+    }
+    for record in &outbound {
+        emitter(&mut out, owner, side, record, run);
+    }
+
     let _ = writeln!(out, "\nreturn {table}");
     out
+}
+
+/// The names a parameter may not take, because the emitter reads them
+/// itself: Lua's keywords, and the globals, locals and tables a generated
+/// file uses. ADR 0040.
+const RESERVED: [&str; 27] = [
+    "and",
+    "break",
+    "do",
+    "else",
+    "elseif",
+    "end",
+    "false",
+    "for",
+    "function",
+    "if",
+    "in",
+    "local",
+    "nil",
+    "not",
+    "or",
+    "repeat",
+    "return",
+    "then",
+    "true",
+    "until",
+    "while",
+    "DCSBridge",
+    "ipairs",
+    "shim",
+    "put",
+    "code",
+    "gen",
+];
+
+/// The connection id a reply's emitter takes first.
+const CONN_ID: &str = "conn_id";
+
+/// One emitter: open the record, one put per field in declaration order, and
+/// return what `commit` returns. A reply's opens with `begin_to` and takes a
+/// connection id first. ADR 0040.
+fn emitter(out: &mut String, owner: &str, side: Side, record: &Record, run: &Run<'_>) {
+    let reply = run.replies.contains(&record.topic.as_str());
+    let names = params(record, reply);
+    let _ = writeln!(
+        out,
+        "\n{} = function({})",
+        member(owner, "emit", &record.name),
+        names.join(", ")
+    );
+    if side == Side::Sim {
+        out.push_str("  local shim = DCSBridge.shim\n");
+    }
+    if reply {
+        let _ = writeln!(out, "  shim.begin_to({CONN_ID}, {})", quote(&record.topic));
+    } else {
+        let _ = writeln!(out, "  shim.begin({})", quote(&record.topic));
+    }
+    let fields = &names[usize::from(reply)..];
+    for (field, name) in record.fields.iter().zip(fields) {
+        field_puts(out, field, name, 1);
+    }
+    out.push_str("  return shim.commit()\nend\n");
+}
+
+/// The emitter's parameters: the connection id for a reply, then one per
+/// field. A name that is reserved or already taken gains a `_` until it is
+/// neither.
+fn params(record: &Record, reply: bool) -> Vec<String> {
+    let mut names: Vec<String> = Vec::new();
+    if reply {
+        names.push(CONN_ID.to_owned());
+    }
+    for field in &record.fields {
+        let mut name = field.name.clone();
+        while RESERVED.contains(&name.as_str()) || names.contains(&name) {
+            name.push('_');
+        }
+        names.push(name);
+    }
+    names
+}
+
+/// The puts for one field holding `value`, skipped when it is nil. A
+/// repeated field puts each element in array order.
+fn field_puts(out: &mut String, field: &Field, value: &str, depth: usize) {
+    let pad = "  ".repeat(depth);
+    let _ = writeln!(out, "{pad}if {value} ~= nil then");
+    if field.label == Label::Repeated {
+        let _ = writeln!(out, "{pad}  for _, v in ipairs({value}) do");
+        put(out, field, "v", depth + 2);
+        let _ = writeln!(out, "{pad}  end");
+    } else {
+        put(out, field, value, depth + 1);
+    }
+    let _ = writeln!(out, "{pad}end");
+}
+
+/// One value's put: a scalar's call, or a message's fields between
+/// `message` and `end_message`, written by the field type's writer.
+fn put(out: &mut String, field: &Field, value: &str, depth: usize) {
+    let pad = "  ".repeat(depth);
+    let number = field.number;
+    let call = match &field.kind {
+        Kind::Integer => "integer",
+        Kind::Double => "double",
+        Kind::String => "string",
+        Kind::Boolean => "boolean",
+        Kind::Message(name) => {
+            let _ = writeln!(out, "{pad}shim.message({number})");
+            let _ = writeln!(out, "{pad}put[{}](shim, {value})", quote(name));
+            let _ = writeln!(out, "{pad}shim.end_message()");
+            return;
+        }
+    };
+    let _ = writeln!(out, "{pad}shim.{call}({number}, {value})");
+}
+
+/// A writer per field type the emitters reach, directly or through another
+/// field type, keyed by full name. A writer reads its fields from a table
+/// keyed by field name.
+fn writers(out: &mut String, records: &[&Record], types: &[Type]) {
+    let mut reached: Vec<&Type> = Vec::new();
+    let mut pending: Vec<&Field> = records.iter().flat_map(|r| &r.fields).collect();
+    while let Some(field) = pending.pop() {
+        let Kind::Message(name) = &field.kind else {
+            continue;
+        };
+        if reached.iter().any(|t| &t.name == name) {
+            continue;
+        }
+        if let Some(found) = types.iter().find(|t| &t.name == name) {
+            reached.push(found);
+            pending.extend(&found.fields);
+        }
+    }
+    if reached.is_empty() {
+        return;
+    }
+    reached.sort_by(|a, b| a.name.cmp(&b.name));
+    out.push_str("\nlocal put = {}\n");
+    for found in reached {
+        let _ = writeln!(out, "\nput[{}] = function(shim, value)", quote(&found.name));
+        for field in &found.fields {
+            field_puts(out, field, &index("value", &field.name), 1);
+        }
+        out.push_str("end\n");
+    }
+}
+
+/// `table.name`, or `table['name']` for a name Lua reserves.
+fn index(table: &str, name: &str) -> String {
+    let key = key(name);
+    if key.starts_with('[') {
+        format!("{table}{key}")
+    } else {
+        format!("{table}.{key}")
+    }
+}
+
+/// `owner.sub.name`, bracketed the same way.
+fn member(owner: &str, sub: &str, name: &str) -> String {
+    index(&format!("{owner}.{sub}"), name)
 }
 
 fn adopter_sim_header(package: &str) -> String {
@@ -172,8 +366,12 @@ fn adopter_hook_header(package: &str) -> String {
 -- The hook driver's tables for this package. Like HookDriver.gen.lua, they
 -- stay out of DCSBridge.code, and the hook driver registers them at DCS
 -- start. ADR 0041.
+--
+-- The hook driver loads it with the shim as its argument, which its
+-- emitters write through. ADR 0040.
 
 local gen = {{}}
+local shim = ...
 "
     )
 }
@@ -196,8 +394,12 @@ const HOOK_HEADER: &str = "\
 -- The hook driver's tables. They stay out of DCSBridge.code, so a
 -- hook-driver topic works when no sim driver is loaded, and the hook driver
 -- registers them through the shim at DCS start. ADR 0038.
+--
+-- The hook driver loads it with the shim as its argument, which its
+-- emitters write through. ADR 0040.
 
 local gen = {}
+local shim = ...
 ";
 
 fn map(out: &mut String, table: &str, name: &str, rows: impl Iterator<Item = (String, String)>) {
@@ -280,9 +482,155 @@ mod tests {
         }
     }
 
+    fn run(schema_sha256: &str) -> Run<'_> {
+        Run {
+            types: &[],
+            replies: &[],
+            schema_sha256,
+        }
+    }
+
     fn shipped(side: Side, records: &[Record], schema_sha256: &str) -> String {
         let records: Vec<_> = records.iter().collect();
-        file(Set::Shipped, side, &records, schema_sha256)
+        file(Set::Shipped, side, &records, &run(schema_sha256))
+    }
+
+    fn field(name: &str, number: u32, kind: Kind, label: Label) -> Field {
+        Field {
+            name: name.into(),
+            number,
+            kind,
+            label,
+        }
+    }
+
+    fn with(mut record: Record, fields: Vec<Field>) -> Record {
+        record.fields = fields;
+        record
+    }
+
+    #[test]
+    fn an_emitter_puts_each_field_in_declaration_order_and_each_element_once() {
+        let point = Kind::Message("a.Point".into());
+        let impact = with(
+            record("a.RocketImpact", 2, 0, 1),
+            vec![
+                field("weapon", 3, Kind::String, Label::Single),
+                field("hit_ids", 1, Kind::Integer, Label::Repeated),
+                field("craters", 2, point.clone(), Label::Repeated),
+                field("yield", 4, Kind::Double, Label::Optional),
+                field("at", 5, point, Label::Single),
+            ],
+        );
+        let types = [Type {
+            name: "a.Point".into(),
+            fields: vec![field("x", 1, Kind::Double, Label::Single)],
+        }];
+        let run = Run {
+            types: &types,
+            ..run("h")
+        };
+        let text = file(Set::Shipped, Side::Sim, &[&impact], &run);
+        let emitter = "
+code.emit.RocketImpact = function(weapon, hit_ids, craters, yield, at)
+  local shim = DCSBridge.shim
+  shim.begin('a.RocketImpact')
+  if weapon ~= nil then
+    shim.string(3, weapon)
+  end
+  if hit_ids ~= nil then
+    for _, v in ipairs(hit_ids) do
+      shim.integer(1, v)
+    end
+  end
+  if craters ~= nil then
+    for _, v in ipairs(craters) do
+      shim.message(2)
+      put['a.Point'](shim, v)
+      shim.end_message()
+    end
+  end
+  if yield ~= nil then
+    shim.double(4, yield)
+  end
+  if at ~= nil then
+    shim.message(5)
+    put['a.Point'](shim, at)
+    shim.end_message()
+  end
+  return shim.commit()
+end
+";
+        assert!(text.contains(emitter), "{text}");
+        let writer = "
+put['a.Point'] = function(shim, value)
+  if value.x ~= nil then
+    shim.double(1, value.x)
+  end
+end
+";
+        assert!(text.contains(writer), "{text}");
+        assert!(
+            text.find("local put = {}").unwrap() < text.find(emitter).unwrap(),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn a_reply_takes_a_connection_id_first_and_opens_with_begin_to() {
+        let position = with(
+            record("a.Position", 1, 0, 1),
+            vec![field("conn_id", 1, Kind::Integer, Label::Single)],
+        );
+        let replies = ["a.Position"];
+        let run = Run {
+            replies: &replies,
+            ..run("h")
+        };
+        let text = file(Set::Shipped, Side::Sim, &[&position], &run);
+        assert!(
+            text.contains("code.emit.Position = function(conn_id, conn_id_)\n"),
+            "{text}"
+        );
+        assert!(
+            text.contains("  shim.begin_to(conn_id, 'a.Position')\n"),
+            "{text}"
+        );
+        assert!(text.contains("shim.integer(1, conn_id_)"), "{text}");
+    }
+
+    #[test]
+    fn a_command_has_no_emitter_and_a_hook_emitter_uses_the_chunk_argument() {
+        let records = [
+            record("a.SetMark", 3, 2, 2),
+            with(
+                record("a.Chat", 1, 2, 1),
+                vec![field("end", 1, Kind::String, Label::Single)],
+            ),
+        ];
+        let hook = shipped(Side::Hook, &records, "h");
+        assert!(hook.contains("\nlocal shim = ...\n"), "{hook}");
+        assert!(!hook.contains("gen.emit.SetMark"), "{hook}");
+        assert!(
+            hook.contains("\ngen.emit.Chat = function(end_)\n  shim.begin('a.Chat')\n"),
+            "{hook}"
+        );
+    }
+
+    #[test]
+    fn a_reserved_name_is_renamed_and_a_keyword_key_bracketed() {
+        let record = with(
+            record("a.end", 1, 0, 1),
+            vec![
+                field("shim", 1, Kind::Integer, Label::Single),
+                field("shim_", 2, Kind::Integer, Label::Single),
+            ],
+        );
+        let text = shipped(Side::Sim, &[record], "h");
+        assert!(
+            text.contains("code.emit['end'] = function(shim_, shim__)\n"),
+            "{text}"
+        );
     }
 
     fn requesting(mut record: Record, reply: &str) -> Record {
@@ -393,7 +741,7 @@ mod tests {
     #[test]
     fn an_adopter_sim_file_returns_its_slice_and_adds_its_topics_to_the_code() {
         let spotted = record("acme.Spotted", 2, 0, 1);
-        let text = file(Set::Adopter("acme"), Side::Sim, &[&spotted], "h");
+        let text = file(Set::Adopter("acme"), Side::Sim, &[&spotted], &run("h"));
         assert!(text.contains("\nlocal slice = {}\n"), "{text}");
         assert!(
             text.contains("slice.topics = {\n  Spotted = 'acme.Spotted',\n}"),

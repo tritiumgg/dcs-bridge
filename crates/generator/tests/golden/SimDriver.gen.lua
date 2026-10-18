@@ -25,4 +25,18 @@ code.caps = {
 
 code.replies = {}
 
+code.emit = {}
+
+code.emit.UnitDestroyed = function(unit_name, coalition)
+  local shim = DCSBridge.shim
+  shim.begin('dcsbridge.builtin.sim.UnitDestroyed')
+  if unit_name ~= nil then
+    shim.string(1, unit_name)
+  end
+  if coalition ~= nil then
+    shim.integer(2, coalition)
+  end
+  return shim.commit()
+end
+
 return code

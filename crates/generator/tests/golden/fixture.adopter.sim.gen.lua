@@ -40,4 +40,67 @@ for name, topic in pairs(slice.topics) do
   code.topics[name] = topic
 end
 
+local put = {}
+
+put['fixture.adopter.Point'] = function(shim, value)
+  if value.x ~= nil then
+    shim.double(1, value.x)
+  end
+  if value.z ~= nil then
+    shim.double(2, value.z)
+  end
+end
+
+code.emit.Position = function(conn_id, request_id, at)
+  local shim = DCSBridge.shim
+  shim.begin_to(conn_id, 'fixture.adopter.Position')
+  if request_id ~= nil then
+    shim.integer(1, request_id)
+  end
+  if at ~= nil then
+    shim.message(2)
+    put['fixture.adopter.Point'](shim, at)
+    shim.end_message()
+  end
+  return shim.commit()
+end
+
+code.emit.RocketImpact = function(weapon, hit_ids, craters, yield, fused, fuze, tag, at)
+  local shim = DCSBridge.shim
+  shim.begin('fixture.adopter.RocketImpact')
+  if weapon ~= nil then
+    shim.string(1, weapon)
+  end
+  if hit_ids ~= nil then
+    for _, v in ipairs(hit_ids) do
+      shim.integer(2, v)
+    end
+  end
+  if craters ~= nil then
+    for _, v in ipairs(craters) do
+      shim.message(3)
+      put['fixture.adopter.Point'](shim, v)
+      shim.end_message()
+    end
+  end
+  if yield ~= nil then
+    shim.double(4, yield)
+  end
+  if fused ~= nil then
+    shim.boolean(5, fused)
+  end
+  if fuze ~= nil then
+    shim.integer(6, fuze)
+  end
+  if tag ~= nil then
+    shim.string(7, tag)
+  end
+  if at ~= nil then
+    shim.message(8)
+    put['fixture.adopter.Point'](shim, at)
+    shim.end_message()
+  end
+  return shim.commit()
+end
+
 return slice

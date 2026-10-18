@@ -65,6 +65,16 @@ fn generate(request: &[u8]) -> Result<Vec<File>, Error> {
     let mut sets: Vec<Set<'_>> = schema.packages.iter().map(|p| Set::of(p)).collect();
     sets.sort_unstable();
     sets.dedup();
+    let replies: Vec<&str> = schema
+        .records
+        .iter()
+        .filter_map(|r| r.reply_to.as_deref())
+        .collect();
+    let run = emit::Run {
+        types: &schema.types,
+        replies: &replies,
+        schema_sha256: &schema_sha256,
+    };
     let mut files = Vec::new();
     for set in sets {
         let records: Vec<_> = schema
@@ -75,7 +85,7 @@ fn generate(request: &[u8]) -> Result<Vec<File>, Error> {
         for side in [Side::Sim, Side::Hook] {
             files.push(File {
                 name: Some(set.file_name(side)),
-                content: Some(emit::file(set, side, &records, &schema_sha256)),
+                content: Some(emit::file(set, side, &records, &run)),
                 ..Default::default()
             });
         }

@@ -4,8 +4,12 @@
 -- The hook driver's tables for this package. Like HookDriver.gen.lua, they
 -- stay out of DCSBridge.code, and the hook driver registers them at DCS
 -- start. ADR 0041.
+--
+-- The hook driver loads it with the shim as its argument, which its
+-- emitters write through. ADR 0040.
 
 local gen = {}
+local shim = ...
 
 gen.schema_sha256 = 'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad'
 
@@ -24,5 +28,15 @@ gen.caps = {
 }
 
 gen.replies = {}
+
+gen.emit = {}
+
+gen.emit.Chat = function(text)
+  shim.begin('fixture.adopter.Chat')
+  if text ~= nil then
+    shim.string(1, text)
+  end
+  return shim.commit()
+end
 
 return gen
