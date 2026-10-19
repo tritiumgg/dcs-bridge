@@ -2,7 +2,7 @@
 -- own copy, so it loads with nothing around it but the shim. Lua 5.1 has no
 -- bit library, so every read is arithmetic. ADR 0044.
 
-local byte, sub, floor = string.byte, string.sub, math.floor
+local byte, sub, floor, ldexp = string.byte, string.sub, math.floor, math.ldexp
 
 -- A varint at pos, read no further than limit: its low and high 32 bits
 -- apart, so a 64-bit value loses nothing before its kind reads it, and the
@@ -64,6 +64,22 @@ local function skip(bytes, pos, limit, wire)
   return after
 end
 
+-- The width bytes at pos, which must end no later than limit.
+local function fixed(bytes, pos, limit, width)
+  if pos + width - 1 > limit then
+    error('a value runs past the end of its message', 0)
+  end
+  return byte(bytes, pos, pos + width - 1)
+end
+
+-- An unsigned 32-bit value read as two's complement.
+local function signed32(n)
+  if n >= 2 ^ 31 then
+    return n - 2 ^ 32
+  end
+  return n
+end
+
 -- Each scalar kind: the wire type it arrives in, the value it reads as when
 -- the sender left it out, and its read, which returns the value and the
 -- position after it. ADR 0043.
@@ -84,6 +100,59 @@ scalar.uint64 = {
   read = function(bytes, pos, limit)
     local lo, hi, after = varint(bytes, pos, limit)
     return hi * 2 ^ 32 + lo, after
+  end,
+}
+
+scalar.int32 = {
+  wire = 0,
+  zero = 0,
+  read = function(bytes, pos, limit)
+    local lo, _, after = varint(bytes, pos, limit)
+    return signed32(lo), after
+  end,
+}
+
+scalar.enum = scalar.int32
+
+scalar.int64 = {
+  wire = 0,
+  zero = 0,
+  read = function(bytes, pos, limit)
+    local lo, hi, after = varint(bytes, pos, limit)
+    return signed32(hi) * 2 ^ 32 + lo, after
+  end,
+}
+
+scalar.bool = {
+  wire = 0,
+  zero = false,
+  read = function(bytes, pos, limit)
+    local lo, hi, after = varint(bytes, pos, limit)
+    return lo ~= 0 or hi ~= 0, after
+  end,
+}
+
+-- An IEEE 754 double from its eight little-endian bytes.
+scalar.double = {
+  wire = 1,
+  zero = 0,
+  read = function(bytes, pos, limit)
+    local b1, b2, b3, b4, b5, b6, b7, b8 = fixed(bytes, pos, limit, 8)
+    local exponent = b8 % 128 * 16 + floor(b7 / 16)
+    local mantissa = b7 % 16 * 2 ^ 48 + b6 * 2 ^ 40 + b5 * 2 ^ 32
+      + b4 * 2 ^ 24 + b3 * 2 ^ 16 + b2 * 2 ^ 8 + b1
+    local value
+    if exponent == 2047 then
+      value = mantissa == 0 and math.huge or 0 / 0
+    elseif exponent == 0 then
+      value = ldexp(mantissa, -1074)
+    else
+      value = ldexp(mantissa + 2 ^ 52, exponent - 1075)
+    end
+    if b8 >= 128 then
+      value = -value
+    end
+    return value, pos + 8
   end,
 }
 

@@ -480,8 +480,13 @@ fn shape(out: &mut String, name: &str, fields: &[Field]) {
 /// The reader's name for a kind it decodes.
 fn decoded(kind: &Kind) -> Option<&'static str> {
     match kind {
+        Kind::Int32 => Some("int32"),
+        Kind::Int64 => Some("int64"),
         Kind::Uint32 => Some("uint32"),
         Kind::Uint64 => Some("uint64"),
+        Kind::Enum => Some("enum"),
+        Kind::Boolean => Some("bool"),
+        Kind::Double => Some("double"),
         Kind::String => Some("string"),
         _ => None,
     }
@@ -954,6 +959,9 @@ end
                 field("serial", 1, Kind::Uint64, Label::Single),
                 field("note", 4, Kind::String, Label::Optional),
                 field("group", 3, Kind::Group, Label::Single),
+                field("side", 5, Kind::Enum, Label::Single),
+                field("on", 6, Kind::Boolean, Label::Single),
+                field("at", 7, Kind::Double, Label::Single),
             ],
         );
         let text = shipped(Side::Sim, &[command], "h");
@@ -962,6 +970,9 @@ shape['a.SetMark'] = {
   [2] = { name = 'label', kind = 'string' },
   [1] = { name = 'serial', kind = 'uint64' },
   [4] = { name = 'note', kind = 'string', optional = true },
+  [5] = { name = 'side', kind = 'enum' },
+  [6] = { name = 'on', kind = 'bool' },
+  [7] = { name = 'at', kind = 'double' },
 }
 ";
         assert!(text.contains(shape), "{text}");
@@ -971,6 +982,9 @@ shape['a.SetMark'] = {
 ---@field serial integer
 ---@field note string?
 ---@field group table
+---@field side integer
+---@field on boolean
+---@field at number
 ";
         assert!(text.contains(class), "{text}");
     }
