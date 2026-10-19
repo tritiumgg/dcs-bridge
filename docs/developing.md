@@ -157,7 +157,8 @@ ADR 0021 says which five packages there are and what each holds.
 ### Generator
 
 `protoc-gen-dcsbridge-lua` writes `SimDriver.gen.lua` and `HookDriver.gen.lua`
-from the schema: the registration tables, the emitters and the send wrappers.
+from the schema: the registration tables, the emitters, the send wrappers and
+the decoders.
 `mise run generate` runs it through buf into `target/gen`, after compiling
 `target/schema.pb`:
 
@@ -182,6 +183,15 @@ files carry `send_to.CommandAck`. A field kind the shim has no put for, such as
 `sint32`, `float` or a map, fails generation where an emitter would write it; a
 command may carry one. ADR 0040.
 
+Each `COMMAND` record gets a decoder under `decode`, keyed by topic, which
+takes the body `poll` returns and gives back a table keyed by field name. A
+plain scalar the sender left out reads as its zero, and an `optional` scalar
+or a message as nil. Every kind decodes but a group. ADR 0043. A file that
+holds a command carries the wire reader, from `crates/generator/src/wire.lua`,
+as locals (ADR 0044), and two bounds a body that passes raises on:
+`MAX_DEPTH`, the depth below its commands plus 8, and `MAX_ELEMENTS`, 4096
+per repeated field or map. ADR 0045.
+
 Records in `dcsbridge` or a package under it write the shipped pair. Each other
 package named for generation writes `<package>.sim.gen.lua` and
 `<package>.hook.gen.lua`; the sim file adds to `DCSBridge.code` and returns a
@@ -204,7 +214,8 @@ DCSBRIDGE_UPDATE_GOLDEN=1 cargo test -p protoc-gen-dcsbridge-lua --test golden
 
 `tests/lua/generated.lua` loads the same copies under a stock Lua 5.1,
 registers their tables, and calls each emitter and wrapper through the
-host-native module.
+host-native module. `tests/lua/decode.lua` feeds the adopter decoders bodies
+built by hand.
 
 ## Releases
 
