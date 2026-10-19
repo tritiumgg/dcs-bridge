@@ -313,13 +313,22 @@ fn param_docs(out: &mut String, record: &Record, names: &[String], reply: bool) 
 /// as zero when absent is marked required, though nil writes no put.
 fn lua_type(field: &Field) -> String {
     let (base, nullable) = match &field.kind {
-        Kind::Integer => ("integer", false),
-        Kind::Double => ("number", false),
+        Kind::Int32
+        | Kind::Int64
+        | Kind::Uint32
+        | Kind::Uint64
+        | Kind::Enum
+        | Kind::Sint32
+        | Kind::Sint64
+        | Kind::Fixed32
+        | Kind::Fixed64
+        | Kind::Sfixed32
+        | Kind::Sfixed64 => ("integer", false),
+        Kind::Float | Kind::Double => ("number", false),
         Kind::String => ("string", false),
         Kind::Boolean => ("boolean", false),
         Kind::Message(name) => (name.as_str(), true),
-        // Refused before any file is written; an emitter never reaches one.
-        Kind::Unwritable(_) => ("any", true),
+        Kind::Map(_) | Kind::Group => ("table", false),
     };
     match field.label {
         Label::Repeated => format!("{base}[]"),
@@ -349,21 +358,15 @@ fn field_puts(out: &mut String, field: &Field, value: &str, depth: usize) {
 fn put(out: &mut String, field: &Field, value: &str, depth: usize) {
     let pad = "  ".repeat(depth);
     let number = field.number;
-    let call = match &field.kind {
-        Kind::Integer => "integer",
-        Kind::Double => "double",
-        Kind::String => "string",
-        Kind::Boolean => "boolean",
-        // Refused before any file is written; an emitter never reaches one.
-        Kind::Unwritable(_) => return,
-        Kind::Message(name) => {
-            let _ = writeln!(out, "{pad}shim.message({number})");
-            let _ = writeln!(out, "{pad}put[{}](shim, {value})", quote(name));
-            let _ = writeln!(out, "{pad}shim.end_message()");
-            return;
-        }
-    };
-    let _ = writeln!(out, "{pad}shim.{call}({number}, {value})");
+    if let Kind::Message(name) = &field.kind {
+        let _ = writeln!(out, "{pad}shim.message({number})");
+        let _ = writeln!(out, "{pad}put[{}](shim, {value})", quote(name));
+        let _ = writeln!(out, "{pad}shim.end_message()");
+    } else if let Some(call) = field.kind.put() {
+        let _ = writeln!(out, "{pad}shim.{call}({number}, {value})");
+    }
+    // A kind with no put is refused before any file is written, so an
+    // emitter never reaches one.
 }
 
 /// A writer per field type the emitters reach, directly or through another
@@ -598,7 +601,7 @@ mod tests {
             record("a.RocketImpact", 2, 0, 1),
             vec![
                 field("weapon", 3, Kind::String, Label::Single),
-                field("hit_ids", 1, Kind::Integer, Label::Repeated),
+                field("hit_ids", 1, Kind::Int32, Label::Repeated),
                 field("craters", 2, point.clone(), Label::Repeated),
                 field("yield", 4, Kind::Double, Label::Optional),
                 field("at", 5, point, Label::Single),
@@ -662,7 +665,7 @@ end
     fn a_reply_takes_a_connection_id_first_and_opens_with_begin_to() {
         let position = with(
             record("a.Position", 1, 0, 1),
-            vec![field("conn_id", 1, Kind::Integer, Label::Single)],
+            vec![field("conn_id", 1, Kind::Int32, Label::Single)],
         );
         let replies = ["a.Position"];
         let run = Run {
@@ -705,7 +708,7 @@ end
         let position = with(
             record("a.Position", 1, 0, 1),
             vec![
-                field("request_id", 1, Kind::Integer, Label::Single),
+                field("request_id", 1, Kind::Int32, Label::Single),
                 field("note", 2, Kind::String, Label::Optional),
                 field("path", 3, point.clone(), Label::Repeated),
                 field("at", 4, point, Label::Single),
@@ -754,7 +757,7 @@ code.emit.Position = function(conn_id, request_id, note, path, at)
             ),
             with(
                 record("a.Position", 1, 0, 1),
-                vec![field("request_id", 1, Kind::Integer, Label::Single)],
+                vec![field("request_id", 1, Kind::Int32, Label::Single)],
             ),
             record("a.Empty", 2, 0, 1),
         ];
@@ -800,7 +803,7 @@ end
     fn both_shipped_files_carry_the_acknowledgement_and_no_row_for_it() {
         let ack = with(
             record("dcsbridge.broker.CommandAck", 1, 0, 0),
-            vec![field("outcome", 3, Kind::Integer, Label::Single)],
+            vec![field("outcome", 3, Kind::Int32, Label::Single)],
         );
         let replies = ["dcsbridge.broker.CommandAck"];
         let run = Run {
@@ -838,8 +841,8 @@ end
         let record = with(
             record("a.end", 1, 0, 1),
             vec![
-                field("shim", 1, Kind::Integer, Label::Single),
-                field("shim_", 2, Kind::Integer, Label::Single),
+                field("shim", 1, Kind::Int32, Label::Single),
+                field("shim_", 2, Kind::Int32, Label::Single),
             ],
         );
         let text = shipped(Side::Sim, &[record], "h");

@@ -60,24 +60,80 @@ pub struct Field {
     pub label: Label,
 }
 
-/// The put call a field's values cross through.
+/// A field's kind, as finely as a decoder tells kinds apart on the wire.
+///
+/// Only some kinds have a put call. An outbound record that reaches one
+/// without fails generation; a command, which is decoded and never put, may
+/// carry any of them.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Kind {
-    /// `shim.integer`: every integer kind with a plain varint, and enums.
-    Integer,
-    /// `shim.double`.
+    /// A varint whose low 32 bits are a signed value.
+    Int32,
+    /// A varint holding a signed 64-bit value.
+    Int64,
+    /// A varint whose low 32 bits are an unsigned value.
+    Uint32,
+    /// A varint holding an unsigned 64-bit value.
+    Uint64,
+    /// A varint read as `Int32` is.
+    Enum,
+    /// A zigzag varint, 32 bits.
+    Sint32,
+    /// A zigzag varint, 64 bits.
+    Sint64,
+    /// Four little-endian bytes, unsigned.
+    Fixed32,
+    /// Eight little-endian bytes, unsigned.
+    Fixed64,
+    /// Four little-endian bytes, signed.
+    Sfixed32,
+    /// Eight little-endian bytes, signed.
+    Sfixed64,
+    /// An IEEE 754 single.
+    Float,
+    /// An IEEE 754 double.
     Double,
-    /// `shim.string`: strings and bytes.
+    /// Strings and bytes, which Lua holds alike.
     String,
-    /// `shim.boolean`.
+    /// A varint, zero false and any other value true.
     Boolean,
-    /// `shim.message` and `shim.end_message` around the fields of the named
-    /// field type.
+    /// A field type, by full name.
     Message(String),
-    /// A kind the shim has no put for, named as the schema spells it. An
-    /// outbound record that reaches one fails generation; a command, which
-    /// is decoded and never put, may carry one.
-    Unwritable(&'static str),
+    /// A map, by the full name of its entry message.
+    Map(String),
+    /// A proto2 group.
+    Group,
+}
+
+impl Kind {
+    /// The shim's put call for a scalar it writes: every integer kind with a
+    /// plain varint, enums, doubles, strings and booleans. ADR 0040.
+    pub fn put(&self) -> Option<&'static str> {
+        match self {
+            Self::Int32 | Self::Int64 | Self::Uint32 | Self::Uint64 | Self::Enum => Some("integer"),
+            Self::Double => Some("double"),
+            Self::String => Some("string"),
+            Self::Boolean => Some("boolean"),
+            _ => None,
+        }
+    }
+
+    /// The schema's word for a kind the shim has no put for: it has no
+    /// zigzag, fixed-width or float put, and no map or group.
+    pub fn unwritable(&self) -> Option<&'static str> {
+        match self {
+            Self::Sint32 => Some("sint32"),
+            Self::Sint64 => Some("sint64"),
+            Self::Fixed32 => Some("fixed32"),
+            Self::Fixed64 => Some("fixed64"),
+            Self::Sfixed32 => Some("sfixed32"),
+            Self::Sfixed64 => Some("sfixed64"),
+            Self::Float => Some("float"),
+            Self::Map(_) => Some("map"),
+            Self::Group => Some("group"),
+            _ => None,
+        }
+    }
 }
 
 /// How many values a field holds.
@@ -289,16 +345,12 @@ fn fields(message: &MessageDescriptor) -> Vec<Field> {
         .collect()
 }
 
-/// One field, with the put call its kind crosses through, or the kind named
-/// when the shim has none: it writes every integer as a plain varint and has
-/// no zigzag, fixed-width or float put. ADR 0040.
+/// One field, with its kind and label.
 fn field(field: &FieldDescriptor) -> Field {
-    let kind = if field.is_map() {
-        Kind::Unwritable("map")
-    } else if field.is_group() {
-        Kind::Unwritable("group")
-    } else {
-        put_kind(field.kind())
+    let kind = match field.kind() {
+        ProtoKind::Message(entry) if field.is_map() => Kind::Map(entry.full_name().to_owned()),
+        _ if field.is_group() => Kind::Group,
+        other => kind(other),
     };
     let label = if field.is_list() {
         Label::Repeated
@@ -315,24 +367,24 @@ fn field(field: &FieldDescriptor) -> Field {
     }
 }
 
-fn put_kind(kind: ProtoKind) -> Kind {
+fn kind(kind: ProtoKind) -> Kind {
     match kind {
-        ProtoKind::Int32
-        | ProtoKind::Int64
-        | ProtoKind::Uint32
-        | ProtoKind::Uint64
-        | ProtoKind::Enum(_) => Kind::Integer,
+        ProtoKind::Int32 => Kind::Int32,
+        ProtoKind::Int64 => Kind::Int64,
+        ProtoKind::Uint32 => Kind::Uint32,
+        ProtoKind::Uint64 => Kind::Uint64,
+        ProtoKind::Enum(_) => Kind::Enum,
+        ProtoKind::Sint32 => Kind::Sint32,
+        ProtoKind::Sint64 => Kind::Sint64,
+        ProtoKind::Fixed32 => Kind::Fixed32,
+        ProtoKind::Fixed64 => Kind::Fixed64,
+        ProtoKind::Sfixed32 => Kind::Sfixed32,
+        ProtoKind::Sfixed64 => Kind::Sfixed64,
+        ProtoKind::Float => Kind::Float,
         ProtoKind::Double => Kind::Double,
         ProtoKind::String | ProtoKind::Bytes => Kind::String,
         ProtoKind::Bool => Kind::Boolean,
         ProtoKind::Message(of) => Kind::Message(of.full_name().to_owned()),
-        ProtoKind::Sint32 => Kind::Unwritable("sint32"),
-        ProtoKind::Sint64 => Kind::Unwritable("sint64"),
-        ProtoKind::Float => Kind::Unwritable("float"),
-        ProtoKind::Fixed32 => Kind::Unwritable("fixed32"),
-        ProtoKind::Fixed64 => Kind::Unwritable("fixed64"),
-        ProtoKind::Sfixed32 => Kind::Unwritable("sfixed32"),
-        ProtoKind::Sfixed64 => Kind::Unwritable("sfixed64"),
     }
 }
 
@@ -353,13 +405,13 @@ fn refuse_unwritable(
         .collect();
     let mut seen: Vec<&str> = Vec::new();
     while let Some((message, field)) = pending.pop() {
+        if let Some(what) = field.kind.unwritable() {
+            return Err(Error(format!(
+                "{message}.{} is a {what} field, and the shim has no put call for one",
+                field.name
+            )));
+        }
         match &field.kind {
-            Kind::Unwritable(what) => {
-                return Err(Error(format!(
-                    "{message}.{} is a {what} field, and the shim has no put call for one",
-                    field.name
-                )));
-            }
             Kind::Message(name) if !seen.contains(&name.as_str()) => {
                 seen.push(name);
                 if let Some(found) = types.iter().find(|t| &t.name == name) {
@@ -562,26 +614,36 @@ mod tests {
     }
 
     #[test]
-    fn each_kind_reads_as_its_put_and_fields_keep_declaration_order() {
+    fn each_kind_reads_as_itself_and_fields_keep_declaration_order() {
         let schema = schema(&request(&["fixture/kinds.proto"], None)).unwrap();
         let point = Kind::Message("fixture.kinds.Point".into());
+        let fields = &schema.records[0].fields;
         assert_eq!(
-            schema.records[0].fields,
-            [
-                field("count", 3, Kind::Integer, Label::Single),
-                field("total", 1, Kind::Integer, Label::Single),
-                field("seen", 2, Kind::Integer, Label::Single),
-                field("size", 4, Kind::Integer, Label::Single),
-                field("side", 5, Kind::Integer, Label::Single),
+            fields,
+            &[
+                field("count", 3, Kind::Int32, Label::Single),
+                field("total", 1, Kind::Int64, Label::Single),
+                field("seen", 2, Kind::Uint32, Label::Single),
+                field("size", 4, Kind::Uint64, Label::Single),
+                field("side", 5, Kind::Enum, Label::Single),
                 field("hit", 6, Kind::Boolean, Label::Single),
                 field("speed", 7, Kind::Double, Label::Single),
                 field("name", 8, Kind::String, Label::Single),
                 field("blob", 9, Kind::String, Label::Single),
                 field("note", 10, Kind::String, Label::Optional),
-                field("ids", 11, Kind::Integer, Label::Repeated),
+                field("ids", 11, Kind::Int32, Label::Repeated),
                 field("path", 12, point.clone(), Label::Repeated),
                 field("at", 13, point, Label::Single),
             ]
+        );
+        let puts: Vec<_> = fields[..9].iter().map(|f| f.kind.put()).collect();
+        assert_eq!(
+            puts,
+            [
+                "integer", "integer", "integer", "integer", "integer", "boolean", "double",
+                "string", "string",
+            ]
+            .map(Some)
         );
         // Point reaches Grid, which a record names nowhere.
         let names: Vec<_> = schema.types.iter().map(|t| t.name.as_str()).collect();
@@ -624,17 +686,32 @@ mod tests {
         assert_eq!(
             kinds[..9],
             [
+                Kind::Sint32,
+                Kind::Sint64,
+                Kind::Float,
+                Kind::Fixed32,
+                Kind::Fixed64,
+                Kind::Sfixed32,
+                Kind::Sfixed64,
+                Kind::Map("fixture.command_kinds.SetAltitude.HEntry".into()),
+                Kind::Group,
+            ]
+        );
+        let words: Vec<_> = kinds[..9].iter().map(|k| k.unwritable()).collect();
+        assert_eq!(
+            words,
+            [
                 "sint32", "sint64", "float", "fixed32", "fixed64", "sfixed32", "sfixed64", "map",
                 "group",
             ]
-            .map(Kind::Unwritable)
+            .map(Some)
         );
         // The field type only the command reaches is read, and not refused.
         let point = schema
             .types
             .iter()
             .find(|t| t.name == "fixture.command_kinds.Point");
-        assert_eq!(point.unwrap().fields[0].kind, Kind::Unwritable("float"));
+        assert_eq!(point.unwrap().fields[0].kind, Kind::Float);
     }
 
     #[test]
@@ -685,9 +762,9 @@ mod tests {
         assert_eq!(
             ack.fields,
             [
-                field("request_id", 1, Kind::Integer, Label::Optional),
+                field("request_id", 1, Kind::Uint64, Label::Optional),
                 field("idempotency_key", 2, Kind::String, Label::Optional),
-                field("outcome", 3, Kind::Integer, Label::Single),
+                field("outcome", 3, Kind::Enum, Label::Single),
                 field("detail", 4, Kind::String, Label::Single),
             ]
         );
