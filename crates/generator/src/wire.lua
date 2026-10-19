@@ -2,7 +2,7 @@
 -- own copy, so it loads with nothing around it but the shim. Lua 5.1 has no
 -- bit library, so every read is arithmetic. ADR 0044.
 
-local byte, floor = string.byte, math.floor
+local byte, sub, floor = string.byte, string.sub, math.floor
 
 -- A varint at pos, read no further than limit: its low and high 32 bits
 -- apart, so a 64-bit value loses nothing before its kind reads it, and the
@@ -64,10 +64,48 @@ local function skip(bytes, pos, limit, wire)
   return after
 end
 
+-- Each scalar kind: the wire type it arrives in, the value it reads as when
+-- the sender left it out, and its read, which returns the value and the
+-- position after it. ADR 0043.
+local scalar = {}
+
+scalar.uint32 = {
+  wire = 0,
+  zero = 0,
+  read = function(bytes, pos, limit)
+    local lo, _, after = varint(bytes, pos, limit)
+    return lo, after
+  end,
+}
+
+scalar.uint64 = {
+  wire = 0,
+  zero = 0,
+  read = function(bytes, pos, limit)
+    local lo, hi, after = varint(bytes, pos, limit)
+    return hi * 2 ^ 32 + lo, after
+  end,
+}
+
+scalar.string = {
+  wire = 2,
+  zero = '',
+  read = function(bytes, pos, limit)
+    local start, stop = length(bytes, pos, limit)
+    return sub(bytes, start, stop), stop + 1
+  end,
+}
+
 -- The fields of one message between pos and limit, by shape: a table from
--- field number to field.
+-- field number to field. A field in another wire type than its kind's is
+-- skipped like an unknown one, and a field seen twice keeps the last value.
 local function message(shape, bytes, pos, limit)
   local out = {}
+  for _, field in pairs(shape) do
+    if not field.optional then
+      out[field.name] = scalar[field.kind].zero
+    end
+  end
   while pos <= limit do
     local key, high
     key, high, pos = varint(bytes, pos, limit)
@@ -75,7 +113,13 @@ local function message(shape, bytes, pos, limit)
     if high ~= 0 or number == 0 then
       error('a field number is out of range', 0)
     end
-    pos = skip(bytes, pos, limit, wire)
+    local field = shape[number]
+    local kind = field and scalar[field.kind]
+    if kind and wire == kind.wire then
+      out[field.name], pos = kind.read(bytes, pos, limit)
+    else
+      pos = skip(bytes, pos, limit, wire)
+    end
   end
   return out
 end

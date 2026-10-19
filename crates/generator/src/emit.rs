@@ -434,15 +434,56 @@ fn decoders(out: &mut String, owner: &str, commands: &[&Record]) {
     out.push_str(WIRE);
     out.push_str("\nlocal shape = {}\n");
     for record in commands {
-        let _ = writeln!(out, "\nshape[{}] = {{}}", quote(&record.topic));
+        shape(out, &record.topic, &record.fields);
     }
     for record in commands {
         let topic = quote(&record.topic);
+        let _ = writeln!(out, "\n---@class {}", record.topic);
+        for field in &record.fields {
+            let _ = writeln!(out, "---@field {} {}", field.name, lua_type(field));
+        }
         let _ = writeln!(
             out,
-            "\n---@param bytes string\n{owner}.decode[{topic}] = function(bytes)\n  \
-             return message(shape[{topic}], bytes, 1, #bytes)\nend"
+            "\n---@param bytes string\n---@return {}\n{owner}.decode[{topic}] = function(bytes)\n  \
+             return message(shape[{topic}], bytes, 1, #bytes)\nend",
+            record.topic
         );
+    }
+}
+
+/// One message's shape: a row per field the reader decodes, keyed by field
+/// number. A field with no row is skipped like an unknown one.
+fn shape(out: &mut String, name: &str, fields: &[Field]) {
+    let rows: Vec<String> = fields
+        .iter()
+        .filter_map(|field| {
+            let kind = decoded(&field.kind)?;
+            let mut row = format!("name = {}, kind = '{kind}'", quote(&field.name));
+            if field.label == Label::Optional {
+                row.push_str(", optional = true");
+            }
+            Some(format!("  [{}] = {{ {row} }},", field.number))
+        })
+        .collect();
+    if rows.is_empty() {
+        let _ = writeln!(out, "\nshape[{}] = {{}}", quote(name));
+    } else {
+        let _ = writeln!(
+            out,
+            "\nshape[{}] = {{\n{}\n}}",
+            quote(name),
+            rows.join("\n")
+        );
+    }
+}
+
+/// The reader's name for a kind it decodes.
+fn decoded(kind: &Kind) -> Option<&'static str> {
+    match kind {
+        Kind::Uint32 => Some("uint32"),
+        Kind::Uint64 => Some("uint64"),
+        Kind::String => Some("string"),
+        _ => None,
     }
 }
 
@@ -881,6 +922,7 @@ end
         assert!(hook.contains("\nshape['a.SetMark'] = {}\n"), "{hook}");
         let decoder = "
 ---@param bytes string
+---@return a.SetMark
 gen.decode['a.SetMark'] = function(bytes)
   return message(shape['a.SetMark'], bytes, 1, #bytes)
 end
@@ -901,6 +943,36 @@ end
         let refs: Vec<_> = records.iter().collect();
         let adopter = file(Set::Adopter("a"), Side::Sim, &refs, &run("h"));
         assert!(!adopter.contains("decode = {}"), "{adopter}");
+    }
+
+    #[test]
+    fn a_decoder_shape_has_a_row_per_field_it_reads_and_a_class_names_every_field() {
+        let command = with(
+            record("a.SetMark", 3, 0, 2),
+            vec![
+                field("label", 2, Kind::String, Label::Single),
+                field("serial", 1, Kind::Uint64, Label::Single),
+                field("note", 4, Kind::String, Label::Optional),
+                field("group", 3, Kind::Group, Label::Single),
+            ],
+        );
+        let text = shipped(Side::Sim, &[command], "h");
+        let shape = "
+shape['a.SetMark'] = {
+  [2] = { name = 'label', kind = 'string' },
+  [1] = { name = 'serial', kind = 'uint64' },
+  [4] = { name = 'note', kind = 'string', optional = true },
+}
+";
+        assert!(text.contains(shape), "{text}");
+        let class = "
+---@class a.SetMark
+---@field label string
+---@field serial integer
+---@field note string?
+---@field group table
+";
+        assert!(text.contains(class), "{text}");
     }
 
     #[test]

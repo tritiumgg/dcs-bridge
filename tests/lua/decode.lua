@@ -52,8 +52,32 @@ local unknown = key(99, 0) .. varint(300)
   .. delimited(97, 'skipped')
   .. key(96, 5) .. string.rep('\255', 4)
 
-assert(type(get_position('')) == 'table', 'an empty body is not a table')
-assert(type(set_path(unknown)) == 'table', 'unknown fields were not skipped')
+local function equal(what, actual, expected)
+  assert(actual == expected,
+    what .. ' decoded as ' .. tostring(actual) .. ', not ' .. tostring(expected))
+end
+
+-- Every field absent reads as its zero.
+local empty = get_position('')
+equal('an absent request_id', empty.request_id, 0)
+equal('an absent unit_name', empty.unit_name, '')
+
+-- The known fields read with an unknown field of each wire type around them.
+local position = get_position(unknown .. key(1, 0) .. varint(2 ^ 40 + 5)
+  .. unknown .. delimited(2, 'Enfield 1-1') .. unknown)
+equal('request_id', position.request_id, 2 ^ 40 + 5)
+equal('unit_name', position.unit_name, 'Enfield 1-1')
+
+-- uint32 keeps the low 32 bits of a ten-byte varint, which is how a sender
+-- writes -1 into it.
+local minus_one = string.rep('\255', 9) .. '\1'
+local path = set_path(key(2, 0) .. minus_one .. delimited(1, 'a') .. delimited(1, 'b'))
+equal('flags', path.flags, 2 ^ 32 - 1)
+equal('a name sent twice', path.name, 'b')
+equal('an absent serial', path.serial, 0)
+
+-- A known field in another wire type is skipped like an unknown one.
+equal('name sent as a varint', set_path(key(1, 0) .. varint(7)).name, '')
 
 -- A length padded to three bytes, as the broker writes one. ADR 0012.
 assert(type(set_path(key(97, 2) .. '\131\128\000abc')) == 'table', 'a padded length was refused')
@@ -71,5 +95,7 @@ raises('a fixed64 past the end', set_path, key(98, 1) .. '1234567', 'runs past t
 raises('a fixed32 past the end', set_path, key(96, 5) .. '123', 'runs past the end')
 
 print('ok  a decoder skips an unknown field in each skippable wire type')
+print('ok  unsigned integers and strings read, and an absent one reads as its zero')
+print('ok  a field in the wrong wire type is skipped, and one sent twice keeps the last')
 print('ok  a padded length is read')
 print('ok  wire types 3, 4, 6 and 7 raise, and so does a body cut short')
