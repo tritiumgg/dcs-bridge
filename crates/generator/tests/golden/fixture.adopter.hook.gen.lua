@@ -15,16 +15,21 @@ gen.schema_sha256 = 'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20
 
 gen.topics = {
   Chat = 'fixture.adopter.Chat',
+  SetPath = 'fixture.adopter.SetPath',
 }
 
 gen.classes = {
   ['fixture.adopter.Chat'] = 'durable',
+  ['fixture.adopter.SetPath'] = 'command',
 }
 
-gen.routes = {}
+gen.routes = {
+  ['fixture.adopter.SetPath'] = 'hook_driver',
+}
 
 gen.caps = {
   ['fixture.adopter.Chat'] = 'read',
+  ['fixture.adopter.SetPath'] = 'command',
 }
 
 gen.replies = {}

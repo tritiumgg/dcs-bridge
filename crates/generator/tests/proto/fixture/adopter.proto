@@ -2,7 +2,8 @@ syntax = "proto3";
 
 // An adopter's schema, generated into a pair of files of its own beside the
 // shipped pair. It holds a record with a field of each kind and both
-// repeated kinds, a command with a typed reply, and a hook-side record.
+// repeated kinds, a command with a typed reply, a hook-side record, and a
+// hook-side command with a field of every kind a decoder reads.
 package fixture.adopter;
 
 import "dcsbridge/broker/broker.proto";
@@ -56,4 +57,38 @@ message Chat {
   option (dcsbridge.broker.target) = TARGET_HOOK_DRIVER;
 
   string text = 1;
+}
+
+message SetPath {
+  option (dcsbridge.broker.record_class) = RECORD_CLASS_COMMAND;
+  option (dcsbridge.broker.required_capability) = CAPABILITY_COMMAND;
+  option (dcsbridge.broker.target) = TARGET_HOOK_DRIVER;
+
+  string name = 1;
+  uint32 flags = 2;
+  uint64 serial = 3;
+  int32 count = 4;
+  int64 offset = 5;
+  Fuze fuze = 6;
+  bool loop = 7;
+  double speed = 8;
+  optional int32 limit = 9;
+  repeated int32 ids = 10;
+  repeated Point waypoints = 11;
+  Point origin = 12;
+  Node tree = 13;
+  sint32 dx = 14;
+  sint64 dy = 15;
+  float scale = 16;
+  fixed32 mask = 17;
+  fixed64 seed = 18;
+  sfixed32 bias = 19;
+  sfixed64 drift = 20;
+  map<string, int32> tags = 21;
+}
+
+// A field type that contains itself, reached only by SetPath.
+message Node {
+  repeated Node children = 1;
+  int32 v = 2;
 }

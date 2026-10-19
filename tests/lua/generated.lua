@@ -87,7 +87,7 @@ DCSBridge = nil
 local adopter_hook = assert(loadfile(golden .. adopter .. 'hook.gen.lua'))(shim)
 assert(DCSBridge == nil, 'the adopter hook file wrote a global')
 shaped(adopter .. 'hook.gen.lua', adopter_hook)
-register(adopter .. 'hook.gen.lua', adopter_hook, { 1, 0, 1, 0 })
+register(adopter .. 'hook.gen.lua', adopter_hook, { 2, 1, 2, 0 })
 
 -- A sim driver reload loads the shipped file and then the adopter's again,
 -- into the same DCSBridge.code, and registers the same rows: a no-op that
