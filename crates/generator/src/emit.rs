@@ -379,38 +379,49 @@ fn put(out: &mut String, field: &Field, value: &str, depth: usize) {
     // emitter never reaches one.
 }
 
-/// A writer per field type the emitters reach, directly or through another
-/// field type, keyed by full name. A writer reads its fields from a table
-/// keyed by field name.
-fn writers(out: &mut String, records: &[&Record], types: &[Type]) {
+/// Every field type the records' fields reach, directly or through another
+/// field type, sorted by full name.
+fn reached<'a>(records: &[&Record], types: &'a [Type]) -> Vec<&'a Type> {
     let mut reached: Vec<&Type> = Vec::new();
     let mut pending: Vec<&Field> = records.iter().flat_map(|r| &r.fields).collect();
     while let Some(field) = pending.pop() {
-        let Kind::Message(name) = &field.kind else {
+        let Some(name) = field.kind.message() else {
             continue;
         };
-        if reached.iter().any(|t| &t.name == name) {
+        if reached.iter().any(|t| t.name == name) {
             continue;
         }
-        if let Some(found) = types.iter().find(|t| &t.name == name) {
+        if let Some(found) = types.iter().find(|t| t.name == name) {
             reached.push(found);
             pending.extend(&found.fields);
         }
     }
-    if reached.is_empty() {
-        return;
-    }
     reached.sort_by(|a, b| a.name.cmp(&b.name));
-    // A class per field type, by full name: two packages may each declare a
-    // Point, and LuaLS merges classes of one name. ADR 0040.
-    for found in &reached {
+    reached
+}
+
+/// A class per field type, by full name: two packages may each declare a
+/// Point, and LuaLS merges classes of one name. ADR 0040.
+fn classes(out: &mut String, types: &[&Type]) {
+    for found in types {
         let _ = writeln!(out, "\n---@class {}", found.name);
         for field in &found.fields {
             let _ = writeln!(out, "---@field {} {}", field.name, lua_type(field));
         }
     }
+}
+
+/// A writer per field type the emitters reach, keyed by full name, after a
+/// class for each. A writer reads its fields from a table keyed by field
+/// name. Returns the types it wrote a class for.
+fn writers<'a>(out: &mut String, records: &[&Record], types: &'a [Type]) -> Vec<&'a Type> {
+    let reached = reached(records, types);
+    if reached.is_empty() {
+        return reached;
+    }
+    classes(out, &reached);
     out.push_str("\nlocal put = {}\n");
-    for found in reached {
+    for found in &reached {
         let _ = writeln!(out, "\n---@param value {}", found.name);
         let _ = writeln!(out, "put[{}] = function(shim, value)", quote(&found.name));
         for field in &found.fields {
@@ -418,6 +429,7 @@ fn writers(out: &mut String, records: &[&Record], types: &[Type]) {
         }
         out.push_str("end\n");
     }
+    reached
 }
 
 /// The wire reader the decoders share, written into each file that holds a
