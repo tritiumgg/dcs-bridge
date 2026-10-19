@@ -424,6 +424,8 @@ shape['fixture.adopter.SetPath'] = {
   [19] = { name = 'bias', kind = 'sfixed32' },
   [20] = { name = 'drift', kind = 'sfixed64' },
   [21] = { name = 'tags', kind = 'map', type = 'fixture.adopter.SetPath.TagsEntry' },
+  [22] = { name = 'by_count', kind = 'int32', optional = true },
+  [23] = { name = 'by_name', kind = 'string', optional = true },
 }
 
 shape['fixture.adopter.Node'] = {
@@ -486,6 +488,8 @@ shape['fixture.adopter.SetPath.TagsEntry'] = {
 ---@field bias integer
 ---@field drift integer
 ---@field tags table
+---@field by_count integer?
+---@field by_name string?
 
 ---@param bytes string
 ---@return fixture.adopter.SetPath

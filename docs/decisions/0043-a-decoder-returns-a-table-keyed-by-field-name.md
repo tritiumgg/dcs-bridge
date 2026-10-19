@@ -40,8 +40,9 @@ adopter's sim slice adds its decoders by key (ADR 0041).
   reader in the file walks it (ADR 0044). A generated `if` chain per
   message would repeat the same reads in every branch.
 - **A field the sender left out** reads as its zero value when it is a
-  plain scalar: `0`, `false` or `''`. An `optional` scalar and a message
-  field read as `nil`. A repeated field and a map read as an empty table.
+  plain scalar: `0`, `false` or `''`. An `optional` scalar, an arm of a
+  `oneof` and a message field read as `nil`, since a sender sends each of
+  them set to zero. A repeated field and a map read as an empty table.
   That is what protobuf libraries return, so a consumer and a handler read
   one body the same way, and a handler never meets `nil` in arithmetic.
 - **Integers** read exactly below 2^53. `int32`, `enum`, `sint32` and
@@ -78,6 +79,10 @@ rounded. A handler that needs an exact id above that has no way to get one.
 
 A proto2 field's declared default is not read; it reads as its kind's zero.
 The shipped schema is proto3.
+
+A body that sets two arms of one `oneof` reads with both set, where a
+protobuf library keeps the last. A handler reads which arm is set by which
+is not `nil`.
 
 A group is not decoded. Its start tag has wire type 3, so a command whose
 sender sets a group field always raises.

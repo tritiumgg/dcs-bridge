@@ -85,6 +85,10 @@ message SetPath {
   sfixed32 bias = 19;
   sfixed64 drift = 20;
   map<string, int32> tags = 21;
+  oneof pick {
+    int32 by_count = 22;
+    string by_name = 23;
+  }
 }
 
 // A field type that contains itself, reached only by SetPath. Its map is

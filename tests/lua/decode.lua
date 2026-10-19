@@ -110,6 +110,13 @@ equal('an absent speed', absent.speed, 0)
 equal('an absent optional limit', absent.limit, nil)
 equal('an optional limit sent as zero', set_path(key(9, 0) .. varint(0)).limit, 0)
 
+-- An unset oneof arm reads as nil, and one set to zero as zero.
+equal('an unset by_count', absent.by_count, nil)
+equal('an unset by_name', absent.by_name, nil)
+local picked = set_path(key(22, 0) .. varint(0))
+equal('by_count set to zero', picked.by_count, 0)
+equal('by_name beside it', picked.by_name, nil)
+
 -- Each double as its eight little-endian bytes.
 local function speed(bytes)
   return set_path(key(8, 1) .. bytes).speed

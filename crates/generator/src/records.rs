@@ -150,7 +150,8 @@ impl Kind {
 pub enum Label {
     /// One value, absent reading as zero.
     Single,
-    /// One value, absent distinct from zero: proto3 `optional`.
+    /// One value, absent distinct from zero: proto3 `optional`, or an arm
+    /// of a oneof.
     Optional,
     /// Any number of values, in order.
     Repeated,
@@ -392,7 +393,9 @@ fn field(field: &FieldDescriptor) -> Field {
     };
     let label = if field.is_list() {
         Label::Repeated
-    } else if field.containing_oneof().is_some_and(|o| o.is_synthetic()) {
+    } else if field.containing_oneof().is_some() {
+        // proto3 `optional` is a oneof of one, and either kind of oneof
+        // sends an arm set to zero, so absent differs from zero.
         Label::Optional
     } else {
         Label::Single
