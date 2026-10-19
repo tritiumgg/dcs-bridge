@@ -85,4 +85,6 @@ code.send_to.CommandAck = function(conn_id, request_id, idempotency_key, outcome
   return code.buffer(code.emit.CommandAck, conn_id, request_id, idempotency_key, outcome, detail)
 end
 
+code.decode = {}
+
 return code

@@ -100,6 +100,14 @@ register(adopter .. 'sim.gen.lua reloaded', dofile(golden .. adopter .. 'sim.gen
 assert(sim.topics.UnitDestroyed == unit and sim.topics.RocketImpact == adopter .. 'RocketImpact',
   'a reload lost a topic')
 
+-- Both shipped files make a decode table, and the adopter's decoders sit
+-- in it after the shipped file is loaded again.
+assert(type(hook.decode) == 'table', 'the hook file has no decode table')
+assert(type(sim.decode[adopter .. 'GetPosition']) == 'function',
+  'a reload lost the adopter decoder')
+assert(type(adopter_hook.decode[adopter .. 'SetPath']) == 'function',
+  'the adopter hook file has no SetPath decoder')
+
 -- The emitters write through the real shim once it is configured: the sim
 -- files' through DCSBridge.shim, the hook files' through the shim each was
 -- loaded with. Each commit returning true says the shim took every put.
@@ -152,6 +160,7 @@ print('ok  the sim files write into DCSBridge.code and the hook files touch no g
 print('ok  an adopter slice adds its topics beside the shipped ones')
 print('ok  their tables register through the four calls with nothing refused')
 print('ok  a reload registers the same rows and adds none')
+print('ok  an adopter decoder survives a reload of the shipped file')
 print('ok  each emitter commits through the shim, a reply through begin_to')
 print('ok  send and send_to hand their emitter and every argument to the buffer')
 print('ok  both shipped files answer with send_to.CommandAck')

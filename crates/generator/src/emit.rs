@@ -191,6 +191,16 @@ pub fn file(set: Set<'_>, side: Side, records: &[&Record], run: &Run<'_>) -> Str
         }
     }
 
+    if table != "slice" {
+        let _ = writeln!(out, "\n{owner}.decode = {{}}");
+    }
+    let commands: Vec<&Record> = rows
+        .iter()
+        .copied()
+        .filter(|r| r.class == RECORD_CLASS_COMMAND)
+        .collect();
+    decoders(&mut out, owner, &commands);
+
     let _ = writeln!(out, "\nreturn {table}");
     out
 }
@@ -407,6 +417,32 @@ fn writers(out: &mut String, records: &[&Record], types: &[Type]) {
             field_puts(out, field, &index("value", &field.name), 1);
         }
         out.push_str("end\n");
+    }
+}
+
+/// The wire reader the decoders share, written into each file that holds a
+/// command. ADR 0044.
+const WIRE: &str = include_str!("wire.lua");
+
+/// A decoder per command, keyed by topic: the command's shape, a table from
+/// field number to field, handed to the reader with the body. ADR 0043.
+fn decoders(out: &mut String, owner: &str, commands: &[&Record]) {
+    if commands.is_empty() {
+        return;
+    }
+    out.push('\n');
+    out.push_str(WIRE);
+    out.push_str("\nlocal shape = {}\n");
+    for record in commands {
+        let _ = writeln!(out, "\nshape[{}] = {{}}", quote(&record.topic));
+    }
+    for record in commands {
+        let topic = quote(&record.topic);
+        let _ = writeln!(
+            out,
+            "\n---@param bytes string\n{owner}.decode[{topic}] = function(bytes)\n  \
+             return message(shape[{topic}], bytes, 1, #bytes)\nend"
+        );
     }
 }
 
@@ -834,6 +870,37 @@ end
         }
         let adopter = file(Set::Adopter("a"), Side::Sim, &[], &run);
         assert!(!adopter.contains("CommandAck"), "{adopter}");
+    }
+
+    #[test]
+    fn a_command_has_a_decoder_and_only_a_file_with_one_carries_the_reader() {
+        let records = [record("a.SetMark", 3, 2, 2), record("a.Spotted", 2, 0, 1)];
+        let hook = shipped(Side::Hook, &records, "h");
+        assert!(hook.contains("\ngen.decode = {}\n"), "{hook}");
+        assert!(hook.contains("\nlocal function varint("), "{hook}");
+        assert!(hook.contains("\nshape['a.SetMark'] = {}\n"), "{hook}");
+        let decoder = "
+---@param bytes string
+gen.decode['a.SetMark'] = function(bytes)
+  return message(shape['a.SetMark'], bytes, 1, #bytes)
+end
+";
+        assert!(hook.contains(decoder), "{hook}");
+        assert!(
+            hook.find("\nlocal function message(").unwrap() < hook.find(decoder).unwrap(),
+            "{hook}"
+        );
+
+        let sim = shipped(Side::Sim, &records, "h");
+        assert!(sim.contains("\ncode.decode = {}\n"), "{sim}");
+        assert!(
+            !sim.contains("varint"),
+            "a file with no command has a reader: {sim}"
+        );
+
+        let refs: Vec<_> = records.iter().collect();
+        let adopter = file(Set::Adopter("a"), Side::Sim, &refs, &run("h"));
+        assert!(!adopter.contains("decode = {}"), "{adopter}");
     }
 
     #[test]

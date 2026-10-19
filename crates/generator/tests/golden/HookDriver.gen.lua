@@ -61,4 +61,6 @@ gen.send_to.CommandAck = function(conn_id, request_id, idempotency_key, outcome,
   return gen.buffer(gen.emit.CommandAck, conn_id, request_id, idempotency_key, outcome, detail)
 end
 
+gen.decode = {}
+
 return gen
