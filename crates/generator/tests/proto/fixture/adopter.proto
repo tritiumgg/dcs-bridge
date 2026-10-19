@@ -87,8 +87,10 @@ message SetPath {
   map<string, int32> tags = 21;
 }
 
-// A field type that contains itself, reached only by SetPath.
+// A field type that contains itself, reached only by SetPath. Its map is
+// merged when tree arrives twice.
 message Node {
   repeated Node children = 1;
   int32 v = 2;
+  map<string, int32> labels = 3;
 }

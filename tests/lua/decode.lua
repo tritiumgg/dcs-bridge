@@ -216,6 +216,19 @@ equal('tags.b', tags.b, 2)
 equal('absent tags', next(absent.tags), nil)
 raises('a map past the cap', set_path, string.rep(entry('a', 1), 4097), 'more than 4096')
 
+-- A tree sent twice merges its labels map, and the cap counts both halves.
+local function labels(from, to)
+  local out = {}
+  for i = from, to do
+    out[#out + 1] = delimited(3, delimited(1, 'k' .. i) .. key(2, 0) .. varint(i))
+  end
+  return delimited(13, table.concat(out))
+end
+local labelled = set_path(labels(1, 2) .. labels(3, 4)).tree.labels
+equal('a merged label', labelled.k1 + labelled.k4, 5)
+raises('a merged map past the cap', set_path, labels(1, 2048) .. labels(2049, 4097),
+  'more than 4096')
+
 -- A length padded to three bytes, as the broker writes one. ADR 0012.
 assert(type(set_path(key(97, 2) .. '\131\128\000abc')) == 'table', 'a padded length was refused')
 

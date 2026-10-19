@@ -403,6 +403,11 @@ scalar.string = {
 -- Each message's shape, by full name: a table from field number to field.
 local shape = {}
 
+-- The entries each decoded map has taken, by the map's table. A map's own
+-- table counts keys, and a message seen twice merges its map into one table,
+-- so the count lives here. Weak keys, so a decoded table is not held.
+local entries = setmetatable({}, { __mode = 'k' })
+
 -- A value into its field: appended to a repeated one, which holds at most
 -- MAX_ELEMENTS, and replacing a single one.
 local function store(out, field, value)
@@ -436,8 +441,6 @@ local function message(fields, bytes, pos, limit, depth, out)
       end
     end
   end
-  -- Map entries read, by field number. A map's table counts keys only.
-  local entries = {}
   while pos <= limit do
     local key, high
     key, high, pos = varint(bytes, pos, limit)
@@ -465,13 +468,15 @@ local function message(fields, bytes, pos, limit, depth, out)
       store(out, field, value)
       pos = stop + 1
     elseif field and field.kind == 'map' and wire == 2 then
-      entries[number] = (entries[number] or 0) + 1
-      if entries[number] > MAX_ELEMENTS then
+      local map = out[field.name]
+      local count = (entries[map] or 0) + 1
+      if count > MAX_ELEMENTS then
         error('a map holds more than ' .. MAX_ELEMENTS .. ' entries', 0)
       end
+      entries[map] = count
       local start, stop = length(bytes, pos, limit)
       local entry = message(shape[field.type], bytes, start, stop, depth + 1)
-      out[field.name][entry.key] = entry.value
+      map[entry.key] = entry.value
       pos = stop + 1
     else
       pos = skip(bytes, pos, limit, wire)
