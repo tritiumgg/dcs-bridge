@@ -134,6 +134,15 @@ impl Kind {
             _ => None,
         }
     }
+
+    /// The full name of the message a field of this kind holds on the wire:
+    /// its field type, or its map entry.
+    pub fn message(&self) -> Option<&str> {
+        match self {
+            Self::Message(name) | Self::Map(name) => Some(name),
+            _ => None,
+        }
+    }
 }
 
 /// How many values a field holds.
@@ -325,11 +334,40 @@ fn field_types<'a>(
     Ok(types)
 }
 
+/// The message each field holds on the wire: a field type, or a map's entry.
 fn message_kinds(fields: &[Field]) -> impl Iterator<Item = String> + '_ {
-    fields.iter().filter_map(|f| match &f.kind {
-        Kind::Message(name) => Some(name.clone()),
-        _ => None,
-    })
+    fields
+        .iter()
+        .filter_map(|f| f.kind.message().map(str::to_owned))
+}
+
+/// The longest chain of field types below any of `commands`, each link one
+/// message nested in another. A type met again along one chain counts once
+/// and ends it, so a type that contains itself adds two levels and no more.
+/// A map's entry is a level. ADR 0045.
+pub fn depth(commands: &[&Record], types: &[Type]) -> usize {
+    fn below(fields: &[Field], types: &[Type], chain: &mut Vec<String>) -> usize {
+        message_kinds(fields)
+            .map(|name| {
+                if chain.contains(&name) {
+                    return 1;
+                }
+                let Some(found) = types.iter().find(|t| t.name == name) else {
+                    return 1;
+                };
+                chain.push(name);
+                let levels = 1 + below(&found.fields, types, chain);
+                chain.pop();
+                levels
+            })
+            .max()
+            .unwrap_or(0)
+    }
+    commands
+        .iter()
+        .map(|r| below(&r.fields, types, &mut Vec::new()))
+        .max()
+        .unwrap_or(0)
 }
 
 /// The message's fields in declaration order, which is the order the
@@ -712,6 +750,34 @@ mod tests {
             .iter()
             .find(|t| t.name == "fixture.command_kinds.Point");
         assert_eq!(point.unwrap().fields[0].kind, Kind::Float);
+    }
+
+    #[test]
+    fn depth_is_the_longest_chain_below_a_command_with_a_cycle_counted_once() {
+        let schema = schema(&request(&["fixture/adopter.proto"], None)).unwrap();
+        let named = |name: &str| {
+            schema
+                .records
+                .iter()
+                .find(|r| r.name == name)
+                .expect("the fixture names it")
+        };
+        // SetPath reaches Point and a map entry one level down, and Node,
+        // which holds Node: two levels, and the walk ends.
+        assert_eq!(depth(&[named("SetPath")], &schema.types), 2);
+        assert_eq!(depth(&[named("GetPosition")], &schema.types), 0);
+        assert_eq!(
+            depth(&[named("GetPosition"), named("SetPath")], &schema.types),
+            2
+        );
+        assert_eq!(depth(&[], &schema.types), 0);
+        // The map's entry is read as a field type.
+        assert!(
+            schema
+                .types
+                .iter()
+                .any(|t| t.name == "fixture.adopter.SetPath.TagsEntry")
+        );
     }
 
     #[test]
