@@ -165,14 +165,39 @@ scalar.string = {
   end,
 }
 
--- The fields of one message between pos and limit, by shape: a table from
--- field number to field. A field in another wire type than its kind's is
--- skipped like an unknown one, and a field seen twice keeps the last value.
-local function message(shape, bytes, pos, limit)
-  local out = {}
-  for _, field in pairs(shape) do
-    if not field.optional then
-      out[field.name] = scalar[field.kind].zero
+-- Each message's shape, by full name: a table from field number to field.
+local shape = {}
+
+-- A value into its field: appended to a repeated one, which holds at most
+-- MAX_ELEMENTS, and replacing a single one.
+local function store(out, field, value)
+  if field.repeated then
+    local list = out[field.name]
+    if #list >= MAX_ELEMENTS then
+      error('a repeated field holds more than ' .. MAX_ELEMENTS .. ' elements', 0)
+    end
+    list[#list + 1] = value
+  else
+    out[field.name] = value
+  end
+end
+
+-- The fields of one message between pos and limit, depth messages below the
+-- command, into out when the message was seen before and merges. A field in
+-- another wire type than its kind's is skipped like an unknown one, a scalar
+-- seen twice keeps the last value, and a repeated scalar reads packed or not.
+local function message(fields, bytes, pos, limit, depth, out)
+  if depth > MAX_DEPTH then
+    error('a body nests more than ' .. MAX_DEPTH .. ' messages deep', 0)
+  end
+  if out == nil then
+    out = {}
+    for _, field in pairs(fields) do
+      if field.repeated then
+        out[field.name] = {}
+      elseif not field.optional and field.kind ~= 'message' then
+        out[field.name] = scalar[field.kind].zero
+      end
     end
   end
   while pos <= limit do
@@ -182,10 +207,25 @@ local function message(shape, bytes, pos, limit)
     if high ~= 0 or number == 0 then
       error('a field number is out of range', 0)
     end
-    local field = shape[number]
+    local field = fields[number]
     local kind = field and scalar[field.kind]
+    local value
     if kind and wire == kind.wire then
-      out[field.name], pos = kind.read(bytes, pos, limit)
+      value, pos = kind.read(bytes, pos, limit)
+      store(out, field, value)
+    elseif kind and field.repeated and wire == 2 then
+      local start, stop = length(bytes, pos, limit)
+      pos = start
+      while pos <= stop do
+        value, pos = kind.read(bytes, pos, stop)
+        store(out, field, value)
+      end
+    elseif field and field.kind == 'message' and wire == 2 then
+      local start, stop = length(bytes, pos, limit)
+      local into = not field.repeated and out[field.name] or nil
+      value = message(shape[field.type], bytes, start, stop, depth + 1, into)
+      store(out, field, value)
+      pos = stop + 1
     else
       pos = skip(bytes, pos, limit, wire)
     end

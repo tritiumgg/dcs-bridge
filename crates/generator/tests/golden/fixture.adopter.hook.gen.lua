@@ -57,6 +57,12 @@ gen.send_to = {}
 
 gen.decode = {}
 
+-- The bounds every decode in this file holds to: 8 levels past the deepest
+-- the schema nests, and 4096 elements in one repeated field or map.
+-- ADR 0045.
+local MAX_DEPTH = 10
+local MAX_ELEMENTS = 4096
+
 -- The wire reader the decoders below share. A file that decodes carries its
 -- own copy, so it loads with nothing around it but the shim. Lua 5.1 has no
 -- bit library, so every read is arithmetic. ADR 0044.
@@ -224,14 +230,39 @@ scalar.string = {
   end,
 }
 
--- The fields of one message between pos and limit, by shape: a table from
--- field number to field. A field in another wire type than its kind's is
--- skipped like an unknown one, and a field seen twice keeps the last value.
-local function message(shape, bytes, pos, limit)
-  local out = {}
-  for _, field in pairs(shape) do
-    if not field.optional then
-      out[field.name] = scalar[field.kind].zero
+-- Each message's shape, by full name: a table from field number to field.
+local shape = {}
+
+-- A value into its field: appended to a repeated one, which holds at most
+-- MAX_ELEMENTS, and replacing a single one.
+local function store(out, field, value)
+  if field.repeated then
+    local list = out[field.name]
+    if #list >= MAX_ELEMENTS then
+      error('a repeated field holds more than ' .. MAX_ELEMENTS .. ' elements', 0)
+    end
+    list[#list + 1] = value
+  else
+    out[field.name] = value
+  end
+end
+
+-- The fields of one message between pos and limit, depth messages below the
+-- command, into out when the message was seen before and merges. A field in
+-- another wire type than its kind's is skipped like an unknown one, a scalar
+-- seen twice keeps the last value, and a repeated scalar reads packed or not.
+local function message(fields, bytes, pos, limit, depth, out)
+  if depth > MAX_DEPTH then
+    error('a body nests more than ' .. MAX_DEPTH .. ' messages deep', 0)
+  end
+  if out == nil then
+    out = {}
+    for _, field in pairs(fields) do
+      if field.repeated then
+        out[field.name] = {}
+      elseif not field.optional and field.kind ~= 'message' then
+        out[field.name] = scalar[field.kind].zero
+      end
     end
   end
   while pos <= limit do
@@ -241,18 +272,31 @@ local function message(shape, bytes, pos, limit)
     if high ~= 0 or number == 0 then
       error('a field number is out of range', 0)
     end
-    local field = shape[number]
+    local field = fields[number]
     local kind = field and scalar[field.kind]
+    local value
     if kind and wire == kind.wire then
-      out[field.name], pos = kind.read(bytes, pos, limit)
+      value, pos = kind.read(bytes, pos, limit)
+      store(out, field, value)
+    elseif kind and field.repeated and wire == 2 then
+      local start, stop = length(bytes, pos, limit)
+      pos = start
+      while pos <= stop do
+        value, pos = kind.read(bytes, pos, stop)
+        store(out, field, value)
+      end
+    elseif field and field.kind == 'message' and wire == 2 then
+      local start, stop = length(bytes, pos, limit)
+      local into = not field.repeated and out[field.name] or nil
+      value = message(shape[field.type], bytes, start, stop, depth + 1, into)
+      store(out, field, value)
+      pos = stop + 1
     else
       pos = skip(bytes, pos, limit, wire)
     end
   end
   return out
 end
-
-local shape = {}
 
 shape['fixture.adopter.SetPath'] = {
   [1] = { name = 'name', kind = 'string' },
@@ -264,8 +308,38 @@ shape['fixture.adopter.SetPath'] = {
   [7] = { name = 'loop', kind = 'bool' },
   [8] = { name = 'speed', kind = 'double' },
   [9] = { name = 'limit', kind = 'int32', optional = true },
-  [10] = { name = 'ids', kind = 'int32' },
+  [10] = { name = 'ids', kind = 'int32', repeated = true },
+  [11] = { name = 'waypoints', kind = 'message', repeated = true, type = 'fixture.adopter.Point' },
+  [12] = { name = 'origin', kind = 'message', type = 'fixture.adopter.Point' },
+  [13] = { name = 'tree', kind = 'message', type = 'fixture.adopter.Node' },
 }
+
+shape['fixture.adopter.Node'] = {
+  [1] = { name = 'children', kind = 'message', repeated = true, type = 'fixture.adopter.Node' },
+  [2] = { name = 'v', kind = 'int32' },
+}
+
+shape['fixture.adopter.Point'] = {
+  [1] = { name = 'x', kind = 'double' },
+  [2] = { name = 'z', kind = 'double' },
+}
+
+shape['fixture.adopter.SetPath.TagsEntry'] = {
+  [1] = { name = 'key', kind = 'string' },
+  [2] = { name = 'value', kind = 'int32' },
+}
+
+---@class fixture.adopter.Node
+---@field children fixture.adopter.Node[]
+---@field v integer
+
+---@class fixture.adopter.Point
+---@field x number
+---@field z number
+
+---@class fixture.adopter.SetPath.TagsEntry
+---@field key string
+---@field value integer
 
 ---@class fixture.adopter.SetPath
 ---@field name string
@@ -293,7 +367,7 @@ shape['fixture.adopter.SetPath'] = {
 ---@param bytes string
 ---@return fixture.adopter.SetPath
 gen.decode['fixture.adopter.SetPath'] = function(bytes)
-  return message(shape['fixture.adopter.SetPath'], bytes, 1, #bytes)
+  return message(shape['fixture.adopter.SetPath'], bytes, 1, #bytes, 0)
 end
 
 return gen

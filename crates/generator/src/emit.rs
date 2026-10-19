@@ -10,7 +10,7 @@
 
 use std::fmt::Write;
 
-use crate::records::{Field, Kind, Label, Record, Type};
+use crate::records::{self, Field, Kind, Label, Record, Type};
 
 /// The file the sim driver loads.
 pub const SIM_FILE: &str = "SimDriver.gen.lua";
@@ -174,7 +174,7 @@ pub fn file(set: Set<'_>, side: Side, records: &[&Record], run: &Run<'_>) -> Str
         outbound.push(ack);
         outbound.sort_by(|a, b| a.topic.cmp(&b.topic));
     }
-    writers(&mut out, &outbound, run.types);
+    let classed = writers(&mut out, &outbound, run.types);
     if table != "slice" {
         let _ = writeln!(out, "\n{owner}.emit = {{}}");
     }
@@ -199,7 +199,7 @@ pub fn file(set: Set<'_>, side: Side, records: &[&Record], run: &Run<'_>) -> Str
         .copied()
         .filter(|r| r.class == RECORD_CLASS_COMMAND)
         .collect();
-    decoders(&mut out, owner, &commands);
+    decoders(&mut out, owner, &commands, run.types, &classed);
 
     let _ = writeln!(out, "\nreturn {table}");
     out
@@ -436,18 +436,49 @@ fn writers<'a>(out: &mut String, records: &[&Record], types: &'a [Type]) -> Vec<
 /// command. ADR 0044.
 const WIRE: &str = include_str!("wire.lua");
 
+/// How many messages deep a recursive field type may nest past its first
+/// level, over the depth the schema needs. ADR 0045.
+pub const DEPTH_MARGIN: usize = 8;
+
+/// The most elements one repeated field or map holds in one message.
+/// ADR 0045.
+pub const MAX_ELEMENTS: usize = 4096;
+
 /// A decoder per command, keyed by topic: the command's shape, a table from
-/// field number to field, handed to the reader with the body. ADR 0043.
-fn decoders(out: &mut String, owner: &str, commands: &[&Record]) {
+/// field number to field, handed to the reader with the body, and a shape
+/// per field type the commands reach. `classed` names the field types a
+/// class was already written for. ADR 0043.
+fn decoders(
+    out: &mut String,
+    owner: &str,
+    commands: &[&Record],
+    types: &[Type],
+    classed: &[&Type],
+) {
     if commands.is_empty() {
         return;
     }
-    out.push('\n');
+    let reached = reached(commands, types);
+    let depth = records::depth(commands, types) + DEPTH_MARGIN;
+    let _ = writeln!(
+        out,
+        "\n-- The bounds every decode in this file holds to: {DEPTH_MARGIN} levels past \
+         the deepest\n-- the schema nests, and {MAX_ELEMENTS} elements in one repeated \
+         field or map.\n-- ADR 0045.\nlocal MAX_DEPTH = {depth}\nlocal MAX_ELEMENTS = \
+         {MAX_ELEMENTS}\n"
+    );
     out.push_str(WIRE);
-    out.push_str("\nlocal shape = {}\n");
     for record in commands {
         shape(out, &record.topic, &record.fields);
     }
+    for found in &reached {
+        shape(out, &found.name, &found.fields);
+    }
+    let unclassed: Vec<&Type> = reached
+        .into_iter()
+        .filter(|t| !classed.iter().any(|c| c.name == t.name))
+        .collect();
+    classes(out, &unclassed);
     for record in commands {
         let topic = quote(&record.topic);
         let _ = writeln!(out, "\n---@class {}", record.topic);
@@ -457,7 +488,7 @@ fn decoders(out: &mut String, owner: &str, commands: &[&Record]) {
         let _ = writeln!(
             out,
             "\n---@param bytes string\n---@return {}\n{owner}.decode[{topic}] = function(bytes)\n  \
-             return message(shape[{topic}], bytes, 1, #bytes)\nend",
+             return message(shape[{topic}], bytes, 1, #bytes, 0)\nend",
             record.topic
         );
     }
@@ -471,8 +502,13 @@ fn shape(out: &mut String, name: &str, fields: &[Field]) {
         .filter_map(|field| {
             let kind = decoded(&field.kind)?;
             let mut row = format!("name = {}, kind = '{kind}'", quote(&field.name));
-            if field.label == Label::Optional {
-                row.push_str(", optional = true");
+            match field.label {
+                Label::Optional => row.push_str(", optional = true"),
+                Label::Repeated => row.push_str(", repeated = true"),
+                Label::Single => {}
+            }
+            if let Kind::Message(name) = &field.kind {
+                let _ = write!(row, ", type = {}", quote(name));
             }
             Some(format!("  [{}] = {{ {row} }},", field.number))
         })
@@ -499,6 +535,7 @@ fn decoded(kind: &Kind) -> Option<&'static str> {
         Kind::Enum => Some("enum"),
         Kind::Boolean => Some("bool"),
         Kind::Double => Some("double"),
+        Kind::Message(_) => Some("message"),
         Kind::String => Some("string"),
         _ => None,
     }
@@ -941,7 +978,7 @@ end
 ---@param bytes string
 ---@return a.SetMark
 gen.decode['a.SetMark'] = function(bytes)
-  return message(shape['a.SetMark'], bytes, 1, #bytes)
+  return message(shape['a.SetMark'], bytes, 1, #bytes, 0)
 end
 ";
         assert!(hook.contains(decoder), "{hook}");
@@ -999,6 +1036,76 @@ shape['a.SetMark'] = {
 ---@field at number
 ";
         assert!(text.contains(class), "{text}");
+    }
+
+    #[test]
+    fn a_decoder_reaches_its_field_types_under_bounds_from_the_schema() {
+        let point = Kind::Message("a.Point".into());
+        let node = Kind::Message("a.Node".into());
+        let records = [
+            with(
+                record("a.SetPath", 3, 0, 2),
+                vec![
+                    field("waypoints", 1, point.clone(), Label::Repeated),
+                    field("tree", 2, node.clone(), Label::Single),
+                    field("ids", 3, Kind::Int32, Label::Repeated),
+                ],
+            ),
+            with(
+                record("a.Spotted", 2, 0, 1),
+                vec![field("at", 1, point, Label::Single)],
+            ),
+        ];
+        let types = [
+            Type {
+                name: "a.Node".into(),
+                fields: vec![field("children", 1, node, Label::Repeated)],
+            },
+            Type {
+                name: "a.Point".into(),
+                fields: vec![field("x", 1, Kind::Double, Label::Single)],
+            },
+        ];
+        let run = Run {
+            types: &types,
+            ..run("h")
+        };
+        let refs: Vec<_> = records.iter().collect();
+        let text = file(Set::Shipped, Side::Sim, &refs, &run);
+        // Node holds Node: two levels, then the margin.
+        assert!(
+            text.contains(&format!(
+                "\nlocal MAX_DEPTH = {}\nlocal MAX_ELEMENTS = 4096\n",
+                2 + DEPTH_MARGIN
+            )),
+            "{text}"
+        );
+        let command = "
+shape['a.SetPath'] = {
+  [1] = { name = 'waypoints', kind = 'message', repeated = true, type = 'a.Point' },
+  [2] = { name = 'tree', kind = 'message', type = 'a.Node' },
+  [3] = { name = 'ids', kind = 'int32', repeated = true },
+}
+";
+        assert!(text.contains(command), "{text}");
+        assert!(
+            text.contains(
+                "\nshape['a.Node'] = {\n  [1] = { name = 'children', kind = 'message', \
+                 repeated = true, type = 'a.Node' },\n}\n"
+            ),
+            "{text}"
+        );
+        assert!(
+            text.contains("\nshape['a.Point'] = {\n  [1] = { name = 'x', kind = 'double' },\n}\n"),
+            "{text}"
+        );
+        // Point has a class from the writers, and Node one from the decoders.
+        assert_eq!(text.matches("---@class a.Point\n").count(), 1, "{text}");
+        assert_eq!(text.matches("---@class a.Node\n").count(), 1, "{text}");
+        assert!(
+            text.find("local MAX_DEPTH").unwrap() < text.find("local function message(").unwrap(),
+            "{text}"
+        );
     }
 
     #[test]

@@ -259,6 +259,23 @@ mod tests {
     }
 
     #[test]
+    fn no_parameter_sets_a_decode_bound() {
+        let contents = |parameter: &str| {
+            let response = respond(&request(&["fixture/adopter.proto"], Some(parameter)));
+            assert_eq!(response.error, None);
+            response
+                .file
+                .into_iter()
+                .map(|f| f.content.unwrap_or_default())
+                .collect::<Vec<_>>()
+        };
+        let plain = contents(&abc());
+        assert!(plain[1].contains("\nlocal MAX_DEPTH = "), "{}", plain[1]);
+        let bounded = contents(&format!("max_depth=1,MAX_DEPTH=1,max_elements=1,{}", abc()));
+        assert_eq!(plain, bounded);
+    }
+
+    #[test]
     fn a_request_without_the_schema_parameter_fails_naming_it() {
         let response = respond(&CodeGeneratorRequest::default().encode_to_vec());
         let error = response.error.expect("no error without the parameter");

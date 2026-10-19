@@ -124,6 +124,60 @@ equal('-infinity', speed('\0\0\0\0\0\0\240\255'), -math.huge)
 local nan = speed('\0\0\0\0\0\0\248\127')
 assert(nan ~= nan, 'NaN decoded as ' .. tostring(nan))
 
+-- Nested messages: origin and waypoints are Points, x and z doubles.
+local one_and_a_half, minus_a_quarter = '\0\0\0\0\0\0\248\63', '\0\0\0\0\0\0\208\191'
+local point = key(1, 1) .. one_and_a_half .. key(2, 1) .. minus_a_quarter
+local nested = set_path(delimited(12, point) .. delimited(11, point)
+  .. delimited(11, key(1, 1) .. one_and_a_half))
+equal('origin.x', nested.origin.x, 1.5)
+equal('origin.z', nested.origin.z, -0.25)
+equal('the waypoints', #nested.waypoints, 2)
+equal('an absent z in a waypoint', nested.waypoints[2].z, 0)
+equal('an absent origin', absent.origin, nil)
+equal('absent waypoints', #absent.waypoints, 0)
+equal('absent ids', #absent.ids, 0)
+
+-- A message sent twice merges.
+local merged = set_path(delimited(12, key(1, 1) .. one_and_a_half)
+  .. delimited(12, key(2, 1) .. minus_a_quarter)).origin
+equal('a merged x', merged.x, 1.5)
+equal('a merged z', merged.z, -0.25)
+
+-- A repeated scalar reads packed and one per tag, mixed in one body.
+local ids = set_path(delimited(10, varint(1) .. varint(2)) .. key(10, 0) .. varint(3)
+  .. delimited(10, varint(4) .. negative(-1))).ids
+equal('the ids', table.concat(ids, ','), '1,2,3,4,-1')
+
+-- A Node levels deep below tree, each holding its level in v.
+local function tree(levels)
+  local body = key(2, 0) .. varint(levels)
+  for level = levels - 1, 1, -1 do
+    body = key(2, 0) .. varint(level) .. delimited(1, body)
+  end
+  return delimited(13, body)
+end
+local node = set_path(tree(3)).tree
+equal('the tree root', node.v, 1)
+equal('the third level', node.children[1].children[1].v, 3)
+
+-- SetPath's schema nests two levels deep, tree and then Node within Node,
+-- and the margin is 8. ADR 0045.
+local max_depth = 10
+equal('a tree at the bound', select(2, pcall(set_path, tree(max_depth))).tree.v, 1)
+raises('a tree past the bound', set_path, tree(max_depth + 1), 'more than 10 messages deep')
+
+-- At most 4096 elements in one repeated field, however they arrive.
+local function ones(n)
+  return string.rep(varint(1), n)
+end
+equal('ids at the cap', #set_path(delimited(10, ones(4096))).ids, 4096)
+raises('ids past the cap, packed', set_path, delimited(10, ones(4097)), 'more than 4096')
+raises('ids past the cap, in two chunks', set_path,
+  delimited(10, ones(2048)) .. delimited(10, ones(2049)), 'more than 4096')
+raises('ids past the cap, one per tag', set_path,
+  string.rep(key(10, 0) .. varint(1), 4097), 'more than 4096')
+raises('waypoints past the cap', set_path, string.rep(delimited(11, ''), 4097), 'more than 4096')
+
 -- A length padded to three bytes, as the broker writes one. ADR 0012.
 assert(type(set_path(key(97, 2) .. '\131\128\000abc')) == 'table', 'a padded length was refused')
 
@@ -145,5 +199,7 @@ print('ok  a field in the wrong wire type is skipped, and one sent twice keeps t
 print('ok  int32, int64 and enum read negatives from ten bytes, and bool reads')
 print('ok  a double reads, zeros, the infinities, NaN and a subnormal included')
 print('ok  an absent optional field reads as nil, and one sent as zero as zero')
+print('ok  nested messages read and merge, and a repeated scalar reads packed or not')
+print('ok  a body past the depth bound or the element cap raises')
 print('ok  a padded length is read')
 print('ok  wire types 3, 4, 6 and 7 raise, and so does a body cut short')
