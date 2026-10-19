@@ -251,6 +251,16 @@ raises('a length past the end', set_path, key(97, 2) .. varint(5) .. 'abc', 'run
 raises('a fixed64 past the end', set_path, key(98, 1) .. '1234567', 'runs past the end')
 raises('a fixed32 past the end', set_path, key(96, 5) .. '123', 'runs past the end')
 
+-- A nested message, a packed chunk and a map entry each end at their own
+-- length, though the body goes on past it.
+raises('a double cut short by its Point', set_path,
+  delimited(12, key(1, 1) .. '\0\0\0\0') .. key(9, 0) .. '\0' .. key(9, 0) .. '\0',
+  'runs past the end')
+raises('a varint cut short by its packed chunk', set_path,
+  delimited(10, '\128') .. '\1', 'runs past the end')
+raises('a varint cut short by its map entry', set_path,
+  delimited(21, delimited(1, 'a') .. key(2, 0) .. '\128') .. '\1', 'runs past the end')
+
 print('ok  a decoder skips an unknown field in each skippable wire type')
 print('ok  unsigned integers and strings read, and an absent one reads as its zero')
 print('ok  a field in the wrong wire type is skipped, and one sent twice keeps the last')
