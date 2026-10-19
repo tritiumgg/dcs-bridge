@@ -1,6 +1,6 @@
 # Working state
 
-**Last updated:** 2026-10-18
+**Last updated:** 2026-10-19
 
 The handoff between sessions. Read it first; update it before a session ends,
 not only when a task finishes. Stamp the date above each time; it carries a
@@ -18,7 +18,7 @@ is just deleted. Write entries as one or two lines, never paragraphs.
 
 ## In progress
 
-Nothing. 3.3 is built; 3.6 is next.
+Nothing. 3.6 is built; 4.1 is next.
 
 *One task at most. Say what is done, what is not, and where to resume. Say what
 is committed and what is only in the working tree. Say what is knowingly
@@ -26,22 +26,22 @@ broken. Empty this when the task closes.*
 
 ## Just finished
 
+- **3.6** — decoders under `decode`, every kind but a group, `MAX_DEPTH` and `MAX_ELEMENTS` from the schema, fed hand-built bodies under stock Lua; agent-verified. PR #92, ADR 0043 to 0045.
 - **3.3** — emitters, `send`/`send_to`, `CommandAck` and split output, golden-tested and called through stock Lua; agent-verified. PR #91, ADR 0040 to 0042.
 - **3.1** — the generator's tables, golden-tested and loaded by stock Lua; agent-verified. PR #90, ADR 0036 to 0039.
-- **2.C6** — dropped, no `mock`, and M2.3's rows ahead re-measured. PR #89, ADR 0035.
 
 *The last three at most, one line each. Git log holds the rest.*
 
 ## Next
 
-**Task 3.6** — decoders, one per `COMMAND` message, placed by target, on the
-field rows and `fixture.adopter` goldens 3.3 left in `crates/generator`. Its
-depth and repetition bounds are generator constants from the schema, beside
-the broker's `MAX_DEPTH` (ADR 0012). Its brief settles who verifies.
+**Task 4.1** — thin hook driver loader, `ENABLED` flag, load banner, and
+`Logs\DCSBridge\DCSBridge.log` rotated at its cap; it owes 2.2's banner. Phase 4
+rests on the policy-gate decision in Carries forward. Its brief settles who
+verifies.
 
 ## After that
 
-- **Phase 4** follows 3.6; 3.5 waits behind 7.6.
+- **4.2** onward through Phase 4; 3.5 waits behind 7.6.
 
 ## Carries forward
 
