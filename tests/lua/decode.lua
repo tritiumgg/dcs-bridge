@@ -178,6 +178,44 @@ raises('ids past the cap, one per tag', set_path,
   string.rep(key(10, 0) .. varint(1), 4097), 'more than 4096')
 raises('waypoints past the cap', set_path, string.rep(delimited(11, ''), 4097), 'more than 4096')
 
+-- Zigzag varints: n reads from 2n, and -n from 2n - 1.
+local zigzag = set_path(key(14, 0) .. varint(9) .. key(15, 0) .. varint(2 ^ 41 - 1))
+equal('dx at -5', zigzag.dx, -5)
+equal('dy at -2^40', zigzag.dy, -2 ^ 40)
+equal('dx at 7', set_path(key(14, 0) .. varint(14)).dx, 7)
+equal('dy at 2^40', set_path(key(15, 0) .. varint(2 ^ 41)).dy, 2 ^ 40)
+
+-- Fixed widths, little-endian.
+local widths = set_path(key(17, 5) .. '\255\255\255\255'
+  .. key(18, 1) .. '\255\255\255\255\255\255\31\0'
+  .. key(19, 5) .. '\254\255\255\255'
+  .. key(20, 1) .. '\254' .. string.rep('\255', 7))
+equal('mask', widths.mask, 2 ^ 32 - 1)
+equal('seed at 2^53 - 1', widths.seed, 2 ^ 53 - 1)
+equal('bias at -2', widths.bias, -2)
+equal('drift at -2', widths.drift, -2)
+
+-- Each float as its four little-endian bytes.
+local function scale(bytes)
+  return set_path(key(16, 5) .. bytes).scale
+end
+equal('1.5 as a float', scale('\0\0\192\63'), 1.5)
+equal('-0.25 as a float', scale('\0\0\128\190'), -0.25)
+equal('the least subnormal float', scale('\1\0\0\0'), math.ldexp(1, -149))
+equal('infinity as a float', scale('\0\0\128\127'), math.huge)
+local float_nan = scale('\0\0\192\127')
+assert(float_nan ~= float_nan, 'a float NaN decoded as ' .. tostring(float_nan))
+
+-- A map, each entry a key and a value; a later entry for a key replaces it.
+local function entry(name, value)
+  return delimited(21, delimited(1, name) .. key(2, 0) .. varint(value))
+end
+local tags = set_path(entry('a', 1) .. entry('b', 2) .. entry('a', 3)).tags
+equal('tags.a', tags.a, 3)
+equal('tags.b', tags.b, 2)
+equal('absent tags', next(absent.tags), nil)
+raises('a map past the cap', set_path, string.rep(entry('a', 1), 4097), 'more than 4096')
+
 -- A length padded to three bytes, as the broker writes one. ADR 0012.
 assert(type(set_path(key(97, 2) .. '\131\128\000abc')) == 'table', 'a padded length was refused')
 
@@ -201,5 +239,6 @@ print('ok  a double reads, zeros, the infinities, NaN and a subnormal included')
 print('ok  an absent optional field reads as nil, and one sent as zero as zero')
 print('ok  nested messages read and merge, and a repeated scalar reads packed or not')
 print('ok  a body past the depth bound or the element cap raises')
+print('ok  zigzag, fixed-width, float and map fields read')
 print('ok  a padded length is read')
 print('ok  wire types 3, 4, 6 and 7 raise, and so does a body cut short')

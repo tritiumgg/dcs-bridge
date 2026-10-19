@@ -276,6 +276,27 @@ mod tests {
     }
 
     #[test]
+    fn a_decoder_reads_every_kind_but_a_group() {
+        let response = respond(&request(&["fixture/command_kinds.proto"], Some(&abc())));
+        assert_eq!(response.error, None);
+        let sim = response.file[0].content.as_deref().unwrap_or_default();
+        let shape = "
+shape['fixture.command_kinds.SetAltitude'] = {
+  [1] = { name = 'a', kind = 'sint32' },
+  [2] = { name = 'b', kind = 'sint64' },
+  [3] = { name = 'c', kind = 'float' },
+  [4] = { name = 'd', kind = 'fixed32' },
+  [5] = { name = 'e', kind = 'fixed64' },
+  [6] = { name = 'f', kind = 'sfixed32' },
+  [7] = { name = 'g', kind = 'sfixed64' },
+  [8] = { name = 'h', kind = 'map', type = 'fixture.command_kinds.SetAltitude.HEntry' },
+  [11] = { name = 'at', kind = 'message', type = 'fixture.command_kinds.Point' },
+}
+";
+        assert!(sim.contains(shape), "{sim}");
+    }
+
+    #[test]
     fn a_request_without_the_schema_parameter_fails_naming_it() {
         let response = respond(&CodeGeneratorRequest::default().encode_to_vec());
         let error = response.error.expect("no error without the parameter");

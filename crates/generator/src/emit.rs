@@ -507,7 +507,7 @@ fn shape(out: &mut String, name: &str, fields: &[Field]) {
                 Label::Repeated => row.push_str(", repeated = true"),
                 Label::Single => {}
             }
-            if let Kind::Message(name) = &field.kind {
+            if let Some(name) = field.kind.message() {
                 let _ = write!(row, ", type = {}", quote(name));
             }
             Some(format!("  [{}] = {{ {row} }},", field.number))
@@ -525,7 +525,8 @@ fn shape(out: &mut String, name: &str, fields: &[Field]) {
     }
 }
 
-/// The reader's name for a kind it decodes.
+/// The reader's name for a kind it decodes. A group is not decoded: its
+/// start tag's wire type raises. ADR 0043.
 fn decoded(kind: &Kind) -> Option<&'static str> {
     match kind {
         Kind::Int32 => Some("int32"),
@@ -533,11 +534,19 @@ fn decoded(kind: &Kind) -> Option<&'static str> {
         Kind::Uint32 => Some("uint32"),
         Kind::Uint64 => Some("uint64"),
         Kind::Enum => Some("enum"),
-        Kind::Boolean => Some("bool"),
+        Kind::Sint32 => Some("sint32"),
+        Kind::Sint64 => Some("sint64"),
+        Kind::Fixed32 => Some("fixed32"),
+        Kind::Fixed64 => Some("fixed64"),
+        Kind::Sfixed32 => Some("sfixed32"),
+        Kind::Sfixed64 => Some("sfixed64"),
+        Kind::Float => Some("float"),
         Kind::Double => Some("double"),
-        Kind::Message(_) => Some("message"),
         Kind::String => Some("string"),
-        _ => None,
+        Kind::Boolean => Some("bool"),
+        Kind::Message(_) => Some("message"),
+        Kind::Map(_) => Some("map"),
+        Kind::Group => None,
     }
 }
 

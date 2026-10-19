@@ -304,6 +304,93 @@ scalar.double = {
   end,
 }
 
+scalar.sint32 = {
+  wire = 0,
+  zero = 0,
+  read = function(bytes, pos, limit)
+    local lo, _, after = varint(bytes, pos, limit)
+    if lo % 2 == 1 then
+      return -(lo + 1) / 2, after
+    end
+    return lo / 2, after
+  end,
+}
+
+-- Halved through the high bits, so the value is exact below 2^53.
+scalar.sint64 = {
+  wire = 0,
+  zero = 0,
+  read = function(bytes, pos, limit)
+    local lo, hi, after = varint(bytes, pos, limit)
+    local half = hi * 2 ^ 31 + floor(lo / 2)
+    if lo % 2 == 1 then
+      return -half - 1, after
+    end
+    return half, after
+  end,
+}
+
+local function le32(b1, b2, b3, b4)
+  return b1 + b2 * 2 ^ 8 + b3 * 2 ^ 16 + b4 * 2 ^ 24
+end
+
+scalar.fixed32 = {
+  wire = 5,
+  zero = 0,
+  read = function(bytes, pos, limit)
+    return le32(fixed(bytes, pos, limit, 4)), pos + 4
+  end,
+}
+
+scalar.sfixed32 = {
+  wire = 5,
+  zero = 0,
+  read = function(bytes, pos, limit)
+    return signed32(le32(fixed(bytes, pos, limit, 4))), pos + 4
+  end,
+}
+
+scalar.fixed64 = {
+  wire = 1,
+  zero = 0,
+  read = function(bytes, pos, limit)
+    local b1, b2, b3, b4, b5, b6, b7, b8 = fixed(bytes, pos, limit, 8)
+    return le32(b5, b6, b7, b8) * 2 ^ 32 + le32(b1, b2, b3, b4), pos + 8
+  end,
+}
+
+scalar.sfixed64 = {
+  wire = 1,
+  zero = 0,
+  read = function(bytes, pos, limit)
+    local b1, b2, b3, b4, b5, b6, b7, b8 = fixed(bytes, pos, limit, 8)
+    return signed32(le32(b5, b6, b7, b8)) * 2 ^ 32 + le32(b1, b2, b3, b4), pos + 8
+  end,
+}
+
+-- An IEEE 754 single from its four little-endian bytes.
+scalar.float = {
+  wire = 5,
+  zero = 0,
+  read = function(bytes, pos, limit)
+    local b1, b2, b3, b4 = fixed(bytes, pos, limit, 4)
+    local exponent = b4 % 128 * 2 + floor(b3 / 128)
+    local mantissa = b3 % 128 * 2 ^ 16 + b2 * 2 ^ 8 + b1
+    local value
+    if exponent == 255 then
+      value = mantissa == 0 and math.huge or 0 / 0
+    elseif exponent == 0 then
+      value = ldexp(mantissa, -149)
+    else
+      value = ldexp(mantissa + 2 ^ 23, exponent - 150)
+    end
+    if b4 >= 128 then
+      value = -value
+    end
+    return value, pos + 4
+  end,
+}
+
 scalar.string = {
   wire = 2,
   zero = '',
@@ -333,7 +420,8 @@ end
 -- The fields of one message between pos and limit, depth messages below the
 -- command, into out when the message was seen before and merges. A field in
 -- another wire type than its kind's is skipped like an unknown one, a scalar
--- seen twice keeps the last value, and a repeated scalar reads packed or not.
+-- seen twice keeps the last value, a repeated scalar reads packed or not,
+-- and a map reads as a table from each entry's key to its value.
 local function message(fields, bytes, pos, limit, depth, out)
   if depth > MAX_DEPTH then
     error('a body nests more than ' .. MAX_DEPTH .. ' messages deep', 0)
@@ -341,13 +429,15 @@ local function message(fields, bytes, pos, limit, depth, out)
   if out == nil then
     out = {}
     for _, field in pairs(fields) do
-      if field.repeated then
+      if field.repeated or field.kind == 'map' then
         out[field.name] = {}
       elseif not field.optional and field.kind ~= 'message' then
         out[field.name] = scalar[field.kind].zero
       end
     end
   end
+  -- Map entries read, by field number. A map's table counts keys only.
+  local entries = {}
   while pos <= limit do
     local key, high
     key, high, pos = varint(bytes, pos, limit)
@@ -373,6 +463,15 @@ local function message(fields, bytes, pos, limit, depth, out)
       local into = not field.repeated and out[field.name] or nil
       value = message(shape[field.type], bytes, start, stop, depth + 1, into)
       store(out, field, value)
+      pos = stop + 1
+    elseif field and field.kind == 'map' and wire == 2 then
+      entries[number] = (entries[number] or 0) + 1
+      if entries[number] > MAX_ELEMENTS then
+        error('a map holds more than ' .. MAX_ELEMENTS .. ' entries', 0)
+      end
+      local start, stop = length(bytes, pos, limit)
+      local entry = message(shape[field.type], bytes, start, stop, depth + 1)
+      out[field.name][entry.key] = entry.value
       pos = stop + 1
     else
       pos = skip(bytes, pos, limit, wire)
