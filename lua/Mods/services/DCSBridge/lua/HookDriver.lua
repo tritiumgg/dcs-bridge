@@ -444,6 +444,10 @@ end
 -- The broker module, where the release zip puts it.
 local MODULE = lfs.writedir() .. 'Mods/services/DCSBridge/bin/lua-dcsbridge.dll'
 
+-- The hook driver's generated tables and the schema hash they were built
+-- from, beside this file in the release zip. ADR 0055.
+local GEN = lfs.writedir() .. 'Mods/services/DCSBridge/lua/HookDriver.gen.lua'
+
 -- The broker module's call surface this file is written against. The
 -- module puts its own on the table it opens with, and start compares the
 -- two before anything is configured. A Rust test in crates/lua-module
@@ -480,6 +484,25 @@ local function fail(reason)
   error(reason, 0)
 end
 
+-- The generated file's table, run with the shim its emitters write
+-- through. Every release carries the file, so one that is missing, raises
+-- or carries no hash is a broken install and stops the start. ADR 0055.
+local function load_gen(shim)
+  local chunk, err = loadfile(GEN)
+  if not chunk then
+    fail('the generated file did not load: ' .. tostring(err))
+  end
+  local ran, gen = pcall(chunk, shim)
+  if not ran then
+    fail('the generated file raised: ' .. GEN .. ': ' .. tostring(gen))
+  end
+  if type(gen) ~= 'table' or type(gen.schema_sha256) ~= 'string'
+    or not gen.schema_sha256:find('^' .. string.rep('%x', 64) .. '$') then
+    fail('the generated file carries no schema_sha256: ' .. GEN)
+  end
+  return gen
+end
+
 -- Called once by the loader, which wrote ctx.banner to dcs.log already and
 -- logs anything this raises there. The banner comes first, at the default
 -- level, so DCSBridge.log names the build even when the file does not read
@@ -512,6 +535,11 @@ function driver.start(ctx)
       .. ' and this hook driver is interface ' .. INTERFACE
       .. ': they are from different builds')
   end
+  -- Loaded before configure, so a broken install stops with nothing bound.
+  -- Its hash rides the first configure for the broker to compare with the
+  -- schema it is handed. ADR 0052.
+  state.gen = load_gen(shim)
+  state.broker.schema_sha256 = state.gen.schema_sha256
   -- Every broker key in one call, so the first call is the whole
   -- configuration and nothing is left at a default the file changed.
   local configured, answer = pcall(shim.configure, state.broker)

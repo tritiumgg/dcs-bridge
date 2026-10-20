@@ -1,10 +1,11 @@
 -- The hook driver's start: the banner first, then Config/DCSBridge.lua read
 -- and its log keys handed to the logger, so every line after the banner is
 -- written at the file's level, then the broker module opened, its interface
--- compared with the driver's, and handed every broker key in one call. A
--- file that does not read stops the start before the module opens, and a
--- module from another build stops it before configure. ADR 0048, ADR 0050,
--- ADR 0051, ADR 0054.
+-- compared with the driver's, the generated file loaded, and the module
+-- handed every broker key and the generated hash in one call. A file that
+-- does not read stops the start before the module opens, and a module from
+-- another build or a missing generated file stops it before configure.
+-- ADR 0048, ADR 0050, ADR 0051, ADR 0054, ADR 0055.
 --
 -- Each case installs the hook driver into a scratch write directory and
 -- runs its start directly, under a stock Lua 5.1 with lfs and DCS's log
@@ -24,6 +25,10 @@ local dcs = require('dcs')
 local ROOT = dcs.root()
 local DRIVER = 'Mods/services/DCSBridge/lua/HookDriver.lua'
 local DLL = 'Mods/services/DCSBridge/bin/lua-dcsbridge.dll'
+local GEN = 'Mods/services/DCSBridge/lua/HookDriver.gen.lua'
+
+-- The hash of abc, which the golden generated files carry.
+local ABC = 'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad'
 
 local scratch = {}
 
@@ -44,13 +49,18 @@ local function write(path, text)
   f:close()
 end
 
--- A write directory with Logs/ and the hook driver in it, and the config
--- file when given. Returns the driver and the directory.
-local function install(config)
+-- A write directory with Logs/, the hook driver and the generator's golden
+-- HookDriver.gen.lua in it, and the config file when given. A path in
+-- omit is left out. Returns the driver and the directory.
+local function install(config, omit)
+  omit = omit or {}
   local dir = dcs.scratch()
   scratch[#scratch + 1] = dir
   assert(os.execute("mkdir -p '" .. dir .. "Logs'") == 0)
   write(dir .. DRIVER, assert(read(ROOT .. 'lua/' .. DRIVER)))
+  if not omit[GEN] then
+    write(dir .. GEN, assert(read(ROOT .. 'crates/generator/tests/golden/HookDriver.gen.lua')))
+  end
   if config then
     write(dir .. 'Config/DCSBridge.lua', config)
   end
@@ -86,7 +96,7 @@ local function lines(dir)
 end
 
 -- Absent: the banner, the defaults, and one configure carrying exactly the
--- broker's keys, each at its default.
+-- broker's keys, each at its default, and the generated file's hash.
 do
   local driver, dir = install()
   local open, calls = recording(driver)
@@ -98,7 +108,8 @@ do
   for _ in pairs(handed) do
     n = n + 1
   end
-  assert(n == 30, n .. ' keys handed to the broker, expected 30')
+  assert(n == 31, n .. ' keys handed to the broker, expected 30 and schema_sha256')
+  assert(handed.schema_sha256 == ABC, 'schema_sha256 was handed as ' .. tostring(handed.schema_sha256))
   for _, row in ipairs(driver.config.KEYS) do
     local name, default, owner = row[1], row[2], row[3]
     if owner ~= 'broker' then
@@ -239,6 +250,26 @@ do
   assert(#calls == 0, 'configure was called against another interface')
   local own = lines(dir)
   assert(own[#own] == 'ERROR ' .. err, 'the mismatch is not logged: ' .. tostring(own[#own]))
+end
+
+-- No generated file, or one with no hash: start raises naming the path,
+-- and configure is never called.
+do
+  local driver, dir = install(nil, { [GEN] = true })
+  local open, calls = recording(driver)
+  driver.open = open
+  local started, err = pcall(driver.start, { banner = 'the banner' })
+  assert(not started, 'start ran with no generated file')
+  assert(err:find(dir .. GEN, 1, true), 'the reason does not name the file: ' .. tostring(err))
+  assert(#calls == 0, 'configure was called with no generated file')
+  local own = lines(dir)
+  assert(own[#own] == 'ERROR ' .. err, 'the failure is not logged: ' .. tostring(own[#own]))
+
+  write(dir .. GEN, 'return { schema_sha256 = "abc" }')
+  started, err = pcall(driver.start, { banner = 'the banner' })
+  assert(not started and err:find('carries no schema_sha256', 1, true),
+    'a short hash was taken: ' .. tostring(err))
+  assert(#calls == 0, 'configure was called with a short hash')
 end
 
 -- The real module, asked for at the shipped path and opened at the
