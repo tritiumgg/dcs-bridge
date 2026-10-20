@@ -40,6 +40,10 @@ not. The release version says nothing about the wire protocol. The bridge
 compares its protocol, interface, grammar and state versions at runtime, and
 each of those moves only for its own reason.
 
+A hook driver and a broker from different builds do not start, and nothing
+listens. `Logs\DCSBridge\DCSBridge.log` and `Logs\dcs.log` name both interface
+versions. Extract the same release's zip again to fix it.
+
 ## Install
 
 Installation is not final. The current releases contain placeholder files.
@@ -62,8 +66,15 @@ Saved Games\DCS\
   Scripts\Hooks\DCSBridge.lua      The loader. DCS loads it at start.
   Mods\services\DCSBridge\         Everything the bridge ships.
     lua\HookDriver.lua             The hook driver, which the loader runs.
+    lua\HookDriver.gen.lua         The hook driver's generated tables, and the
+                                   hash of the schema they were built from.
     bin\lua-dcsbridge.dll          The broker, which the hook driver loads.
+    schema.pb                      The compiled schema. The hook driver hands
+                                   it to the broker at start.
 ```
+
+The hook driver does not start when `HookDriver.gen.lua` or `schema.pb` is
+missing, and the reason names the file.
 
 A working install writes a banner line to `Logs\dcs.log` at DCS start, under
 `DCSBridge`. It names the loader and the hook driver with each file's size
@@ -111,11 +122,16 @@ record class, so a flood of records a consumer can afford to lose pushes out
 none of the others. Their sizes are `ring_out_lossy_records`,
 `ring_out_durable_records` and `ring_out_lifecycle_records`.
 
-After that first call the hook script hands the bridge the bytes of
-`Mods\services\DCSBridge\schema.pb` once, with `shim.schema`. From then on
-every connection's handshake carries the schema's SHA-256, which `dcsb tail`
-prints on its first line; the bytes are served back to an authenticated
-consumer that asks, and `dcsb schema` is one.
+The hook driver reads `Mods\services\DCSBridge\schema.pb` before that first
+call and hands the bytes to the bridge once, with `shim.schema`, right after
+it. The first call also carries `schema_sha256`, the hash `HookDriver.gen.lua`
+was generated from. From then on every connection's handshake carries the
+schema's SHA-256, which `dcsb tail` prints on its first line; the bytes are
+served back to an authenticated consumer that asks, and `dcsb schema` is one.
+`DCSBridge.log` shows the hash as an `INFO schema` line. When the file's hash
+differs from the generated one, the line is a `WARN` naming both, and the
+bridge runs on: the generated tables and the deployed schema came from
+different builds, and extracting one release's zip again fixes it.
 
 A consumer authenticates with a token: an id, a secret, and the capabilities
 the token grants, from `read`, `command` and `reload`. Every topic names the
