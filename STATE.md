@@ -18,7 +18,7 @@ is just deleted. Write entries as one or two lines, never paragraphs.
 
 ## In progress
 
-Nothing. 4.2 is built; 4.3 is next.
+Nothing. 4.3 is built; 4.4 is next.
 
 *One task at most. Say what is done, what is not, and where to resume. Say what
 is committed and what is only in the working tree. Say what is knowingly
@@ -26,23 +26,25 @@ broken. Empty this when the task closes.*
 
 ## Just finished
 
+- **4.3** — interface compared before `configure`; `HookDriver.gen.lua` and `schema.pb` read before the bind, a missing one stops the start; the gen hash rides `configure` and `shim.classes` takes a sim hash, a mismatch counted and a warning; the zip carries the gen file; agent-verified under stock Lua and Rust tests, the live handshake hash and interface stop are the maintainer's (PR #96 "With DCS"). PR #96, ADR 0052 to 0056.
 - **4.2** — `KEYS` holds every key with its default and owner; `Config\DCSBridge.lua` read under an empty environment, checked, split by owner; the broker opened and handed its 30 keys in one call; agent-verified under stock Lua and a Rust default-equality test, the live-install load and listener are the maintainer's (PR #95 "With DCS"). PR #95, ADR 0050 to 0051.
 - **4.1** — loader under `lua/`, `ENABLED`, banner in both logs, `DCSBridge.log` rotated at its cap; rotation and the banner agent-verified under stock Lua, the live-install banner is the maintainer's (PR #94 "With DCS"). PR #94, ADR 0047 to 0049.
-- **3.6** — decoders under `decode`, every kind but a group, `MAX_DEPTH` and `MAX_ELEMENTS` from the schema, fed hand-built bodies under stock Lua; agent-verified. PR #92, ADR 0043 to 0045.
 
 *The last three at most, one line each. Git log holds the rest.*
 
 ## Next
 
-**Task 4.3** — the hook driver reads `schema.pb` after the first `configure`
-and calls `shim.schema`; `schema_sha256` from `HookDriver.gen.lua` rides
-`configure`; interface versions compared at that call, mismatch disables.
-`state.shim` and the split tables from 4.2 are where it starts. Its brief
-settles who verifies.
+**Task 4.4** — `ReloadConfig` with the `reload` capability in the hook
+driver: compile-before-apply, rollback to the previous table on a raise;
+`shim.configure`'s whole-table validation and swap are Phase 2's (ADR 0019).
+Starts from `config.read`, `state.broker` and `state.shim` in
+`HookDriver.lua`; `schema_sha256` rides the table again on reload and the
+broker checks it and keeps nothing (ADR 0052). Agent-verifiable under stock
+Lua with a stub shim; the live reload is the maintainer's.
 
 ## After that
 
-- **4.4** onward through Phase 4; 3.5 waits behind 7.6.
+- **4.5** onward through Phase 4; 3.5 waits behind 7.6.
 
 ## Carries forward
 
@@ -93,5 +95,8 @@ entries at most: an eleventh means something here is finished, or belongs in
   `dcs_alive_threshold_loading_ms` and nothing in Lua calls it, so a load
   over 30 s reads as a dead sim until `MissionLoadBegan` sets it. Delete
   this when 6.5 closes.
+- **4.11 and 4.12 build on `state.gen`.** 4.3 loads `HookDriver.gen.lua` at
+  start, fatally; 4.11's chain starts after it, 4.12 registers its tables
+  without a second load (ADR 0055). Delete when 4.12 closes.
 - **Task 7.10 does not exist.** Phase 7 runs 7.1 to 7.9 then 7.11, with no note
   explaining the gap. Retired ID or omission, unresolved.
