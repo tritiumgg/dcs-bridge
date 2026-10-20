@@ -957,7 +957,11 @@ mod register {
     entry!(classes, |state| table::<RecordClass>(
         state,
         "classes",
-        |rows| { dcsbridge_broker::bridge().register_classes(rows) }
+        |rows| {
+            dcsbridge_broker::bridge()
+                .register_classes(rows, None)
+                .map(|(added, _)| added)
+        }
     ));
     entry!(routes, |state| table::<Target>(state, "routes", |rows| {
         dcsbridge_broker::bridge().register_routes(rows)

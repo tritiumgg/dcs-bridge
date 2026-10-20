@@ -163,6 +163,16 @@ pub fn sha256_from_hex(text: &str) -> Option<[u8; 32]> {
     Some(sha256)
 }
 
+/// A registrar's generated schema hash that differs from the held
+/// schema's.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SchemaMismatch {
+    /// The SHA-256 of the set the hook driver handed over.
+    pub held: [u8; 32],
+    /// The hash the registrar's generated file carries.
+    pub theirs: [u8; 32],
+}
+
 /// A configure table without `schema_sha256`, and the hash it carried.
 type Split<S> = (Vec<(S, Value)>, Option<[u8; 32]>);
 
@@ -1464,10 +1474,18 @@ impl Bridge {
 
     /// Merge a table of drop policies, answering the rows it added, or the
     /// refusal that applied none of them. [`Registry::register_classes`].
+    ///
+    /// `sha256` is the schema hash the registrar's generated file was built
+    /// from. When a schema is held and the two differ, the rows are merged
+    /// all the same, the mismatch is counted, and the answer carries both
+    /// hashes for the registrar to report: a table from another generator
+    /// run is detected rather than refused. With no schema held, nothing is
+    /// compared. ADR 0052.
     pub fn register_classes(
         &self,
         rows: impl IntoIterator<Item = (Topic, RecordClass)>,
-    ) -> Result<usize, Refusal> {
+        sha256: Option<[u8; 32]>,
+    ) -> Result<(usize, Option<SchemaMismatch>), Refusal> {
         let rows: Vec<(Topic, RecordClass)> = rows.into_iter().collect();
         // The cap is frozen by the first call that would bind a slot, and
         // not by one that would not: a table of no `LIFECYCLE` topic
@@ -1480,7 +1498,18 @@ impl Bridge {
         } else {
             u32::MAX
         };
-        self.registry_mut().register_classes(rows, cap)
+        let added = self.registry_mut().register_classes(rows, cap)?;
+        let mismatch = match (self.schema.get(), sha256) {
+            (Some(held), Some(theirs)) if held.sha256 != theirs => {
+                self.schema_mismatches.fetch_add(1, Ordering::Relaxed);
+                Some(SchemaMismatch {
+                    held: held.sha256,
+                    theirs,
+                })
+            }
+            _ => None,
+        };
+        Ok((added, mismatch))
     }
 
     /// `max_lifecycle_topics` in force: the frozen number, or the
@@ -1683,11 +1712,14 @@ mod tests {
         );
 
         bridge
-            .register_classes([
-                (EVENT.to_string(), RecordClass::Durable),
-                (COMMAND.to_string(), RecordClass::Command),
-                (CAPLESS.to_string(), RecordClass::Durable),
-            ])
+            .register_classes(
+                [
+                    (EVENT.to_string(), RecordClass::Durable),
+                    (COMMAND.to_string(), RecordClass::Command),
+                    (CAPLESS.to_string(), RecordClass::Durable),
+                ],
+                None,
+            )
             .expect("classes");
         bridge
             .register_routes([(COMMAND.to_string(), Target::SimDriver)])
@@ -1715,7 +1747,7 @@ mod tests {
         );
 
         bridge
-            .register_classes([(LATER.to_string(), RecordClass::Lossy)])
+            .register_classes([(LATER.to_string(), RecordClass::Lossy)], None)
             .expect("classes");
         bridge
             .register_caps([(LATER.to_string(), Capability::Read)])
@@ -1750,12 +1782,15 @@ mod tests {
         const CAPLESS: &str = "dcsbridge.builtin.sim.Uncapped";
         let bridge = Bridge::new(44);
         bridge
-            .register_classes([
-                (EVENT.to_string(), RecordClass::Durable),
-                (EDGE.to_string(), RecordClass::Lifecycle),
-                (COMMAND.to_string(), RecordClass::Command),
-                (CAPLESS.to_string(), RecordClass::Durable),
-            ])
+            .register_classes(
+                [
+                    (EVENT.to_string(), RecordClass::Durable),
+                    (EDGE.to_string(), RecordClass::Lifecycle),
+                    (COMMAND.to_string(), RecordClass::Command),
+                    (CAPLESS.to_string(), RecordClass::Durable),
+                ],
+                None,
+            )
             .expect("classes");
         bridge
             .register_caps([
@@ -2158,6 +2193,45 @@ mod tests {
         assert_eq!(first.schema_expected.get(), Some(&want));
     }
 
+    /// A registrar's hash is compared with the held schema's: an equal one
+    /// answers no mismatch, a different one answers both hashes and is
+    /// counted while its rows are registered all the same, and with no
+    /// schema held nothing is compared.
+    #[test]
+    fn a_registrar_schema_sha256_is_compared_and_reported() {
+        const EARLY: &str = "adopter.Early";
+        const SAME: &str = "adopter.Same";
+        const OTHER: &str = "adopter.Other";
+        let bridge = Bridge::new(9);
+        assert_eq!(
+            bridge.register_classes([(EARLY.to_string(), RecordClass::Lossy)], Some([1; 32])),
+            Ok((1, None)),
+            "compared with no schema held"
+        );
+        bridge
+            .configure([("port", Value::Number(0.0))])
+            .expect("a valid table");
+        let held = bridge.hold_schema(b"\x0a\x05hello").expect("held");
+
+        assert_eq!(
+            bridge.register_classes([(SAME.to_string(), RecordClass::Lossy)], Some(held)),
+            Ok((1, None))
+        );
+        assert_eq!(bridge.schema_sha256_mismatches(), 0);
+
+        let theirs = [2; 32];
+        assert_eq!(
+            bridge.register_classes([(OTHER.to_string(), RecordClass::Durable)], Some(theirs)),
+            Ok((1, Some(SchemaMismatch { held, theirs })))
+        );
+        assert_eq!(bridge.schema_sha256_mismatches(), 1);
+        assert_eq!(
+            bridge.registry().classes().get(OTHER),
+            Some(&RecordClass::Durable),
+            "a mismatched table was not registered"
+        );
+    }
+
     /// Before any registration the acknowledgement is the one addressable
     /// topic, a fan-out topic is refused, and only the refusal is counted.
     #[test]
@@ -2200,7 +2274,10 @@ mod tests {
     #[test]
     fn a_registration_before_configure_freezes_the_cap_at_the_default() {
         let bridge = Bridge::new(41);
-        assert_eq!(bridge.register_classes(boundaries(0, 64)), Ok(64));
+        assert_eq!(
+            bridge.register_classes(boundaries(0, 64), None),
+            Ok((64, None))
+        );
 
         let applied = bridge
             .configure([
@@ -2223,7 +2300,7 @@ mod tests {
         assert_eq!(bridge.pending_restart(), 1);
         assert!(
             matches!(
-                bridge.register_classes(boundaries(64, 1)),
+                bridge.register_classes(boundaries(64, 1), None),
                 Err(Refusal::OverCap {
                     bound: 64,
                     cap: 64,
@@ -2241,11 +2318,14 @@ mod tests {
     fn configure_before_a_registration_freezes_the_cap_at_the_file_value() {
         let bridge = Bridge::new(42);
         assert_eq!(
-            bridge.register_classes([(
-                "dcsbridge.builtin.sim.UnitDestroyed".to_string(),
-                RecordClass::Durable
-            )]),
-            Ok(1)
+            bridge.register_classes(
+                [(
+                    "dcsbridge.builtin.sim.UnitDestroyed".to_string(),
+                    RecordClass::Durable
+                )],
+                None
+            ),
+            Ok((1, None))
         );
 
         let applied = bridge
@@ -2257,10 +2337,13 @@ mod tests {
 
         assert!(applied.pending.is_empty(), "a durable row froze the cap");
         assert_eq!(bridge.lifecycle_cap(), 128);
-        assert_eq!(bridge.register_classes(boundaries(0, 128)), Ok(128));
+        assert_eq!(
+            bridge.register_classes(boundaries(0, 128), None),
+            Ok((128, None))
+        );
         assert!(
             matches!(
-                bridge.register_classes(boundaries(128, 1)),
+                bridge.register_classes(boundaries(128, 1), None),
                 Err(Refusal::OverCap {
                     bound: 128,
                     cap: 128,
@@ -2323,15 +2406,18 @@ mod tests {
         const COMMAND: &str = "dcsbridge.builtin.sim.SetFlag";
 
         assert_eq!(
-            bridge.register_classes([(EVENT.to_string(), RecordClass::Durable)]),
-            Ok(1)
+            bridge.register_classes([(EVENT.to_string(), RecordClass::Durable)], None),
+            Ok((1, None))
         );
         assert_eq!(
-            bridge.register_classes([
-                (EVENT.to_string(), RecordClass::Durable),
-                (COMMAND.to_string(), RecordClass::Command),
-            ]),
-            Ok(1)
+            bridge.register_classes(
+                [
+                    (EVENT.to_string(), RecordClass::Durable),
+                    (COMMAND.to_string(), RecordClass::Command),
+                ],
+                None
+            ),
+            Ok((1, None))
         );
         assert_eq!(
             bridge.register_routes([(COMMAND.to_string(), Target::SimDriver)]),
@@ -2367,7 +2453,7 @@ mod tests {
         assert_eq!(bridge.partial_registration(), 1);
 
         bridge
-            .register_classes([(EVENT.to_string(), RecordClass::Durable)])
+            .register_classes([(EVENT.to_string(), RecordClass::Durable)], None)
             .expect("classes");
         assert_eq!(
             bridge.registered(EVENT.as_bytes()),
@@ -3025,7 +3111,7 @@ mod tests {
         route_both(&bridge);
         const EVENT: &str = "dcsbridge.builtin.sim.UnitDestroyed";
         bridge
-            .register_classes([(EVENT.to_string(), RecordClass::Durable)])
+            .register_classes([(EVENT.to_string(), RecordClass::Durable)], None)
             .unwrap();
         bridge
             .register_caps([(EVENT.to_string(), Capability::Read)])
