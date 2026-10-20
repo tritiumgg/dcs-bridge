@@ -8,6 +8,112 @@ local dcslog = log
 local LEVELS = { error = 1, warn = 2, info = 3, debug = 4 }
 local NAMES = { 'ERROR', 'WARN', 'INFO', 'DEBUG' }
 
+-- Every key Config\DCSBridge.lua may name, with its default and the
+-- component that owns it. A file key with no row is dropped. ADR 0050.
+--
+-- One row per line, in the shape { 'name', default, 'owner' }. A Rust test
+-- in crates/broker/src/config.rs reads the broker rows by that shape and
+-- compares each default with the broker's own, so a row split over two
+-- lines fails it.
+local KEYS = {
+  -- The broker's, in the order crates/broker/src/config.rs declares them.
+  { 'enabled', true, 'broker' },
+  { 'bind_address', '127.0.0.1', 'broker' },
+  { 'port', 7742, 'broker' },
+  { 'allow_public_bind', false, 'broker' },
+  { 'max_connections', 8, 'broker' },
+  { 'max_unauthenticated_connections', 4, 'broker' },
+  { 'handshake_timeout_ms', 5000, 'broker' },
+  { 'max_frame_bytes', 1048576, 'broker' },
+  { 'max_type_url_bytes', 256, 'broker' },
+  { 'rejected_max_per_sec', 10, 'broker' },
+  { 'busy_max_per_sec', 100, 'broker' },
+  { 'inbound_records_per_sec', 100, 'broker' },
+  { 'inbound_records_per_sec_total', 400, 'broker' },
+  { 'auth_failures_per_min', 5, 'broker' },
+  { 'tokens', {}, 'broker' },
+  { 'ring_out_lossy_records', 3584, 'broker' },
+  { 'ring_out_durable_records', 512, 'broker' },
+  { 'ring_out_lifecycle_records', 256, 'broker' },
+  { 'ring_in_sim_driver_records', 1024, 'broker' },
+  { 'ring_in_hook_driver_records', 256, 'broker' },
+  { 'heartbeat_interval_ms', 1000, 'broker' },
+  { 'dcs_alive_threshold_ms', 30000, 'broker' },
+  { 'dcs_alive_threshold_loading_ms', 120000, 'broker' },
+  { 'load_timeout_ms', 120000, 'broker' },
+  { 'request_timeout_ms', 2000, 'broker' },
+  { 'spool_max_bytes', 268435456, 'broker' },
+  { 'spool_retention_hours', 24, 'broker' },
+  { 'max_lifecycle_record_bytes', 16384, 'broker' },
+  { 'max_lifecycle_topics', 64, 'broker' },
+  { 'topic_filter_max_topics', 256, 'broker' },
+  -- Which injection route runs, and the sim driver file it injects.
+  -- ADR 0015.
+  { 'route', 'stock', 'hook' },
+  { 'sim_driver_path', 'Mods/services/DCSBridge/lua/SimDriver.lua', 'hook' },
+  -- The sim driver's buffer, its per-frame caps and its resource caps.
+  { 'sim_driver_buffer_max_records', 8192, 'sim' },
+  { 'drain_max_records', 256, 'sim' },
+  { 'drain_max_bytes', 16384, 'sim' },
+  { 'bridge_return_max_bytes', 32768, 'sim' },
+  { 'dispatch_max_commands', 32, 'sim' },
+  { 'subscription_max_evals', 64, 'sim' },
+  { 'spot_max_updates', 16, 'sim' },
+  { 'weapon_max_samples', 32, 'sim' },
+  { 'resync_slice_records', 32, 'sim' },
+  { 'max_subscriptions', 64, 'sim' },
+  { 'max_spots', 16, 'sim' },
+  { 'max_tracked_weapons', 64, 'sim' },
+  { 'convert_max_points_per_command', 256, 'sim' },
+  { 'recent_idempotency_keys', 1024, 'sim' },
+  { 'command_ack_detail_max_bytes', 256, 'sim' },
+  { 'spawn_max_groups_per_command', 8, 'sim' },
+  { 'handler_failures_per_epoch', 3, 'sim' },
+  { 'unsafe_bindings_enabled', false, 'sim' },
+  -- Operator eval.
+  { 'eval_max_files_per_poll', 1, 'hook' },
+  { 'eval_max_file_bytes', 65536, 'hook' },
+  { 'eval_log_max_bytes', 268435456, 'hook' },
+  { 'eval_log_retention_days', 30, 'hook' },
+  { 'eval_stable_polls', 2, 'hook' },
+  { 'eval_instruction_budget', 10000000, 'hook' },
+  { 'eval_audit_max_bytes', 16777216, 'hook' },
+  { 'eval_audit_retention_days', 90, 'hook' },
+  -- The hook driver's dispatch loop.
+  { 'hook_driver_dispatch_max_commands', 8, 'hook' },
+  -- Extensions. Each file list belongs to the side that loads the files.
+  { 'sim_driver_disabled_files', {}, 'sim' },
+  { 'hook_driver_disabled_files', {}, 'hook' },
+  { 'options', {}, 'sim' },
+  { 'mission_sim_driver_dirs', false, 'sim' },
+  -- The hook driver built-ins.
+  { 'roster_max_players', 128, 'hook' },
+  { 'recent_admin_keys', 256, 'hook' },
+  { 'kick_message_max_bytes', 256, 'hook' },
+  { 'ban_reason_max_bytes', 256, 'hook' },
+  { 'chat_message_max_bytes', 512, 'hook' },
+  { 'mission_briefing_max_bytes', 16384, 'hook' },
+  { 'idempotency_key_max_bytes', 64, 'hook' },
+  { 'slotlist_max_entries', 512, 'hook' },
+  { 'banlist_max_entries', 512, 'hook' },
+  { 'bounce_min_interval_ms', 2000, 'hook' },
+  { 'admin_audit_max_bytes', 16777216, 'hook' },
+  { 'admin_audit_retention_days', 90, 'hook' },
+  -- Timing the hook driver keeps.
+  { 'pause_poll_interval_ms', 1000, 'hook' },
+  { 'eval_poll_interval_ms', 1000, 'hook' },
+  -- The bridge's own log.
+  { 'log_max_bytes', 33554432, 'hook' },
+  { 'log_retention_days', 14, 'hook' },
+  { 'log_level', 'info', 'hook' },
+}
+
+-- Each row by its name.
+local BY_NAME = {}
+for _, row in ipairs(KEYS) do
+  BY_NAME[row[1]] = { default = row[2], owner = row[3] }
+end
+
 -- Opened in binary mode, always. Text mode on Windows writes each newline
 -- as two bytes, so the length counted against the cap would not be the
 -- length written.
@@ -18,9 +124,9 @@ local LIVE = 'DCSBridge.log'
 local ROTATED = '^DCSBridge%.(%d%d%d%d%d%d%d%d%-%d%d%d%d%d%d)%-?(%d*)%.log$'
 
 local logger = {
-  max_bytes = 33554432,
-  retention_days = 14,
-  level = LEVELS.info,
+  max_bytes = BY_NAME.log_max_bytes.default,
+  retention_days = BY_NAME.log_retention_days.default,
+  level = LEVELS[BY_NAME.log_level.default],
 }
 
 local function size(path)
@@ -182,7 +288,12 @@ local function start(ctx)
   log.info(ctx.banner)
 end
 
+local config = {
+  KEYS = KEYS,
+}
+
 return {
+  config = config,
   log = log,
   start = start,
 }
