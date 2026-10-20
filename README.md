@@ -61,7 +61,14 @@ The zip places these files.
 Saved Games\DCS\
   Scripts\Hooks\DCSBridge.lua      The loader. DCS loads it at start.
   Mods\services\DCSBridge\         Everything the bridge ships.
+    lua\HookDriver.lua             The hook driver, which the loader runs.
 ```
+
+A working install writes a banner line to `Logs\dcs.log` at DCS start, under
+`DCSBridge`. It names the loader and the hook driver with each file's size
+and modification time, which is how a build is identified. The same line
+opens `Logs\DCSBridge\DCSBridge.log`. No banner means DCS did not find the
+loader or could not parse it.
 
 A release overwrites every file under `Mods\services\DCSBridge\`. Do not put
 your own files there. Your own extension files go under `DCSBridge\` in the
@@ -106,8 +113,23 @@ the whole set of topics it wants; each message replaces the last, and
 this install registered that the token can see. `topic_filter_max_topics`,
 256 by default, bounds one list and is a live key.
 
-The loader has an `ENABLED` flag. Set it to `false` to keep the bridge
-installed but inactive.
+The loader has an `ENABLED` flag on its first lines, in
+`Scripts\Hooks\DCSBridge.lua`. Set it to `false` to keep the bridge installed
+but inactive. A change takes a DCS restart. The loader then writes one line
+to `dcs.log` saying it is disabled, and nothing else. A release overwrites
+the loader, so set the flag again after an upgrade.
+
+The bridge writes its own log to `Logs\DCSBridge\DCSBridge.log`. Three keys
+govern it, and all three are live.
+
+| Key | Default | What it does |
+|---|---|---|
+| `log_max_bytes` | 33554432 (32 MiB) | The most `DCSBridge.log` holds. At the cap it is renamed to `DCSBridge.<UTC>.log` and a new one starts. The renamed files together stay under the same cap, oldest deleted first, so the directory holds at most twice the cap. |
+| `log_retention_days` | 14 | A renamed file older than this is deleted. |
+| `log_level` | `info` | `error`, `warn`, `info` or `debug`. |
+
+Reading these keys from `Config\DCSBridge.lua` is not yet built; the bridge
+uses the defaults.
 
 ## The Stock route and the Modified route
 
