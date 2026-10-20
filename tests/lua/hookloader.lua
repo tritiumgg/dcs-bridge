@@ -52,13 +52,15 @@ local function install(files, edit)
   return dir
 end
 
--- Enabled: one banner in dcs.log naming both files by size and time, and the
--- same banner in DCSBridge.log.
+-- Enabled, with no broker module installed: one banner in dcs.log naming
+-- both files by size and time, and the same banner in DCSBridge.log. The
+-- shipped open then fails, naming the module's path in both logs. A real
+-- module is opened in hookstart.lua alone.
 do
   local dir = install({ LOADER, DRIVER })
   dofile(dir .. LOADER)
 
-  assert(#log.lines == 1, #log.lines .. ' dcs.log lines, expected the banner alone')
+  assert(#log.lines == 2, #log.lines .. ' dcs.log lines, expected the banner and one error')
   local line = log.lines[1]
   assert(line.subsystem == 'DCSBridge' and line.level == 'INFO',
     'the banner is not an INFO line under DCSBridge')
@@ -71,6 +73,15 @@ do
   local own = read(dir .. 'Logs/DCSBridge/DCSBridge.log')
   assert(own, 'the hook driver wrote no DCSBridge.log')
   assert(own:find('INFO ' .. line.message, 1, true), 'DCSBridge.log does not carry the banner')
+
+  local module = dir .. 'Mods/services/DCSBridge/bin/lua-dcsbridge.dll'
+  assert(log.lines[2].level == 'ERROR'
+    and log.lines[2].message:find('the hook driver did not start: the broker module did not open: '
+      .. module, 1, true),
+    'dcs.log does not say the module did not open')
+  assert(own:find('defaults in force', 1, true), 'DCSBridge.log does not say the defaults are in force')
+  assert(own:find('ERROR the broker module did not open: ' .. module, 1, true),
+    'DCSBridge.log does not name the module')
 end
 
 -- Disabled: one line naming the flag, no banner, and nothing under

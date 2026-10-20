@@ -441,21 +441,48 @@ function log.open(dir)
   prune(dir)
 end
 
--- What start read, split by owner, for the calls that come after it.
+-- The broker module, where the release zip puts it.
+local MODULE = lfs.writedir() .. 'Mods/services/DCSBridge/bin/lua-dcsbridge.dll'
+
+-- The table this file returns. start reaches open through it, so a test
+-- that replaces open runs start with no module at MODULE. ADR 0050.
+local driver = {
+  config = config,
+  log = log,
+}
+
+-- What start read, split by owner, and the broker module once it opened,
+-- for the calls that come after it.
 local state = {}
+
+-- The broker module's table. DCS's package.loadlib takes the opener's bare
+-- name, so that is the one asked for.
+function driver.open(path)
+  local opener, err = package.loadlib(path, 'luaopen_dcsbridge')
+  if not opener then
+    error('the broker module did not open: ' .. path .. ': ' .. tostring(err), 0)
+  end
+  return opener()
+end
+
+-- Log a failure and raise it, so the loader's line in dcs.log says the
+-- same thing.
+local function fail(reason)
+  log.error(reason)
+  error(reason, 0)
+end
 
 -- Called once by the loader, which wrote ctx.banner to dcs.log already and
 -- logs anything this raises there. The banner comes first, at the default
 -- level, so DCSBridge.log names the build even when the file does not read
 -- or sets a level that hides INFO.
-local function start(ctx)
+function driver.start(ctx)
   log.open(lfs.writedir() .. 'Logs/DCSBridge')
   log.info(ctx.banner)
 
   local values, notes = config.read(CONFIG)
   if not values then
-    log.error(notes)
-    error(notes, 0)
+    fail(notes)
   end
   local split = config.split(values)
   state.broker, state.hook, state.sim = split.broker, split.hook, split.sim
@@ -464,10 +491,22 @@ local function start(ctx)
   for _, note in ipairs(notes) do
     log[note.level](note.message)
   end
+
+  local opened, shim = pcall(driver.open, MODULE)
+  if not opened then
+    fail(tostring(shim))
+  end
+  -- Every broker key in one call, so the first call is the whole
+  -- configuration and nothing is left at a default the file changed.
+  local configured, answer = pcall(shim.configure, state.broker)
+  if not configured then
+    fail(tostring(answer))
+  end
+  state.shim = shim
+  log.info('configured: interface ' .. tostring(answer.interface)
+    .. ', applied ' .. tostring(answer.applied)
+    .. ', unknown ' .. tostring(answer.unknown)
+    .. ', pending_restart ' .. tostring(answer.pending_restart))
 end
 
-return {
-  config = config,
-  log = log,
-  start = start,
-}
+return driver
