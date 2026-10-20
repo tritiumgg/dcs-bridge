@@ -239,6 +239,23 @@ do
   assert(driver.config.validate(values) == nil, 'the defaults do not pass')
 end
 
+-- Split by owner: the broker's table holds its 30 keys and no table but
+-- tokens, and each other key sits under its own owner.
+do
+  local driver, dir = fresh()
+  local split = driver.config.split(assert(driver.config.read(dir .. 'none')))
+  local n = 0
+  for name, value in pairs(split.broker) do
+    n = n + 1
+    assert(type(value) ~= 'table' or name == 'tokens', 'the broker is handed a table under ' .. name)
+  end
+  assert(n == 30, n .. ' broker keys, expected 30')
+  assert(type(split.broker.tokens) == 'table', 'the broker has no tokens list')
+  assert(type(split.sim.options) == 'table' and split.sim.max_spots == 16, 'a sim key is not under sim')
+  assert(split.hook.route == 'stock' and split.hook.log_level == 'info', 'a hook key is not under hook')
+  assert(split.broker.route == nil and split.broker.options == nil, 'the broker is handed a key it does not own')
+end
+
 for _, dir in ipairs(scratch) do
   dcs.remove(dir)
 end

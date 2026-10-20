@@ -114,6 +114,9 @@ for _, row in ipairs(KEYS) do
   BY_NAME[row[1]] = { default = row[2], owner = row[3] }
 end
 
+-- The operator's file, a Lua chunk returning one table. ADR 0051.
+local CONFIG = lfs.writedir() .. 'Config/DCSBridge.lua'
+
 local config = {
   KEYS = KEYS,
 }
@@ -257,6 +260,17 @@ function config.read(path)
     return nil, path .. ': ' .. invalid
   end
   return values, notes
+end
+
+-- The values read, as one table per owner. The broker's carries its 30
+-- keys and no other, so its unknown count is zero and the nested options
+-- table never reaches it. ADR 0050.
+function config.split(values)
+  local split = { broker = {}, hook = {}, sim = {} }
+  for _, row in ipairs(KEYS) do
+    split[row[3]][row[1]] = values[row[1]]
+  end
+  return split
 end
 
 -- Opened in binary mode, always. Text mode on Windows writes each newline
@@ -427,10 +441,29 @@ function log.open(dir)
   prune(dir)
 end
 
--- Called once by the loader, which wrote ctx.banner to dcs.log already.
+-- What start read, split by owner, for the calls that come after it.
+local state = {}
+
+-- Called once by the loader, which wrote ctx.banner to dcs.log already and
+-- logs anything this raises there. The banner comes first, at the default
+-- level, so DCSBridge.log names the build even when the file does not read
+-- or sets a level that hides INFO.
 local function start(ctx)
   log.open(lfs.writedir() .. 'Logs/DCSBridge')
   log.info(ctx.banner)
+
+  local values, notes = config.read(CONFIG)
+  if not values then
+    log.error(notes)
+    error(notes, 0)
+  end
+  local split = config.split(values)
+  state.broker, state.hook, state.sim = split.broker, split.hook, split.sim
+
+  log.configure(state.hook)
+  for _, note in ipairs(notes) do
+    log[note.level](note.message)
+  end
 end
 
 return {

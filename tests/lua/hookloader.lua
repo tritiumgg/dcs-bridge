@@ -1,6 +1,7 @@
 -- The loader writes its banner to dcs.log before running anything, and the
 -- hook driver writes the same banner to its own log. With ENABLED false the
--- loader writes one line and nothing else. ADR 0048, ADR 0049.
+-- loader writes one line and nothing else. A configuration that does not
+-- read stops the start, and both logs say why. ADR 0048, ADR 0049, ADR 0051.
 --
 -- Each case installs the two files into a scratch write directory, the way
 -- the release zip lays them out, and runs the loader the way DCS does, under
@@ -102,6 +103,22 @@ do
   assert(log.lines[2].level == 'ERROR'
     and log.lines[2].message:find('the hook driver did not load', 1, true),
     'no error line for the missing hook driver')
+end
+
+-- A configuration that does not read: the reason in DCSBridge.log after the
+-- banner, and the loader's line saying the hook driver did not start.
+do
+  local dir = install({ LOADER, DRIVER })
+  write(dir .. 'Config/DCSBridge.lua', "return { route = 'A' }")
+  dofile(dir .. LOADER)
+
+  assert(#log.lines == 2, #log.lines .. ' dcs.log lines, expected 2')
+  assert(log.lines[2].level == 'ERROR'
+    and log.lines[2].message:find('the hook driver did not start: ', 1, true)
+    and log.lines[2].message:find('route is A', 1, true),
+    'no error line in dcs.log naming route')
+  local own = read(dir .. 'Logs/DCSBridge/DCSBridge.log')
+  assert(own:find('ERROR [^\n]*route is A'), 'DCSBridge.log does not name route')
 end
 
 for _, dir in ipairs(scratch) do
