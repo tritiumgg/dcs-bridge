@@ -145,6 +145,39 @@ do
     'dcs.log does not name the failed rename')
 end
 
+-- A reopen that fails after a rotation drops lines rather than raising into
+-- the caller, says so once in dcs.log, and the logger writes again once the
+-- file can be opened.
+do
+  local driver, dir = fresh()
+  driver.log.configure({ log_max_bytes = 4096 })
+  driver.log.open(dir)
+  for i = 1, 40 do
+    driver.log.info(message(i))
+  end
+
+  local open = io.open
+  io.open = function(path, mode)
+    if path:find('DCSBridge.log$') and mode ~= 'r' and mode ~= 'rb' then
+      return nil, 'denied'
+    end
+    return open(path, mode)
+  end
+  local ok, err = pcall(driver.log.info, message(41))
+  local again = pcall(driver.log.info, message(42))
+  io.open = open
+
+  assert(ok, 'a failed reopen raised: ' .. tostring(err))
+  assert(again, 'a line after a failed reopen raised')
+  assert(#log.lines == 1 and log.lines[1].message:find('denied', 1, true),
+    'dcs.log does not name the failed reopen once')
+
+  driver.log.info(message(43))
+  local live = read(dir .. '/DCSBridge.log')
+  assert(live:find('line 043 ', 1, true), 'the logger did not write again')
+  assert(not live:find('line 041 ', 1, true), 'a dropped line was written')
+end
+
 -- Opening the logger deletes a rotated file older than log_retention_days,
 -- keeps a recent one, and leaves a name that does not parse alone.
 do

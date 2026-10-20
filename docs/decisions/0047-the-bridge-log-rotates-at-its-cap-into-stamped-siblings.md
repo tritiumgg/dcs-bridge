@@ -45,6 +45,9 @@ second budget of the same size.
   `log_retention_days`. A name that does not parse is left alone.
 - When the rename fails, the writer says so once in `dcs.log` and
   truncates the live file, so the cap holds.
+- When the live file cannot be opened again, the writer says so once in
+  `dcs.log` and drops lines rather than raising into its caller. Each
+  later line tries the file again.
 
 Alternatives:
 

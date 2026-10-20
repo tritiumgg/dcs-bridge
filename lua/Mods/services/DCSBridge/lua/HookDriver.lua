@@ -106,19 +106,39 @@ local function rotate()
       'could not rotate ' .. live .. ', truncating it: ' .. tostring(err)
     )
   end
-  logger.file = assert(io.open(live, 'w'))
   prune(dir)
+
+  local file, reason = io.open(live, 'w')
+  logger.file = file
+  if not file then
+    -- No handle means lines are dropped, never raised into the caller. The
+    -- next line tries the file again.
+    dcslog.write(
+      'DCSBridge',
+      dcslog.ERROR,
+      'could not reopen ' .. live .. ', dropping lines: ' .. tostring(reason)
+    )
+  end
 end
 
 local function write(level, message)
-  if level > logger.level or not logger.file then
+  if level > logger.level or not logger.dir then
     return
+  end
+  if not logger.file then
+    logger.file = io.open(logger.dir .. '/' .. LIVE, 'a')
+    if not logger.file then
+      return
+    end
   end
   local line = os.date('!%Y-%m-%d %H:%M:%S') .. ' ' .. NAMES[level] .. ' '
     .. message .. '\n'
   local at = logger.file:seek('end')
   if at > 0 and at + #line > logger.max_bytes then
     rotate()
+    if not logger.file then
+      return
+    end
   end
   logger.file:write(line)
   logger.file:flush()
@@ -148,6 +168,7 @@ end
 function log.open(dir)
   if logger.file then
     logger.file:close()
+    logger.file = nil
   end
   lfs.mkdir(dir)
   logger.dir = dir
