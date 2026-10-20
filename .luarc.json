@@ -1,5 +1,5 @@
 {
   "runtime.version": "Lua 5.1",
-  "diagnostics.globals": ["log", "timer", "PUTCOST_MODULE", "loadlib", "DCSBridge"],
+  "diagnostics.globals": ["log", "lfs", "timer", "PUTCOST_MODULE", "loadlib", "DCSBridge"],
   "diagnostics.disable": ["discard-returns"]
 }
