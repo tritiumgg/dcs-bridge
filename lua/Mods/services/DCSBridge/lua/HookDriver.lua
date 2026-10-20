@@ -8,6 +8,9 @@ local dcslog = log
 local LEVELS = { error = 1, warn = 2, info = 3, debug = 4 }
 local NAMES = { 'ERROR', 'WARN', 'INFO', 'DEBUG' }
 
+-- Opened in binary mode, always. Text mode on Windows writes each newline
+-- as two bytes, so the length counted against the cap would not be the
+-- length written.
 local LIVE = 'DCSBridge.log'
 
 -- A rotated file's name: its UTC stamp, and a suffix when the second was
@@ -108,7 +111,7 @@ local function rotate()
   end
   prune(dir)
 
-  local file, reason = io.open(live, 'w')
+  local file, reason = io.open(live, 'wb')
   logger.file = file
   if not file then
     -- No handle means lines are dropped, never raised into the caller. The
@@ -126,7 +129,7 @@ local function write(level, message)
     return
   end
   if not logger.file then
-    logger.file = io.open(logger.dir .. '/' .. LIVE, 'a')
+    logger.file = io.open(logger.dir .. '/' .. LIVE, 'ab')
     if not logger.file then
       return
     end
@@ -172,7 +175,7 @@ function log.open(dir)
   end
   lfs.mkdir(dir)
   logger.dir = dir
-  logger.file = assert(io.open(dir .. '/' .. LIVE, 'a'))
+  logger.file = assert(io.open(dir .. '/' .. LIVE, 'ab'))
   prune(dir)
 end
 

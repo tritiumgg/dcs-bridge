@@ -178,6 +178,35 @@ do
   assert(not live:find('line 041 ', 1, true), 'a dropped line was written')
 end
 
+-- Every open for writing is binary. On Windows text mode writes a newline as
+-- two bytes, which the cap would not count, and this host cannot see that.
+do
+  local driver, dir = fresh()
+  driver.log.configure({ log_max_bytes = 4096 })
+  local modes = {}
+  local open = io.open
+  io.open = function(path, mode)
+    if path:find('DCSBridge.log$') then
+      modes[#modes + 1] = mode
+    end
+    return open(path, mode)
+  end
+  driver.log.open(dir)
+  for i = 1, 41 do
+    driver.log.info(message(i))
+  end
+  io.open = open
+
+  local writes = 0
+  for _, mode in ipairs(modes) do
+    if mode ~= 'r' and mode ~= 'rb' then
+      writes = writes + 1
+      assert(mode:find('b', 1, true), 'the log was opened in text mode ' .. mode)
+    end
+  end
+  assert(writes == 2, writes .. ' opens for writing, expected the open and the rotation')
+end
+
 -- Opening the logger deletes a rotated file older than log_retention_days,
 -- keeps a recent one, and leaves a name that does not parse alone.
 do
