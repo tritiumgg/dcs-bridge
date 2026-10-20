@@ -23,15 +23,6 @@ local logger = {
   level = LEVELS.info,
 }
 
-local function exists(path)
-  local f = io.open(path, 'r')
-  if f then
-    f:close()
-    return true
-  end
-  return false
-end
-
 local function size(path)
   return lfs.attributes(path, 'size') or 0
 end
@@ -91,12 +82,18 @@ local function rotate()
   local live = dir .. '/' .. LIVE
   logger.file:close()
 
+  -- One past the highest suffix this second has used. Filling a gap a
+  -- prune left would give the newest file a name that sorts as older.
   local stamp = os.date('!%Y%m%d-%H%M%S')
+  local highest = 0
+  for _, file in ipairs(rotated(dir)) do
+    if file.stamp == stamp and file.suffix > highest then
+      highest = file.suffix
+    end
+  end
   local target = dir .. '/DCSBridge.' .. stamp .. '.log'
-  local n = 1
-  while exists(target) do
-    n = n + 1
-    target = dir .. '/DCSBridge.' .. stamp .. '-' .. n .. '.log'
+  if highest > 0 then
+    target = dir .. '/DCSBridge.' .. stamp .. '-' .. (highest + 1) .. '.log'
   end
 
   local ok, err = os.rename(live, target)

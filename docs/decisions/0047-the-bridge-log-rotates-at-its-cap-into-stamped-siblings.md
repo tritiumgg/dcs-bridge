@@ -35,7 +35,9 @@ second budget of the same size.
   the file is renamed and a new one is started. A line longer than the
   cap still lands, alone, in an empty file.
 - A rotated file is named `DCSBridge.<UTC>.log`, with `<UTC>` as
-  `YYYYMMDD-HHMMSS`. A name already taken gets `-2`, `-3` and so on. This
+  `YYYYMMDD-HHMMSS`. A second file in the same second gets `-2`, and each
+  later one the suffix after the highest in use, even when a prune has
+  deleted the ones below it. This
   is the stamp DCS puts in its own rotated logs' names and the form the
   eval result logs take. No rename ever lands on a name that exists.
 - After each rotation, and when the logger opens, the writer lists the

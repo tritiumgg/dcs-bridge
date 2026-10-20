@@ -47,33 +47,40 @@ local function message(i)
   return text .. string.rep('x', 74 - #text)
 end
 
--- 100 lines of 100 bytes against a 4096-byte cap. The live file rotates
--- before the 41st and the 81st, so two files rotate out, in the same second
--- and so with a suffix on the second. Only one fits the cap, and it has to be
--- the newer, which a sort on the raw name gets wrong: "-2.log" sorts before
--- ".log".
+-- 520 lines of 100 bytes against a 4096-byte cap, with the clock held on one
+-- second. The live file rotates before every fortieth line, so twelve files
+-- rotate out with the same stamp: the unsuffixed name, then -2 to -12. Only
+-- one fits the cap, and it has to be the newest each time. A sort on the raw
+-- name gets that wrong twice: "-2.log" sorts before ".log", and "-10" before
+-- "-9".
 do
   local driver, dir = fresh()
   driver.log.configure({ log_max_bytes = 4096 })
   driver.log.open(dir)
 
-  for i = 1, 100 do
+  local date = os.date
+  local now = os.time()
+  os.date = function(format, t)
+    return date(format, t or now)
+  end
+  for i = 1, 520 do
     driver.log.info(message(i))
     local live = lfs.attributes(dir .. '/DCSBridge.log', 'size')
     assert(live <= 4096, 'the live file reached ' .. live .. ' bytes after line ' .. i)
   end
+  os.date = date
 
   local names = rotated(dir)
   assert(#names == 1, #names .. ' rotated files survive, expected 1')
+  assert(names[1]:find('%-12%.log$'), 'the survivor is ' .. names[1] .. ', expected the -12')
   local kept = read(dir .. '/' .. names[1])
   assert(#kept <= 4096, 'the rotated file holds ' .. #kept .. ' bytes')
-  assert(kept:find('line 041 ', 1, true), 'the newer rotated file was deleted')
-  assert(not kept:find('line 001 ', 1, true), 'the older rotated file survived')
+  assert(kept:find('line 441 ', 1, true), 'the newest rotated file was deleted')
 
   local live = read(dir .. '/DCSBridge.log')
-  assert(live:find('line 081 ', 1, true) and live:find('line 100 ', 1, true),
-    'the live file does not hold the last twenty lines')
-  assert(live:find('^%d%d%d%d%-%d%d%-%d%d %d%d:%d%d:%d%d INFO line 081 '),
+  assert(live:find('line 481 ', 1, true) and live:find('line 520 ', 1, true),
+    'the live file does not hold the last forty lines')
+  assert(live:find('^%d%d%d%d%-%d%d%-%d%d %d%d:%d%d:%d%d INFO line 481 '),
     'a line does not start with its UTC stamp and level')
 end
 
