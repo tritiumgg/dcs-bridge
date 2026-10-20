@@ -230,8 +230,10 @@ A tag carries four assets: `lua-dcsbridge.dll`, `dcsb.exe`,
 `dcs-bridge-<version>.zip` and `SHA256SUMS` over the three. The zip
 mirrors the write directory described in SPEC §13, so installing it is one
 extraction over `Saved Games\<write dir>\`, and it carries the broker,
-`schema.pb` and the Lua files. `lua/` in the checkout is laid out as the same
-tree, so staging copies it whole. `dcsb` runs outside DCS and has no home in
+`schema.pb`, the Lua files, and `HookDriver.gen.lua` beside `HookDriver.lua`.
+`lua/` in the checkout is laid out as the same tree, so staging copies it
+whole and adds the generated file from `target/gen`, which `mise run generate`
+writes; the hook driver does not start without it (ADR 0055). `dcsb` runs outside DCS and has no home in
 that tree, so it ships beside the zip rather than inside it.
 
 The tag names the version, and the part before any `-rc` suffix must match

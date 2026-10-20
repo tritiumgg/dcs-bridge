@@ -89,6 +89,16 @@ jobs:
       - name: Schema
         run: sh tools/mkschema.sh
 
+      # HookDriver.gen.lua ships beside the hook driver, which does not start
+      # without it. The cross-build below does not build the host protoc
+      # plugin that writes it, so this builds the plugin host-native first,
+      # as mise run generate does, and tools/mkgen.sh checks the file carries
+      # the hash of the schema.pb above.
+      - name: Generate
+        run: |
+          cargo build -p protoc-gen-dcsbridge-lua
+          sh tools/mkgen.sh
+
       - name: Build
         run: cargo xwin build --release --workspace --target x86_64-pc-windows-msvc
 

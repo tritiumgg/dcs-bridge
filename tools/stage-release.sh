@@ -13,12 +13,14 @@
 # Only those two binaries ship. protoc-gen-dcsbridge-lua is a build-time protoc
 # plugin, so naming the artifacts here keeps it out of a release.
 #
-# The zip also carries the Lua files under lua/, which need no build, and
-# schema.pb, which tools/mkschema.sh compiles. The schema is
-# platform-independent and comes from the .proto tree rather than from the
-# Windows build, so it has a path of its own rather than a place under BUILD.
+# The zip also carries the Lua files under lua/, which need no build,
+# schema.pb, which tools/mkschema.sh compiles, and HookDriver.gen.lua, which
+# tools/mkgen.sh writes from it. Both are platform-independent and come from
+# the .proto tree rather than from the Windows build, so each has a path of
+# its own rather than a place under BUILD. The hook driver does not start
+# without either. ADR 0055, ADR 0056.
 #
-# Usage: sh tools/stage-release.sh <build-dir> [version] [out-dir] [schema]
+# Usage: sh tools/stage-release.sh <build-dir> [version] [out-dir] [schema] [gen]
 #
 # POSIX sh only, and no required tool beyond zip and one of sha256sum or
 # shasum. llvm-readobj is used for the export check when it is installed.
@@ -29,11 +31,17 @@ BUILD=${1:-$ROOT/target/x86_64-pc-windows-msvc/release}
 VERSION=${2:-}
 OUT=${3:-$ROOT/dist}
 SCHEMA=${4:-$ROOT/target/schema.pb}
+GEN=${5:-$ROOT/target/gen/HookDriver.gen.lua}
 
 [ -d "$BUILD" ] || { printf 'no build directory at %s\n' "$BUILD" >&2; exit 2; }
 [ -f "$SCHEMA" ] || {
     printf 'no schema at %s. Build it first:\n\n' "$SCHEMA" >&2
     printf '  mise run schema\n' >&2
+    exit 2
+}
+[ -f "$GEN" ] || {
+    printf 'no generated hook driver file at %s. Generate it first:\n\n' "$GEN" >&2
+    printf '  mise run generate\n' >&2
     exit 2
 }
 
@@ -138,6 +146,7 @@ mkdir -p "$STAGE/Mods/services/DCSBridge/bin"
 cp -R "$ROOT/lua/." "$STAGE/"
 cp "$OUT/lua-dcsbridge.dll" "$STAGE/Mods/services/DCSBridge/bin/"
 cp "$SCHEMA" "$STAGE/Mods/services/DCSBridge/schema.pb"
+cp "$GEN" "$STAGE/Mods/services/DCSBridge/lua/HookDriver.gen.lua"
 (cd "$STAGE" && zip -qr "../$ZIP" .)
 rm -rf "$STAGE"
 
