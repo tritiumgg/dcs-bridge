@@ -448,6 +448,10 @@ local MODULE = lfs.writedir() .. 'Mods/services/DCSBridge/bin/lua-dcsbridge.dll'
 -- from, beside this file in the release zip. ADR 0055.
 local GEN = lfs.writedir() .. 'Mods/services/DCSBridge/lua/HookDriver.gen.lua'
 
+-- The compiled schema the broker serves to consumers, from the same build
+-- as the generated file. ADR 0056.
+local SCHEMA = lfs.writedir() .. 'Mods/services/DCSBridge/schema.pb'
+
 -- The broker module's call surface this file is written against. The
 -- module puts its own on the table it opens with, and start compares the
 -- two before anything is configured. A Rust test in crates/lua-module
@@ -503,6 +507,21 @@ local function load_gen(shim)
   return gen
 end
 
+-- schema.pb's bytes. Every release carries the file, so one that does not
+-- read is a broken install and stops the start. ADR 0056.
+local function read_schema()
+  local file, err = io.open(SCHEMA, 'rb')
+  if not file then
+    fail('the schema did not open: ' .. tostring(err))
+  end
+  local bytes = file:read('*a')
+  file:close()
+  if not bytes or #bytes == 0 then
+    fail('the schema is empty: ' .. SCHEMA)
+  end
+  return bytes
+end
+
 -- Called once by the loader, which wrote ctx.banner to dcs.log already and
 -- logs anything this raises there. The banner comes first, at the default
 -- level, so DCSBridge.log names the build even when the file does not read
@@ -540,6 +559,9 @@ function driver.start(ctx)
   -- schema it is handed. ADR 0052.
   state.gen = load_gen(shim)
   state.broker.schema_sha256 = state.gen.schema_sha256
+  -- Read before configure for the same reason, and handed over after it,
+  -- since the broker takes a schema only once configured.
+  local schema = read_schema()
   -- Every broker key in one call, so the first call is the whole
   -- configuration and nothing is left at a default the file changed.
   local configured, answer = pcall(shim.configure, state.broker)
@@ -551,6 +573,21 @@ function driver.start(ctx)
     .. ', applied ' .. tostring(answer.applied)
     .. ', unknown ' .. tostring(answer.unknown)
     .. ', pending_restart ' .. tostring(answer.pending_restart))
+
+  -- The one stop after the bind. The broker then listens with no schema:
+  -- its handshake carries no hash and GetSchema answers an error. ADR 0056.
+  local held, sha256 = pcall(shim.schema, schema)
+  if not held then
+    fail(tostring(sha256) .. '; the broker listens with no schema to serve')
+  end
+  -- A hash that differs is a warning, not a stop: the bytes are what is
+  -- deployed, and the broker counts the mismatch. ADR 0052.
+  if sha256 == state.gen.schema_sha256:lower() then
+    log.info('schema ' .. sha256)
+  else
+    log.warn('schema ' .. sha256 .. ' but HookDriver.gen.lua was generated from '
+      .. state.gen.schema_sha256)
+  end
 end
 
 return driver

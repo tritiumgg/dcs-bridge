@@ -1,11 +1,12 @@
 -- The hook driver's start: the banner first, then Config/DCSBridge.lua read
 -- and its log keys handed to the logger, so every line after the banner is
 -- written at the file's level, then the broker module opened, its interface
--- compared with the driver's, the generated file loaded, and the module
--- handed every broker key and the generated hash in one call. A file that
--- does not read stops the start before the module opens, and a module from
--- another build or a missing generated file stops it before configure.
--- ADR 0048, ADR 0050, ADR 0051, ADR 0054, ADR 0055.
+-- compared with the driver's, the generated file and schema.pb read, the
+-- module handed every broker key and the generated hash in one call, and
+-- the schema after it. A file that does not read stops the start before the
+-- module opens, and a module from another build or a missing generated file
+-- or schema stops it before configure. ADR 0048, ADR 0050, ADR 0051,
+-- ADR 0054, ADR 0055, ADR 0056.
 --
 -- Each case installs the hook driver into a scratch write directory and
 -- runs its start directly, under a stock Lua 5.1 with lfs and DCS's log
@@ -26,6 +27,7 @@ local ROOT = dcs.root()
 local DRIVER = 'Mods/services/DCSBridge/lua/HookDriver.lua'
 local DLL = 'Mods/services/DCSBridge/bin/lua-dcsbridge.dll'
 local GEN = 'Mods/services/DCSBridge/lua/HookDriver.gen.lua'
+local SCHEMA = 'Mods/services/DCSBridge/schema.pb'
 
 -- The hash of abc, which the golden generated files carry.
 local ABC = 'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad'
@@ -49,8 +51,9 @@ local function write(path, text)
   f:close()
 end
 
--- A write directory with Logs/, the hook driver and the generator's golden
--- HookDriver.gen.lua in it, and the config file when given. A path in
+-- A write directory with Logs/, the hook driver, the generator's golden
+-- HookDriver.gen.lua and a schema.pb holding abc, whose hash the golden
+-- carries, in it, and the config file when given. A path in
 -- omit is left out. Returns the driver and the directory.
 local function install(config, omit)
   omit = omit or {}
@@ -61,6 +64,9 @@ local function install(config, omit)
   if not omit[GEN] then
     write(dir .. GEN, assert(read(ROOT .. 'crates/generator/tests/golden/HookDriver.gen.lua')))
   end
+  if not omit[SCHEMA] then
+    write(dir .. SCHEMA, 'abc')
+  end
   if config then
     write(dir .. 'Config/DCSBridge.lua', config)
   end
@@ -70,8 +76,9 @@ local function install(config, omit)
 end
 
 -- An opener whose module records each configure and answers as the broker
--- does, without one. Its interface is the driver's unless given.
-local function recording(driver, interface)
+-- does, without one. Its interface is the driver's unless given, and its
+-- schema answers the hash of abc unless given another function.
+local function recording(driver, interface, schema)
   interface = interface or driver.INTERFACE
   local calls = {}
   local function open()
@@ -80,6 +87,10 @@ local function recording(driver, interface)
       configure = function(table)
         calls[#calls + 1] = table
         return { interface = interface, applied = 0, unknown = 0, pending_restart = 0, pending = {} }
+      end,
+      schema = schema or function(bytes)
+        assert(bytes == 'abc', 'the schema was handed as ' .. tostring(bytes))
+        return ABC
       end,
     }
   end
@@ -129,6 +140,7 @@ do
   assert(own[3] == 'INFO configured: interface ' .. driver.INTERFACE
     .. ', applied 0, unknown 0, pending_restart 0',
     'the third line is not the answer: ' .. tostring(own[3]))
+  assert(own[4] == 'INFO schema ' .. ABC, 'the fourth line is not the hash: ' .. tostring(own[4]))
 end
 
 -- The file's broker values reach the broker, tokens with them, and its hook
@@ -272,9 +284,67 @@ do
   assert(#calls == 0, 'configure was called with a short hash')
 end
 
+-- No schema.pb: start raises naming the path, and configure is never
+-- called.
+do
+  local driver, dir = install(nil, { [SCHEMA] = true })
+  local open, calls = recording(driver)
+  driver.open = open
+  local started, err = pcall(driver.start, { banner = 'the banner' })
+  assert(not started, 'start ran with no schema')
+  assert(err:find(dir .. SCHEMA, 1, true), 'the reason does not name the file: ' .. tostring(err))
+  assert(#calls == 0, 'configure was called with no schema')
+  local own = lines(dir)
+  assert(own[#own] == 'ERROR ' .. err, 'the failure is not logged: ' .. tostring(own[#own]))
+end
+
+-- An empty schema.pb, as a truncated unzip leaves one: start raises before
+-- configure, so nothing binds.
+do
+  local driver, dir = install(nil, { [SCHEMA] = true })
+  write(dir .. SCHEMA, '')
+  local open, calls = recording(driver)
+  driver.open = open
+  local started, err = pcall(driver.start, { banner = 'the banner' })
+  assert(not started and err:find('the schema is empty', 1, true),
+    'an empty schema was taken: ' .. tostring(err))
+  assert(#calls == 0, 'configure was called with an empty schema')
+end
+
+-- A schema whose hash is not the generated file's: a WARN line naming both,
+-- and the start completes.
+do
+  local OTHER = string.rep('0', 64)
+  local driver, dir = install()
+  driver.open = recording(driver, nil, function() return OTHER end)
+  driver.start({ banner = 'the banner' })
+  local own = lines(dir)
+  assert(own[#own] == 'WARN schema ' .. OTHER .. ' but HookDriver.gen.lua was generated from ' .. ABC,
+    'the mismatch is not a warning: ' .. tostring(own[#own]))
+end
+
+-- A schema the broker refuses: the one stop after configure, logged and
+-- raised with the listener up.
+do
+  local driver, dir = install()
+  local open, calls = recording(driver, nil, function()
+    error('schema refused: the schema is 3 bytes and its answer would not fit', 0)
+  end)
+  driver.open = open
+  local started, err = pcall(driver.start, { banner = 'the banner' })
+  assert(not started, 'start ran past a refused schema')
+  assert(err:find('^schema refused: .*no schema to serve$'), 'start raised ' .. tostring(err))
+  assert(#calls == 1, #calls .. ' configure calls before the refusal, expected 1')
+  local own = lines(dir)
+  assert(own[#own] == 'ERROR ' .. err, 'the refusal is not logged: ' .. tostring(own[#own]))
+end
+
 -- The real module, asked for at the shipped path and opened at the
 -- harness's. Port 0 lets the system pick, so the run collides with nothing.
--- load.lua says why both spellings are tried.
+-- Its interface matches the driver's, it counts schema_sha256 as nothing
+-- unknown, and the hash it answers for schema.pb is the golden's. A stock
+-- Lua opens no socket, so the handshake carrying that hash is the Rust
+-- loopback tests' to read. load.lua says why both spellings are tried.
 do
   local driver, dir = install('return { port = 0 }')
   local shim
@@ -296,9 +366,11 @@ do
     assert(not line:find('defaults in force', 1, true), 'the file was not read')
   end
   local want = 'INFO configured: interface ' .. shim.interface .. ', applied '
-  assert(own[#own]:sub(1, #want) == want
-    and own[#own]:find(', unknown 0, pending_restart 0$'),
-    'the last line is not the broker\'s answer: ' .. tostring(own[#own]))
+  local answer = own[#own - 1]
+  assert(answer:sub(1, #want) == want and answer:find(', unknown 0, pending_restart 0$'),
+    'the line before the hash is not the broker\'s answer: ' .. tostring(answer))
+  assert(own[#own] == 'INFO schema ' .. ABC,
+    'the last line is not the hash of schema.pb: ' .. tostring(own[#own]))
 end
 
 for _, dir in ipairs(scratch) do
