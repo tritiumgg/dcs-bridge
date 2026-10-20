@@ -28,7 +28,8 @@ which list is correct: 4.8, 4.9, 9.C1 and 10.2. Task 4.9 promises the operator
 a paste-ready `autoexec.cfg`, and its contents are the unmeasured thing.
 Neither probe register covers it. PROBE-A2 is adjacent but asks a different
 question and needs a build that enforces the gate, which PLAN §3 says was
-reverted.
+reverted. ADR 0046 asks for all six announced states, and task 10.11
+revisits the list.
 
     tools/ledger.sh find SPEC policy-gate
 

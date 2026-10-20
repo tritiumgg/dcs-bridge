@@ -221,6 +221,7 @@ the milestone before it is reached.
 | 10.6 | Hook driver built-ins, HOOK §1: identity map, records, commands, capabilities, bounce guards, audit. | The HOOK §13 rows pass. |
 | 10.7 | Run PROBE-17, PROBE-18, PROBE-19 and PROBE-20 against the built hook driver built-ins on a dedicated server, and PROBE-A2, PROBE-A5, PROBE-A6 and PROBE-A11 where a second player, a cockpit or an enforcing build allows. | HOOK §12's register is empty. |
 | 10.8 | Run PROBE-10: the whole probe set on a dedicated server. | No figure in any document rests on a single-player host alone. |
+| 10.11 | Revisit the six `net.allow_dostring_in` states ADR 0046 asks for, now that the hook driver and sim driver built-ins reach every state they need. Measure which states each call needs, on a build that enforces the gate where one exists. | The list narrows to states measured on an enforcing build, or a decision record says no enforcing build exists and why the six stay. 4.9, 9.C1 and 10.2 emit the identical list. |
 | 10.9 | The `---@meta` runtime stub and the `.luarc.json` template (Section 2). | Both load clean in a stock Lua language server against a checkout. |
 | 10.10 | Reference consumer in one language. | Under 200 lines and obviously a template. |
 

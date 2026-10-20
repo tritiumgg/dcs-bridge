@@ -144,18 +144,22 @@ directory. It survives DCS updates.
 
 The Stock route depends on a DCS policy setting in `Config\autoexec.cfg` in
 the Saved Games directory. The setting is two keys. Each key holds a list of
-names. DCS-Bridge needs these names in each list:
+names. Set these names in each list:
 
-| Key | Names DCS-Bridge needs |
+| Key | Names to set |
 |---|---|
 | `net.allow_unsafe_api` | `"userhooks"` |
-| `net.allow_dostring_in` | `"server"`, `"mission"`, `"gui"` |
+| `net.allow_dostring_in` | `"server"`, `"mission"`, `"scripting"`, `"gui"`, `"export"`, `"config"` |
+
+DCS-Bridge calls into `"server"`, `"mission"` and `"gui"`. It asks for the
+other three because ED's two descriptions of the setting disagree, and no
+current DCS build shows which one is right. The list is not final.
 
 If the file does not exist, or has neither key, add these two lines:
 
 ```lua
 net.allow_unsafe_api = {"userhooks"}
-net.allow_dostring_in = {"server", "mission", "gui"}
+net.allow_dostring_in = {"server", "mission", "scripting", "gui", "export", "config"}
 ```
 
 If the file already has a key, keep the line and add the missing names to its
@@ -170,7 +174,7 @@ net.allow_dostring_in = {"server"}
 becomes:
 
 ```lua
-net.allow_dostring_in = {"server", "mission", "gui"}
+net.allow_dostring_in = {"server", "mission", "scripting", "gui", "export", "config"}
 ```
 
 Set both keys. A file with `net.allow_dostring_in` and no
