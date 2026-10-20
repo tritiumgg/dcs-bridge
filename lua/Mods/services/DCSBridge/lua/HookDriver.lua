@@ -155,6 +155,13 @@ function log.open(dir)
   prune(dir)
 end
 
+-- Called once by the loader, which wrote ctx.banner to dcs.log already.
+local function start(ctx)
+  log.open(lfs.writedir() .. 'Logs/DCSBridge')
+  log.info(ctx.banner)
+end
+
 return {
   log = log,
+  start = start,
 }

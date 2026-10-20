@@ -45,8 +45,8 @@ function dcs.lfs(writedir)
     end
   end
 
-  -- Only the size is asked for by name, which is one of the three fields
-  -- DCS's own code depends on.
+  -- The three fields DCS's own code depends on. The modification time is
+  -- the moment of the call, which no test compares against.
   function lfs.attributes(path, field)
     local f = io.open(path, 'rb')
     if not f then
@@ -54,10 +54,11 @@ function dcs.lfs(writedir)
     end
     local n = f:seek('end')
     f:close()
-    if field == 'size' then
-      return n
+    local attributes = { mode = 'file', size = n, modification = os.time() }
+    if field then
+      return attributes[field]
     end
-    return { mode = 'file', size = n }
+    return attributes
   end
 
   function lfs.mkdir(path)
