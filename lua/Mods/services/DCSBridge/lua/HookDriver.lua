@@ -56,9 +56,9 @@ local function rotated(dir)
   return found
 end
 
--- Hold the rotated files together to the cap, oldest deleted first. The
--- live file is not counted, so the file just rotated survives whenever it
--- fits alone.
+-- Hold the rotated files together to the cap, oldest deleted first, then
+-- delete any older than the retention. The live file is not counted, so the
+-- file just rotated survives whenever it fits alone.
 local function prune(dir)
   local files = rotated(dir)
   local total = 0
@@ -66,12 +66,20 @@ local function prune(dir)
     file.size = size(dir .. '/' .. file.name)
     total = total + file.size
   end
-  for _, file in ipairs(files) do
-    if total <= logger.max_bytes then
+  local first = 1
+  while first <= #files and total > logger.max_bytes do
+    os.remove(dir .. '/' .. files[first].name)
+    total = total - files[first].size
+    first = first + 1
+  end
+
+  -- Both stamps are UTC in the same form, so they compare as strings.
+  local cutoff = os.date('!%Y%m%d-%H%M%S', os.time() - logger.retention_days * 86400)
+  for i = first, #files do
+    if files[i].stamp >= cutoff then
       break
     end
-    os.remove(dir .. '/' .. file.name)
-    total = total - file.size
+    os.remove(dir .. '/' .. files[i].name)
   end
 end
 
@@ -138,6 +146,9 @@ function log.configure(opts)
 end
 
 function log.open(dir)
+  if logger.file then
+    logger.file:close()
+  end
   lfs.mkdir(dir)
   logger.dir = dir
   logger.file = assert(io.open(dir .. '/' .. LIVE, 'a'))

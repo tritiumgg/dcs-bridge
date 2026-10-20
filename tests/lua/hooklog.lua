@@ -145,6 +145,32 @@ do
     'dcs.log does not name the failed rename')
 end
 
+-- Opening the logger deletes a rotated file older than log_retention_days,
+-- keeps a recent one, and leaves a name that does not parse alone.
+do
+  local driver, dir = fresh()
+  lfs.mkdir(dir)
+  local recent = 'DCSBridge.' .. os.date('!%Y%m%d-%H%M%S', os.time() - 86400) .. '.log'
+  for _, name in ipairs({ 'DCSBridge.20200101-000000.log', recent, 'DCSBridge.notastamp.log' }) do
+    local f = assert(io.open(dir .. '/' .. name, 'w'))
+    f:write('old\n')
+    f:close()
+  end
+
+  driver.log.configure({ log_retention_days = 14 })
+  driver.log.open(dir)
+  local names = rotated(dir)
+  assert(#names == 2, #names .. ' files left, expected 2')
+  assert(names[1] == recent, 'a file a day old was deleted')
+  assert(names[2] == 'DCSBridge.notastamp.log', 'a name that does not parse was deleted')
+
+  driver.log.configure({ log_retention_days = 0 })
+  driver.log.open(dir)
+  names = rotated(dir)
+  assert(#names == 1 and names[1] == 'DCSBridge.notastamp.log',
+    'a retention of zero days kept a rotated file')
+end
+
 for _, dir in ipairs(scratch) do
   dcs.remove(dir)
 end
