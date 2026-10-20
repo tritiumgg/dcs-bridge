@@ -1480,7 +1480,7 @@ impl Bridge {
     /// all the same, the mismatch is counted, and the answer carries both
     /// hashes for the registrar to report: a table from another generator
     /// run is detected rather than refused. With no schema held, nothing is
-    /// compared. ADR 0052.
+    /// compared. ADR 0052, ADR 0053.
     pub fn register_classes(
         &self,
         rows: impl IntoIterator<Item = (Topic, RecordClass)>,

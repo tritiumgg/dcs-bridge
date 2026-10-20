@@ -249,6 +249,10 @@ pub unsafe extern "C" fn luaopen_dcsbridge(state: *mut core::ffi::c_void) -> cor
 /// the `tokens` list, and gets back the interface version it compares
 /// against its own, and what the call did with the table. Until the first
 /// call allocates and binds, the module open does, at the defaults.
+///
+/// The table also carries `schema_sha256`, the hash the hook driver's
+/// generated file was built from, as a string. The broker takes it out
+/// before the table is applied and counts it nowhere. ADR 0052.
 #[cfg(any(unix, feature = "dcs-lua"))]
 mod configure {
     use core::ffi::{CStr, c_int, c_void};
@@ -664,6 +668,13 @@ unsafe fn push_error(state: *mut core::ffi::c_void, message: String) {
     drop(message);
 }
 
+/// A SHA-256 as lowercase hex, which is how the generator writes one and
+/// what a person compares against a file.
+#[cfg(any(unix, feature = "dcs-lua"))]
+fn hex(sha256: &[u8; 32]) -> String {
+    sha256.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
 /// The member of a mirrored enum that the value at `index` names, by its
 /// lowercase name or the schema's number, or nothing for any other value.
 ///
@@ -764,7 +775,7 @@ mod schema {
             let bytes = core::slice::from_raw_parts(ptr.cast::<u8>(), len);
             match dcsbridge_broker::bridge().hold_schema(bytes) {
                 Ok(sha256) => {
-                    let hex: String = sha256.iter().map(|byte| format!("{byte:02x}")).collect();
+                    let hex = crate::hex(&sha256);
                     lua::lua_pushlstring(state, hex.as_ptr().cast(), hex.len());
                     drop(hex);
                     true
@@ -905,6 +916,12 @@ mod epoch {
 /// is asked. `replies` is its own call rather than an argument of another:
 /// ADR 0023.
 ///
+/// `classes` takes a second argument, the schema hash the caller's
+/// generated file carries, as 64 hex digits. When it differs from the hash
+/// of the schema the broker holds, the rows are registered all the same
+/// and the call answers a second value, a warning naming both hashes, for
+/// the caller to log. ADR 0053.
+///
 /// The calls only store, so none is refused before the first `configure`.
 #[cfg(any(unix, feature = "dcs-lua"))]
 mod register {
@@ -954,15 +971,6 @@ mod register {
         };
     }
 
-    entry!(classes, |state| table::<RecordClass>(
-        state,
-        "classes",
-        |rows| {
-            dcsbridge_broker::bridge()
-                .register_classes(rows, None)
-                .map(|(added, _)| added)
-        }
-    ));
     entry!(routes, |state| table::<Target>(state, "routes", |rows| {
         dcsbridge_broker::bridge().register_routes(rows)
     }));
@@ -970,6 +978,101 @@ mod register {
         dcsbridge_broker::bridge().register_caps(rows)
     }));
     entry!(replies, list);
+
+    /// `shim.classes(table)` and `shim.classes(table, sha256)`: the one
+    /// call that can answer two values, so it has an entry of its own,
+    /// shaped as `entry!`'s.
+    unsafe extern "C" fn classes(state: *mut c_void) -> c_int {
+        // SAFETY: a Lua call. This frame owns nothing.
+        unsafe {
+            let pushed = hashed_classes(state);
+            if pushed > 0 {
+                return pushed;
+            }
+            lua::lua_error(state);
+        }
+        unreachable!("lua_error does not return")
+    }
+
+    /// Read the hash and the table, register the rows, and push the count
+    /// and any warning, or push the refusal. Returns the values pushed, or
+    /// 0 for a refusal.
+    ///
+    /// # Safety
+    ///
+    /// `state` is inside a Lua call whose first argument is at 1, with
+    /// three stack slots free.
+    // Never inlined into the entry; see `apply` in `configure`.
+    #[inline(never)]
+    unsafe fn hashed_classes(state: *mut c_void) -> c_int {
+        // SAFETY: the caller's contract. The hash and the table are both
+        // read before the broker sees either, so a bad one registers
+        // nothing.
+        unsafe {
+            lua::luaL_checktype(state, 1, lua::TTABLE);
+            let sha256 = match read_sha256(state, 2) {
+                Ok(sha256) => sha256,
+                Err(why) => {
+                    refuse(state, "classes", why);
+                    return 0;
+                }
+            };
+            let rows = match read_rows::<RecordClass>(state) {
+                Ok(rows) => rows,
+                Err(why) => {
+                    refuse(state, "classes", why);
+                    return 0;
+                }
+            };
+            match dcsbridge_broker::bridge().register_classes(rows, sha256) {
+                Ok((added, mismatch)) => {
+                    lua::lua_pushinteger(state, added as isize);
+                    let Some(mismatch) = mismatch else {
+                        return 1;
+                    };
+                    let warning = format!(
+                        "schema_sha256 differs: the broker holds {}, the table was generated from {}",
+                        crate::hex(&mismatch.held),
+                        crate::hex(&mismatch.theirs)
+                    );
+                    lua::lua_pushlstring(state, warning.as_ptr().cast(), warning.len());
+                    drop(warning);
+                    2
+                }
+                Err(conflict) => {
+                    refuse(state, "classes", conflict.to_string());
+                    0
+                }
+            }
+        }
+    }
+
+    /// The optional hash at `index`: nothing when absent or nil, the hash
+    /// when 64 hex digits, and the refusal otherwise. Pushes nothing.
+    ///
+    /// # Safety
+    ///
+    /// `state` is inside a Lua call.
+    unsafe fn read_sha256(state: *mut c_void, index: c_int) -> Result<Option<[u8; 32]>, String> {
+        // SAFETY: the value is checked to be a string before it is read as
+        // one, and its bytes are Lua's for the span they are read in.
+        unsafe {
+            // No argument reads as LUA_TNONE, which is -1, one below nil.
+            if lua::lua_type(state, index) <= lua::TNIL {
+                return Ok(None);
+            }
+            if lua::lua_type(state, index) != lua::TSTRING {
+                return Err("the schema hash is not a string".into());
+            }
+            let mut len = 0;
+            let s = lua::lua_tolstring(state, index, &mut len);
+            let text = core::str::from_utf8(core::slice::from_raw_parts(s.cast(), len)).ok();
+            match text.and_then(dcsbridge_broker::state::sha256_from_hex) {
+                Some(sha256) => Ok(Some(sha256)),
+                None => Err("the schema hash is not 64 hex digits".into()),
+            }
+        }
+    }
 
     /// `shim.replies(list)`: the topics a record may be addressed to one
     /// connection on. A set has no value to conflict on, so the broker
