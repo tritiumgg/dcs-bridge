@@ -114,6 +114,90 @@ for _, row in ipairs(KEYS) do
   BY_NAME[row[1]] = { default = row[2], owner = row[3] }
 end
 
+local config = {
+  KEYS = KEYS,
+}
+
+-- Every key at its default. A table default is a new table each time, so
+-- nothing a caller does to one reaches the next.
+local function defaults()
+  local values = {}
+  for _, row in ipairs(KEYS) do
+    local default = row[2]
+    if type(default) == 'table' then
+      default = {}
+    end
+    values[row[1]] = default
+  end
+  return values
+end
+
+-- The file at path overlaid on the defaults, and the lines to log about it,
+-- each { level = 'info' or 'warn', message = ... }. The caller logs them, so
+-- they are written at the level the file sets. Or nil and the reason the
+-- file does not read. ADR 0051.
+function config.read(path)
+  local values = defaults()
+
+  -- Only ENOENT means absent. Its number is 2 on every platform, where the
+  -- message text differs. A file that is there and will not open stops the
+  -- start like any other file that does not read.
+  local f, reason, errno = io.open(path, 'rb')
+  if not f then
+    if errno == 2 then
+      return values, { { level = 'info', message = 'no ' .. path .. ', defaults in force' } }
+    end
+    return nil, 'the configuration does not open: ' .. tostring(reason)
+  end
+  local text = f:read('*a')
+  f:close()
+
+  -- Some Windows editors begin a UTF-8 file with a byte-order mark, which
+  -- Lua 5.1 does not compile. The '@' names the chunk by its path, so a
+  -- compile error names the file as loadfile's would.
+  text = text:gsub('^\239\187\191', '')
+  local chunk, err = loadstring(text, '@' .. path)
+  if not chunk then
+    return nil, 'the configuration does not compile: ' .. tostring(err)
+  end
+  -- No global reaches the file, so it can name values and nothing else.
+  setfenv(chunk, {})
+  local ran, file = pcall(chunk)
+  if not ran then
+    return nil, 'the configuration raised: ' .. tostring(file)
+  end
+  if type(file) ~= 'table' then
+    return nil, path .. ' returned a ' .. type(file) .. ', not a table'
+  end
+
+  -- In name order, so the lines read the same on every start.
+  local names = {}
+  for name in pairs(file) do
+    names[#names + 1] = name
+  end
+  table.sort(names, function(a, b)
+    return tostring(a) < tostring(b)
+  end)
+
+  local notes = { { level = 'info', message = 'read ' .. path } }
+  for _, name in ipairs(names) do
+    local row = BY_NAME[name]
+    local value = file[name]
+    if not row then
+      notes[#notes + 1] = {
+        level = 'warn',
+        message = path .. ' names ' .. tostring(name) .. ', which is not a key, so it is ignored',
+      }
+    elseif type(value) ~= type(row.default) then
+      return nil, path .. ': ' .. name .. ' is a ' .. type(value)
+        .. ', and it takes a ' .. type(row.default)
+    else
+      values[name] = value
+    end
+  end
+  return values, notes
+end
+
 -- Opened in binary mode, always. Text mode on Windows writes each newline
 -- as two bytes, so the length counted against the cap would not be the
 -- length written.
@@ -287,10 +371,6 @@ local function start(ctx)
   log.open(lfs.writedir() .. 'Logs/DCSBridge')
   log.info(ctx.banner)
 end
-
-local config = {
-  KEYS = KEYS,
-}
 
 return {
   config = config,
