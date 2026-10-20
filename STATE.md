@@ -18,7 +18,7 @@ is just deleted. Write entries as one or two lines, never paragraphs.
 
 ## In progress
 
-Nothing. 3.6 is built; 4.1 is next.
+Nothing. 4.1 is built; 4.2 is next.
 
 *One task at most. Say what is done, what is not, and where to resume. Say what
 is committed and what is only in the working tree. Say what is knowingly
@@ -26,21 +26,21 @@ broken. Empty this when the task closes.*
 
 ## Just finished
 
+- **4.1** — loader under `lua/`, `ENABLED`, banner in both logs, `DCSBridge.log` rotated at its cap; rotation and the banner agent-verified under stock Lua, the live-install banner is the maintainer's (PR #94 "With DCS"). PR #94, ADR 0047 to 0049.
 - **3.6** — decoders under `decode`, every kind but a group, `MAX_DEPTH` and `MAX_ELEMENTS` from the schema, fed hand-built bodies under stock Lua; agent-verified. PR #92, ADR 0043 to 0045.
 - **3.3** — emitters, `send`/`send_to`, `CommandAck` and split output, golden-tested and called through stock Lua; agent-verified. PR #91, ADR 0040 to 0042.
-- **3.1** — the generator's tables, golden-tested and loaded by stock Lua; agent-verified. PR #90, ADR 0036 to 0039.
 
 *The last three at most, one line each. Git log holds the rest.*
 
 ## Next
 
-**Task 4.1** — thin hook driver loader, `ENABLED` flag, load banner, and
-`Logs\DCSBridge\DCSBridge.log` rotated at its cap; it owes 2.2's banner. Its
-brief settles who verifies.
+**Task 4.2** — config with the same defaults in code; the hook driver reads
+`Config\DCSBridge.lua`, hands the `log_*` keys to `log.configure` (ADR 0048),
+loads the DLL and calls `shim.configure`. Its brief settles who verifies.
 
 ## After that
 
-- **4.2** onward through Phase 4; 3.5 waits behind 7.6.
+- **4.3** onward through Phase 4; 3.5 waits behind 7.6.
 
 ## Carries forward
 
@@ -71,9 +71,9 @@ entries at most: an eleventh means something here is finished, or belongs in
   2.14, late join at 2.17 and topic filter and topic discovery at 2.20, in
   the Rust loopback tests, since a bare Lua
   5.1 opens no socket. ADR 0017, ADR 0023, ADR 0027, ADR 0029, ADR 0030.
-- **Task 2.2's load banner is owed by 4.1.** SPEC §13 addresses the banner to
-  the Lua side and SPEC §15 has `doctor` check it. Nothing makes the DLL write
-  one, and SPEC §4 leaves it no `io`. Delete this when 4.1 closes.
+- **Task 2.2's DLL load inside DCS is owed by 4.2.** 4.1's loader writes the
+  banner and loads no DLL, so no live install has run `package.loadlib` yet.
+  4.2's first `shim.configure` is that load. Delete this when 4.2 closes.
 - **What 2.4 to 2.16 left to 9.7 and nobody.** Until 9.1 and 9.5, a
   `configure` that drops a token leaves its session open, and
   `max_unauthenticated_connections` and `auth_failures_per_min` bind nothing.
