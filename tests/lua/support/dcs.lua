@@ -8,6 +8,10 @@
 
 local dcs = {}
 
+-- 2023-11-14 22:13:20 UTC, and a different wall-clock time in any zone but
+-- UTC, so a banner in local time would not match.
+dcs.MODIFIED = 1700000000
+
 local function quote(path)
   return "'" .. path:gsub("'", "'\\''") .. "'"
 end
@@ -45,8 +49,8 @@ function dcs.lfs(writedir)
     end
   end
 
-  -- The three fields DCS's own code depends on. The modification time is
-  -- the moment of the call, which no test compares against.
+  -- The three fields DCS's own code depends on. Every file reports the same
+  -- modification time, dcs.MODIFIED, so a test can compare against it.
   function lfs.attributes(path, field)
     local f = io.open(path, 'rb')
     if not f then
@@ -54,7 +58,7 @@ function dcs.lfs(writedir)
     end
     local n = f:seek('end')
     f:close()
-    local attributes = { mode = 'file', size = n, modification = os.time() }
+    local attributes = { mode = 'file', size = n, modification = dcs.MODIFIED }
     if field then
       return attributes[field]
     end

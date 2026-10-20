@@ -63,8 +63,8 @@ do
     'the banner is not an INFO line under DCSBridge')
   for _, file in ipairs({ LOADER, DRIVER }) do
     local size = lfs.attributes(dir .. file, 'size')
-    assert(line.message:find(file .. ' ' .. size .. ' bytes, modified ', 1, true),
-      'the banner does not name ' .. file .. ' by its size')
+    assert(line.message:find(file .. ' ' .. size .. ' bytes, modified 2023-11-14 22:13:20', 1, true),
+      'the banner does not name ' .. file .. ' by its size and UTC modification time')
   end
 
   local own = read(dir .. 'Logs/DCSBridge/DCSBridge.log')
