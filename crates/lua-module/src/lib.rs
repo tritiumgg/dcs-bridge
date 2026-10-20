@@ -168,9 +168,12 @@ mod lua {
 /// The Interface A call surface: the calls on the table `luaopen_dcsbridge`
 /// leaves, their arguments and what they return.
 ///
-/// The hook driver compares it at its first `configure` and disables itself
-/// on a mismatch, so it moves when a call is added, removed or changes
-/// signature, and for nothing else. It is an opaque equality, not an order.
+/// The hook driver reads it off the opened table, compares it with its own
+/// before its first `configure`, and disables itself on a mismatch, so it
+/// moves when a call is added or removed, or changes in a way an older
+/// caller would misread, and for nothing else. An optional argument or an
+/// extra return value an older caller ignores does not move it (ADR 0053).
+/// It is an opaque equality, not an order. ADR 0054.
 pub const INTERFACE_VERSION: &str = "5";
 
 /// Open the bridge in `state`, leaving one table on the stack.
@@ -1768,5 +1771,31 @@ mod put {
             lua::lua_pushboolean(state, c_int::from(queued));
         }
         1
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// The hook driver holds the interface version it was written against
+    /// and refuses a module from another build, so the two copies of the
+    /// string have to move together. The hook driver's is read off the file
+    /// by its one-line shape, `local INTERFACE = '...'`. ADR 0054.
+    #[test]
+    fn the_hook_driver_is_written_against_this_interface() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../lua/Mods/services/DCSBridge/lua/HookDriver.lua"
+        );
+        let driver =
+            std::fs::read_to_string(path).unwrap_or_else(|e| panic!("could not read {path}: {e}"));
+        let found: Vec<&str> = driver
+            .lines()
+            .filter_map(|line| line.strip_prefix("local INTERFACE = '")?.strip_suffix('\''))
+            .collect();
+        assert_eq!(
+            found,
+            [super::INTERFACE_VERSION],
+            "{path} is not written against this module's interface"
+        );
     }
 }

@@ -1,8 +1,10 @@
 -- The hook driver's start: the banner first, then Config/DCSBridge.lua read
 -- and its log keys handed to the logger, so every line after the banner is
--- written at the file's level, then the broker module opened and handed
--- every broker key in one call. A file that does not read stops the start
--- before the module opens. ADR 0048, ADR 0050, ADR 0051.
+-- written at the file's level, then the broker module opened, its interface
+-- compared with the driver's, and handed every broker key in one call. A
+-- file that does not read stops the start before the module opens, and a
+-- module from another build stops it before configure. ADR 0048, ADR 0050,
+-- ADR 0051, ADR 0054.
 --
 -- Each case installs the hook driver into a scratch write directory and
 -- runs its start directly, under a stock Lua 5.1 with lfs and DCS's log
@@ -58,14 +60,16 @@ local function install(config)
 end
 
 -- An opener whose module records each configure and answers as the broker
--- does, without one.
-local function recording()
+-- does, without one. Its interface is the driver's unless given.
+local function recording(driver, interface)
+  interface = interface or driver.INTERFACE
   local calls = {}
   local function open()
     return {
+      interface = interface,
       configure = function(table)
         calls[#calls + 1] = table
-        return { interface = 'x', applied = 0, unknown = 0, pending_restart = 0, pending = {} }
+        return { interface = interface, applied = 0, unknown = 0, pending_restart = 0, pending = {} }
       end,
     }
   end
@@ -85,7 +89,7 @@ end
 -- broker's keys, each at its default.
 do
   local driver, dir = install()
-  local open, calls = recording()
+  local open, calls = recording(driver)
   driver.open = open
   driver.start({ banner = 'the banner' })
 
@@ -111,7 +115,8 @@ do
   assert(own[1] == 'INFO the banner', 'the first line is not the banner: ' .. tostring(own[1]))
   assert(own[2] == 'INFO no ' .. dir .. 'Config/DCSBridge.lua, defaults in force',
     'the second line is not the defaults: ' .. tostring(own[2]))
-  assert(own[3] == 'INFO configured: interface x, applied 0, unknown 0, pending_restart 0',
+  assert(own[3] == 'INFO configured: interface ' .. driver.INTERFACE
+    .. ', applied 0, unknown 0, pending_restart 0',
     'the third line is not the answer: ' .. tostring(own[3]))
 end
 
@@ -125,7 +130,7 @@ do
       route = 'modified',
     }
   ]])
-  local open, calls = recording()
+  local open, calls = recording(driver)
   driver.open = open
   driver.start({ banner = 'the banner' })
 
@@ -140,7 +145,7 @@ end
 -- A file at error: the banner is there, and no INFO line follows it.
 do
   local driver, dir = install("return { log_level = 'error' }")
-  driver.open = recording()
+  driver.open = recording(driver)
   driver.start({ banner = 'the banner' })
   local own = lines(dir)
   assert(own[1] == 'INFO the banner', 'the banner is missing at error')
@@ -150,7 +155,7 @@ end
 -- A key that is not one: a WARN line naming it.
 do
   local driver, dir = install('return { prot = 1 }')
-  driver.open = recording()
+  driver.open = recording(driver)
   driver.start({ banner = 'the banner' })
   local own = lines(dir)
   assert(own[2] == 'INFO read ' .. dir .. 'Config/DCSBridge.lua', 'the read was not logged')
@@ -167,7 +172,7 @@ do
   local driver, dir = install('return { log_max_bytes = 4096, log_retention_days = 1 }')
   local logs = dir .. 'Logs/DCSBridge/'
   write(logs .. old, 'old\n')
-  driver.open = recording()
+  driver.open = recording(driver)
   driver.start({ banner = 'the banner' })
   assert(read(logs .. old), 'the old file did not survive the open')
 
@@ -189,7 +194,7 @@ end
 -- the module is never opened.
 do
   local driver, dir = install('return 1')
-  local open, calls = recording()
+  local open, calls = recording(driver)
   local opened = false
   driver.open = function(...)
     opened = true
@@ -208,13 +213,32 @@ end
 do
   local driver, dir = install()
   driver.open = function()
-    return { configure = function() error('configure refused: `port` must be 0 to 65535', 0) end }
+    return {
+      interface = driver.INTERFACE,
+      configure = function() error('configure refused: `port` must be 0 to 65535', 0) end,
+    }
   end
   local started, err = pcall(driver.start, { banner = 'the banner' })
   assert(not started, 'start ran past a refusal')
   assert(err == 'configure refused: `port` must be 0 to 65535', 'start raised ' .. tostring(err))
   local own = lines(dir)
   assert(own[#own] == 'ERROR ' .. err, 'the refusal is not logged: ' .. tostring(own[#own]))
+end
+
+-- A module from another build: start raises naming both versions, and
+-- configure is never called, so nothing binds.
+do
+  local driver, dir = install()
+  local open, calls = recording(driver, 'another')
+  driver.open = open
+  local started, err = pcall(driver.start, { banner = 'the banner' })
+  assert(not started, 'start ran against another interface')
+  assert(err:find('interface another', 1, true)
+    and err:find('interface ' .. driver.INTERFACE, 1, true),
+    'the reason does not name both versions: ' .. tostring(err))
+  assert(#calls == 0, 'configure was called against another interface')
+  local own = lines(dir)
+  assert(own[#own] == 'ERROR ' .. err, 'the mismatch is not logged: ' .. tostring(own[#own]))
 end
 
 -- The real module, asked for at the shipped path and opened at the

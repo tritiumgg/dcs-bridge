@@ -444,9 +444,17 @@ end
 -- The broker module, where the release zip puts it.
 local MODULE = lfs.writedir() .. 'Mods/services/DCSBridge/bin/lua-dcsbridge.dll'
 
+-- The broker module's call surface this file is written against. The
+-- module puts its own on the table it opens with, and start compares the
+-- two before anything is configured. A Rust test in crates/lua-module
+-- reads this line by its shape and compares it with the module's, so the
+-- two cannot move apart unnoticed. ADR 0054.
+local INTERFACE = '5'
+
 -- The table this file returns. start reaches open through it, so a test
 -- that replaces open runs start with no module at MODULE. ADR 0050.
 local driver = {
+  INTERFACE = INTERFACE,
   config = config,
   log = log,
 }
@@ -495,6 +503,14 @@ function driver.start(ctx)
   local opened, shim = pcall(driver.open, MODULE)
   if not opened then
     fail(tostring(shim))
+  end
+  -- Compared here rather than in configure's answer, because the first
+  -- configure binds the listener, and a stop after it would leave the
+  -- broker listening behind a hook driver that did not start. ADR 0054.
+  if shim.interface ~= INTERFACE then
+    fail('the broker module is interface ' .. tostring(shim.interface)
+      .. ' and this hook driver is interface ' .. INTERFACE
+      .. ': they are from different builds')
   end
   -- Every broker key in one call, so the first call is the whole
   -- configuration and nothing is left at a default the file changed.
