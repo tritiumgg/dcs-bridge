@@ -132,6 +132,63 @@ local function defaults()
   return values
 end
 
+-- Pairs whose two keys only the hook driver sees together, the first at
+-- least the second. The two recent-key memories have to be as deep as the
+-- ring that can hold a duplicate, or a key is forgotten before its
+-- duplicate arrives. The per-frame evaluation cap has to cover every
+-- subscription, so it never binds. ADR 0050 says why the admin pair applies
+-- always.
+local PAIRS = {
+  { 'recent_idempotency_keys', 'ring_in_sim_driver_records' },
+  { 'recent_admin_keys', 'ring_in_hook_driver_records' },
+  { 'subscription_max_evals', 'max_subscriptions' },
+}
+
+local function strings(list)
+  local n = 0
+  for _ in pairs(list) do
+    n = n + 1
+  end
+  for i = 1, n do
+    if type(list[i]) ~= 'string' then
+      return false
+    end
+  end
+  return true
+end
+
+-- The checks on values the broker never sees: nil if they pass, or the
+-- reason naming the key. The broker checks its own when it is handed them.
+function config.validate(values)
+  if values.route ~= 'stock' and values.route ~= 'modified' then
+    return 'route is ' .. tostring(values.route) .. ', and it takes stock or modified'
+  end
+  if not LEVELS[values.log_level] then
+    return 'log_level is ' .. tostring(values.log_level)
+      .. ', and it takes error, warn, info or debug'
+  end
+  for _, name in ipairs({ 'sim_driver_disabled_files', 'hook_driver_disabled_files' }) do
+    if not strings(values[name]) then
+      return name .. ' is not a list of file names'
+    end
+  end
+  for _, row in ipairs(KEYS) do
+    local name, value = row[1], values[row[1]]
+    if row[3] ~= 'broker' and type(value) == 'number'
+      and (value < 0 or value ~= math.floor(value) or value == math.huge) then
+      return name .. ' is ' .. value .. ', and it takes a whole number from 0'
+    end
+  end
+  for _, pair in ipairs(PAIRS) do
+    local more, less = pair[1], pair[2]
+    if values[more] < values[less] then
+      return more .. ' is ' .. values[more] .. ', below ' .. less .. ' at ' .. values[less]
+        .. ', and it has to be at least that'
+    end
+  end
+  return nil
+end
+
 -- The file at path overlaid on the defaults, and the lines to log about it,
 -- each { level = 'info' or 'warn', message = ... }. The caller logs them, so
 -- they are written at the level the file sets. Or nil and the reason the
@@ -194,6 +251,10 @@ function config.read(path)
     else
       values[name] = value
     end
+  end
+  local invalid = config.validate(values)
+  if invalid then
+    return nil, path .. ': ' .. invalid
   end
   return values, notes
 end

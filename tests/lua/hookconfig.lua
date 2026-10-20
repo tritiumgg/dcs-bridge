@@ -194,8 +194,53 @@ do
   end
 end
 
+-- The checks the broker cannot make: each refusal names the key, and a pair
+-- names both of its keys.
+for _, case in ipairs({
+  { "return { route = 'A' }", 'route is A, and it takes stock or modified' },
+  { "return { route = 'Stock' }", 'route is Stock' },
+  { "return { log_level = 'verbose' }", 'log_level is verbose' },
+  { "return { hook_driver_disabled_files = { 1 } }", 'hook_driver_disabled_files is not a list' },
+  { "return { sim_driver_disabled_files = { x = 'a' } }", 'sim_driver_disabled_files is not a list' },
+  { 'return { eval_stable_polls = 1.5 }', 'eval_stable_polls is 1.5' },
+  { 'return { max_spots = -1 }', 'max_spots is -1' },
+  { 'return { max_spots = 1/0 }', 'max_spots is inf' },
+  { 'return { max_spots = 0/0 }', 'nan, and it takes a whole number from 0' },
+  { 'return { recent_admin_keys = 100 }', 'recent_admin_keys is 100, below ring_in_hook_driver_records at 256' },
+  { 'return { ring_in_sim_driver_records = 2048 }', 'recent_idempotency_keys is 1024, below ring_in_sim_driver_records at 2048' },
+  { 'return { max_subscriptions = 65 }', 'subscription_max_evals is 64, below max_subscriptions at 65' },
+}) do
+  local driver = fresh()
+  local values, reason = driver.config.read(file(case[1]))
+  assert(values == nil, case[1] .. ' read')
+  assert(type(reason) == 'string' and reason:find(case[2], 1, true),
+    case[1] .. ': the reason reads ' .. tostring(reason))
+end
+
+-- What passes: the other route, a lower level, a named file list, both
+-- sides of a pair raised together, and the defaults themselves.
+do
+  local driver = fresh()
+  local values, notes = driver.config.read(file([[
+    return {
+      route = 'modified',
+      log_level = 'debug',
+      hook_driver_disabled_files = { 'a.lua', 'b.lua' },
+      max_subscriptions = 128,
+      subscription_max_evals = 128,
+    }
+  ]]))
+  assert(values, 'a valid file was refused: ' .. tostring(notes))
+  assert(values.route == 'modified' and values.max_subscriptions == 128)
+end
+do
+  local driver, dir = fresh()
+  local values = assert(driver.config.read(dir .. 'none'))
+  assert(driver.config.validate(values) == nil, 'the defaults do not pass')
+end
+
 for _, dir in ipairs(scratch) do
   dcs.remove(dir)
 end
 
-print('the configuration names every key once and reads the file over the defaults')
+print('the configuration names every key once, reads the file over the defaults and checks it')
