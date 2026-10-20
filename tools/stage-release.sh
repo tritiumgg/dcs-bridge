@@ -13,7 +13,8 @@
 # Only those two binaries ship. protoc-gen-dcsbridge-lua is a build-time protoc
 # plugin, so naming the artifacts here keeps it out of a release.
 #
-# The zip also carries schema.pb, which tools/mkschema.sh compiles. It is
+# The zip also carries the Lua files under lua/, which need no build, and
+# schema.pb, which tools/mkschema.sh compiles. The schema is
 # platform-independent and comes from the .proto tree rather than from the
 # Windows build, so it has a path of its own rather than a place under BUILD.
 #
@@ -128,11 +129,13 @@ case "$FOUND" in
 esac
 
 # The tree mirrors the write directory, so installing is one extraction over it.
-# The broker and the schema have a home there so far; the Lua files join them
-# as they are built. The CLI runs outside DCS and ships as a loose asset.
+# lua/ in the checkout mirrors it too, so the Lua files are copied as a whole:
+# the loader to Scripts/Hooks/ and the hook driver beside the broker. The CLI
+# runs outside DCS and ships as a loose asset.
 ZIP="dcs-bridge-$VERSION.zip"
 STAGE=$OUT/.writedir
 mkdir -p "$STAGE/Mods/services/DCSBridge/bin"
+cp -R "$ROOT/lua/." "$STAGE/"
 cp "$OUT/lua-dcsbridge.dll" "$STAGE/Mods/services/DCSBridge/bin/"
 cp "$SCHEMA" "$STAGE/Mods/services/DCSBridge/schema.pb"
 (cd "$STAGE" && zip -qr "../$ZIP" .)

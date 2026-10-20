@@ -18,8 +18,9 @@ docs/
   conventions/         how to read them, and how to write a decision record
   decisions/           where the build goes somewhere the specifications did not
 proto/                 the record schema. buf.yaml configures the lint
+lua/                   the loader and hook driver, laid out as the write directory
 vendor/lua/lua.def     the import definition for DCS's Lua
-tests/lua/             the module opened by a stock Lua 5.1, no DCS present
+tests/lua/             the module, loader and hook driver under a stock Lua 5.1, no DCS present
 tools/                 ledger.sh, luatest.sh, miri.sh, mkgen.sh, mkimplib.sh, mkschema.sh, nexttask.sh,
                        raiseshape.sh, readmeopen.sh, statecheck.sh
 .github/workflows/     CI, release, version bump

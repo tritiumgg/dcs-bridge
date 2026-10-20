@@ -92,6 +92,13 @@ library, so nothing here needs a DCS install. ADR 0006 says how that resolves
 per host, and why the step runs on Linux and macOS but not on Windows, where a
 module resolves no symbol at load.
 
+The same step runs the loader and the hook driver from `lua/`.
+`tests/lua/hookloader.lua` installs both into a scratch write directory and
+runs the loader the way DCS does. `tests/lua/hooklog.lua` drives the bridge
+log past its cap over real files. Stock Lua has no `lfs` and no DCS `log`, so
+`tests/lua/support/dcs.lua` stands in for both. It sits in a subdirectory so
+the step does not run it as a test.
+
 ### Windows
 
 The product target is `x86_64` Windows for as long as DCS runs nowhere else,
@@ -222,9 +229,10 @@ built by hand.
 A tag carries four assets: `lua-dcsbridge.dll`, `dcsb.exe`,
 `dcs-bridge-<version>.zip` and `SHA256SUMS` over the three. The zip
 mirrors the write directory described in SPEC §13, so installing it is one
-extraction over `Saved Games\<write dir>\`, and it carries the broker and
-`schema.pb`. `dcsb` runs outside DCS and has no home in that tree, so it ships
-beside the zip rather than inside it.
+extraction over `Saved Games\<write dir>\`, and it carries the broker,
+`schema.pb` and the Lua files. `lua/` in the checkout is laid out as the same
+tree, so staging copies it whole. `dcsb` runs outside DCS and has no home in
+that tree, so it ships beside the zip rather than inside it.
 
 The tag names the version, and the part before any `-rc` suffix must match
 `[workspace.package]` in `Cargo.toml`. Staging fails on a mismatch, so bump the
