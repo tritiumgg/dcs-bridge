@@ -132,6 +132,64 @@ pub struct Bridge {
     /// process: replacing the served set is a DCS restart, so a second
     /// hand-off is refused rather than applied.
     schema: OnceLock<HeldSchema>,
+    /// The hash the hook driver's generated file was built from, as the
+    /// first `configure` carried it under `schema_sha256`. The hand-off is
+    /// compared with it. ADR 0052.
+    schema_expected: OnceLock<[u8; 32]>,
+    /// Generated hashes that differed from the held schema's:
+    /// `schema_sha256_mismatch_total`. A mismatch is reported and never
+    /// refused, since the set is still the deployed one. ADR 0052.
+    schema_mismatches: AtomicU64,
+}
+
+/// The configure key that carries the hook driver's generated schema hash.
+/// It is no configuration key: the broker takes it out of every table
+/// before the table is applied. ADR 0052.
+pub const SCHEMA_SHA256: &str = "schema_sha256";
+
+/// A SHA-256 written as 64 hex digits, as the generator writes it and as
+/// `shim.schema` answers it, or `None` when the text is not one.
+pub fn sha256_from_hex(text: &str) -> Option<[u8; 32]> {
+    let text = text.as_bytes();
+    // from_str_radix alone would take a leading `+`.
+    if text.len() != 64 || !text.iter().all(u8::is_ascii_hexdigit) {
+        return None;
+    }
+    let mut sha256 = [0u8; 32];
+    for (byte, pair) in sha256.iter_mut().zip(text.as_chunks::<2>().0) {
+        let pair = std::str::from_utf8(pair).ok()?;
+        *byte = u8::from_str_radix(pair, 16).ok()?;
+    }
+    Some(sha256)
+}
+
+/// A configure table without `schema_sha256`, and the hash it carried.
+type Split<S> = (Vec<(S, Value)>, Option<[u8; 32]>);
+
+/// Split `schema_sha256` off a configure table, reading the whole table
+/// first so a malformed hash refuses the call before any of it applies.
+fn take_schema_sha256<S, I>(table: I) -> Result<Split<S>, config::Error>
+where
+    S: AsRef<str>,
+    I: IntoIterator<Item = (S, Value)>,
+{
+    let mut rest = Vec::new();
+    let mut sha256 = None;
+    for (key, value) in table {
+        if key.as_ref() != SCHEMA_SHA256 {
+            rest.push((key, value));
+            continue;
+        }
+        let parsed = match &value {
+            Value::String(text) => sha256_from_hex(text),
+            _ => None,
+        };
+        sha256 = Some(parsed.ok_or_else(|| config::Error::Value {
+            key: SCHEMA_SHA256,
+            expected: "a SHA-256 as 64 hex digits".into(),
+        })?);
+    }
+    Ok((rest, sha256))
 }
 
 /// The schema as the broker holds it.
@@ -558,6 +616,8 @@ impl Bridge {
             rejections_suppressed: AtomicU64::new(0),
             inbound_total: Mutex::new(Window::new(Instant::now())),
             schema: OnceLock::new(),
+            schema_expected: OnceLock::new(),
+            schema_mismatches: AtomicU64::new(0),
         }
     }
 
@@ -601,11 +661,19 @@ impl Bridge {
     /// thread waits on the logic thread through it. The two counts are
     /// stored beside the swap rather than inside it: they are read by
     /// nothing that decides, only reported.
+    ///
+    /// `schema_sha256` is taken out of every table before it is applied,
+    /// so it is never counted as unknown. The first call keeps it as the
+    /// hash the schema hand-off is compared with; a later call checks it
+    /// and keeps nothing, since the generated file it came from has not
+    /// changed under a running DCS. A value that is not 64 hex digits
+    /// refuses the call. ADR 0052.
     pub fn configure<S, I>(&self, table: I) -> Result<Applied, ConfigureError>
     where
         S: AsRef<str>,
         I: IntoIterator<Item = (S, Value)>,
     {
+        let (table, expected) = take_schema_sha256(table)?;
         let mut configured = self
             .configuring
             .lock()
@@ -642,6 +710,11 @@ impl Bridge {
             );
             self.start_outbound(addr, capacities)
                 .map_err(|error| ConfigureError::Bind { addr, error })?;
+            if let Some(expected) = expected {
+                // `configuring` is held and this is the first call to
+                // succeed, so nothing has set it.
+                let _ = self.schema_expected.set(expected);
+            }
             applied
         };
         self.pending_restart
@@ -855,6 +928,11 @@ impl Bridge {
     /// Refused once a schema is held: replacing the served set is a DCS
     /// restart, so the second call changes nothing. The bytes are not
     /// parsed; the broker holds no schema it understands.
+    ///
+    /// A hash that differs from the one the first `configure` carried is
+    /// counted in `schema_sha256_mismatch_total` and the set is held all
+    /// the same: the bytes are what is deployed, and the caller has the
+    /// hash to report. ADR 0052.
     pub fn hold_schema(&self, bytes: &[u8]) -> Result<[u8; 32], SchemaError> {
         use sha2::{Digest, Sha256};
         if !self.configured() {
@@ -876,7 +954,20 @@ impl Bridge {
         };
         let sha256 = held.sha256;
         self.schema.set(held).map_err(|_| SchemaError::Held)?;
+        if self
+            .schema_expected
+            .get()
+            .is_some_and(|expected| *expected != sha256)
+        {
+            self.schema_mismatches.fetch_add(1, Ordering::Relaxed);
+        }
         Ok(sha256)
+    }
+
+    /// `schema_sha256_mismatch_total`: generated hashes that differed from
+    /// the held schema's.
+    pub fn schema_sha256_mismatches(&self) -> u64 {
+        self.schema_mismatches.load(Ordering::Relaxed)
     }
 
     /// The schema as handed over, or `None` until the hand-off.
@@ -1962,6 +2053,109 @@ mod tests {
             Arc::ptr_eq(&held, &bridge.schema().unwrap()),
             "the held set changed"
         );
+    }
+
+    /// The hash as the generator writes it.
+    fn hex(sha256: &[u8; 32]) -> String {
+        sha256.iter().map(|byte| format!("{byte:02x}")).collect()
+    }
+
+    /// `schema_sha256` rides the first `configure` without counting as
+    /// unknown, and a hand-off whose hash matches it counts nothing; the
+    /// handshake carries the held hash.
+    #[test]
+    fn a_matching_schema_sha256_counts_no_mismatch() {
+        use sha2::{Digest, Sha256};
+
+        let bridge = Bridge::new(4);
+        let set = b"\x0a\x05hello";
+        let want: [u8; 32] = Sha256::digest(set).into();
+        let applied = bridge
+            .configure([
+                ("port", Value::Number(0.0)),
+                (SCHEMA_SHA256, Value::String(hex(&want))),
+            ])
+            .expect("a valid table");
+        assert!(applied.unknown.is_empty(), "{:?}", applied.unknown);
+        assert_eq!(bridge.schema_expected.get(), Some(&want));
+
+        assert_eq!(bridge.hold_schema(set), Ok(want));
+        assert_eq!(bridge.schema_sha256_mismatches(), 0);
+        assert_eq!(bridge.handshake().schema_sha256, Some(want));
+    }
+
+    /// A hand-off whose hash differs from the generated one is counted
+    /// once, and the set is held and served all the same.
+    #[test]
+    fn a_differing_schema_sha256_is_counted_and_the_set_still_held() {
+        let bridge = Bridge::new(5);
+        let set = b"\x0a\x05hello";
+        bridge
+            .configure([
+                ("port", Value::Number(0.0)),
+                (SCHEMA_SHA256, Value::String("ab".repeat(32))),
+            ])
+            .expect("a valid table");
+
+        let sha256 = bridge.hold_schema(set).expect("held despite the mismatch");
+        assert_eq!(bridge.schema_sha256_mismatches(), 1);
+        assert_eq!(bridge.handshake().schema_sha256, Some(sha256));
+        assert_eq!(&bridge.schema().expect("served")[..], &set[..]);
+    }
+
+    /// A value that is not 64 hex digits refuses the first call, naming
+    /// the key, before anything is configured or bound.
+    #[test]
+    fn a_malformed_schema_sha256_refuses_the_call() {
+        let bridge = Bridge::new(6);
+        for value in [
+            Value::String("abc".into()),
+            Value::String(format!("+{}", "a".repeat(63))),
+            Value::String("g".repeat(64)),
+            Value::Number(1.0),
+        ] {
+            let refused = bridge
+                .configure([("port", Value::Number(0.0)), (SCHEMA_SHA256, value)])
+                .expect_err("a malformed hash");
+            assert!(refused.to_string().contains("`schema_sha256`"), "{refused}");
+            assert!(!bridge.configured(), "a refused first call configured");
+            assert!(bridge.outbound().is_none(), "a refused first call bound");
+        }
+    }
+
+    /// A table without the key compares nothing, and a later `configure`
+    /// carrying it, as a reload does, counts it nowhere and leaves the
+    /// first call's hash in place.
+    #[test]
+    fn schema_sha256_is_kept_from_the_first_call_only() {
+        let bridge = Bridge::new(7);
+        bridge
+            .configure([("port", Value::Number(0.0))])
+            .expect("a valid table");
+        assert_eq!(bridge.schema_expected.get(), None);
+
+        let applied = bridge
+            .configure([(SCHEMA_SHA256, Value::String("cd".repeat(32)))])
+            .expect("a valid table");
+        assert!(applied.unknown.is_empty(), "{:?}", applied.unknown);
+        assert_eq!(bridge.unknown_keys(), 0);
+        assert_eq!(bridge.schema_expected.get(), None, "a later call kept it");
+        bridge.hold_schema(b"\x0a\x05hello").expect("held");
+        assert_eq!(bridge.schema_sha256_mismatches(), 0);
+
+        let first = Bridge::new(8);
+        let want = [0xab; 32];
+        first
+            .configure([
+                ("port", Value::Number(0.0)),
+                (SCHEMA_SHA256, Value::String(hex(&want))),
+            ])
+            .expect("a valid table");
+        let applied = first
+            .configure([(SCHEMA_SHA256, Value::String("cd".repeat(32)))])
+            .expect("a valid table");
+        assert!(applied.unknown.is_empty(), "{:?}", applied.unknown);
+        assert_eq!(first.schema_expected.get(), Some(&want));
     }
 
     /// Before any registration the acknowledgement is the one addressable
