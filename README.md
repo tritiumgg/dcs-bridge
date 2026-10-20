@@ -62,6 +62,7 @@ Saved Games\DCS\
   Scripts\Hooks\DCSBridge.lua      The loader. DCS loads it at start.
   Mods\services\DCSBridge\         Everything the bridge ships.
     lua\HookDriver.lua             The hook driver, which the loader runs.
+    bin\lua-dcsbridge.dll          The broker, which the hook driver loads.
 ```
 
 A working install writes a banner line to `Logs\dcs.log` at DCS start, under
@@ -80,18 +81,35 @@ To uninstall, delete `Scripts\Hooks\DCSBridge.lua` and
 
 ### Configure
 
-Settings live in `Config\DCSBridge.lua` in the Saved Games directory. The bridge
-runs with the file absent and uses its defaults. The defaults bind the broker
-to `127.0.0.1:7742`. The full set of keys is not final.
+Settings live in `Config\DCSBridge.lua` in the Saved Games directory. The file
+is Lua that returns one table, and each key you name replaces its default:
 
-The hook script reads the file and hands the bridge its settings with
-`shim.configure`. Nothing listens until that first call, which binds the
-address and sizes the queues. A later call, on `ReloadConfig`, changes the
-keys marked live, such as the timeouts and the tokens; a change to the
+```lua
+return {
+  port = 7743,
+  log_level = 'debug',
+}
+```
+
+The bridge runs with the file absent and uses its defaults. The defaults bind
+the broker to `127.0.0.1:7742`. The full set of keys is not final.
+
+The file reaches no global, so it holds values and nothing else. A key the
+bridge does not know is logged as a warning in `DCSBridge.log` and ignored. A
+file that cannot be opened, does not compile, raises, returns something other
+than a table, or holds a value the bridge refuses stops the bridge for that
+DCS run. The reason is in `Logs\DCSBridge\DCSBridge.log` and in
+`Logs\dcs.log`. Fix the file and restart DCS.
+
+The hook driver reads the file at DCS start, loads the broker, and hands it
+its settings with `shim.configure`. Nothing listens until that first call,
+which binds the address and sizes the queues. A later call, on
+`ReloadConfig`, changes the keys marked live, such as the timeouts and the tokens; a change to the
 address, the port, the connection cap or a queue size waits for a DCS
 restart, and the call reports it as pending. Each connection has a queue per
 record class, so a flood of records a consumer can afford to lose pushes out
-none of the others.
+none of the others. Their sizes are `ring_out_lossy_records`,
+`ring_out_durable_records` and `ring_out_lifecycle_records`.
 
 After that first call the hook script hands the bridge the bytes of
 `Mods\services\DCSBridge\schema.pb` once, with `shim.schema`. From then on
@@ -104,8 +122,16 @@ the token grants, from `read`, `command` and `reload`. Every topic names the
 capability it requires. A consumer receives only the records its token
 covers, with no gap in `seq` where the others were, and a record it sends on
 a topic its token does not cover is refused. The `tokens` key holds one entry
-per consumer. Reading it from the file is not yet built; until then a hook
-script hands the table to the bridge with `shim.configure`.
+per consumer, and the hook driver hands the list to the broker in the first
+call:
+
+```lua
+return {
+  tokens = {
+    { id = 'map', secret = 'change-me', caps = { 'read' } },
+  },
+}
+```
 
 A consumer that wants less than its token covers sends `SetTopicFilter` with
 the whole set of topics it wants; each message replaces the last, and
@@ -128,13 +154,14 @@ govern it, and all three are live.
 | `log_retention_days` | 14 | A renamed file older than this is deleted. |
 | `log_level` | `info` | `error`, `warn`, `info` or `debug`. |
 
-Reading these keys from `Config\DCSBridge.lua` is not yet built; the bridge
-uses the defaults.
+The bridge reads them from `Config\DCSBridge.lua` after the banner, so the
+banner is written whatever `log_level` says.
 
 ## The Stock route and the Modified route
 
 The bridge loads its mission-side script, the sim driver, in one of two ways.
-The `route` key in `Config\DCSBridge.lua` selects one. Its values are not final.
+The `route` key in `Config\DCSBridge.lua` selects one: `stock`, the default, or
+`modified`, in lower case.
 Both routes install the same files. Both load the sim driver on every
 mission load.
 
