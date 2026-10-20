@@ -519,6 +519,58 @@ mod tests {
         assert_eq!(Key::named("tokens").unwrap().tier, Tier::Live);
     }
 
+    /// The hook driver holds a default for every key and hands the broker
+    /// all of its own, so a default written there differently from here
+    /// would replace this one at the first `configure`. Its broker rows are
+    /// read off the file by their one-row-per-line shape, `{ 'name',
+    /// default, 'broker' },`, and each has to equal the default here, in
+    /// this order, with none missing. ADR 0050.
+    #[test]
+    fn the_hook_drivers_defaults_are_these() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../lua/Mods/services/DCSBridge/lua/HookDriver.lua"
+        );
+        let driver =
+            std::fs::read_to_string(path).unwrap_or_else(|e| panic!("could not read {path}: {e}"));
+
+        let mut names = Vec::new();
+        for line in driver.lines() {
+            let Some(row) = line
+                .trim()
+                .strip_prefix("{ '")
+                .and_then(|row| row.strip_suffix(", 'broker' },"))
+            else {
+                continue;
+            };
+            let (name, default) = row
+                .split_once("', ")
+                .unwrap_or_else(|| panic!("a broker row out of shape: {line}"));
+            let value = match default {
+                "true" => Value::Boolean(true),
+                "false" => Value::Boolean(false),
+                "{}" => Value::Tokens(Vec::new()),
+                quoted if quoted.starts_with('\'') && quoted.ends_with('\'') => {
+                    Value::String(quoted[1..quoted.len() - 1].into())
+                }
+                number => n(number
+                    .parse()
+                    .unwrap_or_else(|e| panic!("{name}: {number} is not a number: {e}"))),
+            };
+            let expected = Config::default()
+                .get(name)
+                .unwrap_or_else(|| panic!("{name} is a broker row the broker does not own"));
+            assert_eq!(value, expected, "{name} defaults differently in {path}");
+            names.push(name);
+        }
+
+        let keys: Vec<_> = KEYS.iter().map(|key| key.name).collect();
+        assert_eq!(
+            names, keys,
+            "the broker rows in {path} are not the broker's keys"
+        );
+    }
+
     /// A value of each shape sets its field and reads back as itself.
     #[test]
     fn a_checked_value_is_stored() {
