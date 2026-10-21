@@ -47,6 +47,13 @@ local KEYS = {
   { 'mission_sim_driver_dirs', false, 'sim' },
 }
 
+-- Each key's default by its name. A false default is still a row, so a
+-- lookup is compared with nil.
+local DEFAULTS = {}
+for _, row in ipairs(KEYS) do
+  DEFAULTS[row[1]] = row[2]
+end
+
 -- The operator's file, under the write directory. ADR 0051.
 local CONFIG = 'Config/DCSBridge.lua'
 
@@ -83,6 +90,44 @@ local function defaults()
     values[row[1]] = default
   end
   return values
+end
+
+local function strings(list)
+  local n = 0
+  for _ in pairs(list) do
+    n = n + 1
+  end
+  for i = 1, n do
+    if type(list[i]) ~= 'string' then
+      return false
+    end
+  end
+  return true
+end
+
+-- The checks the hook driver makes on these keys, in its words, so a file
+-- that fails one reads the same in both logs: nil if they pass, or the
+-- reason naming the key. A pair whose other key another owner holds is the
+-- hook driver's alone, since this file never reads that key. ADR 0069.
+local function validate(values)
+  if not strings(values.sim_driver_disabled_files) then
+    return 'sim_driver_disabled_files is not a list of file names'
+  end
+  for _, row in ipairs(KEYS) do
+    local name, value = row[1], values[row[1]]
+    if type(value) == 'number'
+      and (value < 0 or value ~= math.floor(value) or value == math.huge) then
+      return name .. ' is ' .. value .. ', and it takes a whole number from 0'
+    end
+  end
+  -- The per-frame evaluation cap has to cover every subscription, so it
+  -- never binds.
+  if values.subscription_max_evals < values.max_subscriptions then
+    return 'subscription_max_evals is ' .. values.subscription_max_evals
+      .. ', below max_subscriptions at ' .. values.max_subscriptions
+      .. ', and it has to be at least that'
+  end
+  return nil
 end
 
 -- The file at path overlaid on the defaults, and true when it was absent;
@@ -122,8 +167,16 @@ local function read(path)
     local name = row[1]
     local value = file[name]
     if value ~= nil then
+      if type(value) ~= type(DEFAULTS[name]) then
+        return nil, path .. ': ' .. name .. ' is a ' .. type(value)
+          .. ', and it takes a ' .. type(DEFAULTS[name])
+      end
       values[name] = value
     end
+  end
+  local invalid = validate(values)
+  if invalid then
+    return nil, path .. ': ' .. invalid
   end
   return values, false
 end

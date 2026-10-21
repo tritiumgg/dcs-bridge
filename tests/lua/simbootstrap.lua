@@ -165,6 +165,15 @@ local REFUSED = {
   { 'return {', 'does not compile' },
   { 'local t = {} return t.a.b', 'the configuration raised: ' },
   { 'return 7', 'returned a number, not a table' },
+  { 'return { drain_max_records = "128" }', 'drain_max_records is a string, and it takes a number' },
+  { 'return { mission_sim_driver_dirs = "yes" }', 'mission_sim_driver_dirs is a string, and it takes a boolean' },
+  { 'return { options = 1 }', 'options is a number, and it takes a table' },
+  { 'return { drain_max_records = 1.5 }', 'drain_max_records is 1.5, and it takes a whole number from 0' },
+  { 'return { max_spots = -1 }', 'max_spots is -1, and it takes a whole number from 0' },
+  { 'return { max_spots = 1/0 }', ', and it takes a whole number from 0' },
+  { 'return { sim_driver_disabled_files = { 1 } }', 'sim_driver_disabled_files is not a list of file names' },
+  { 'return { subscription_max_evals = 8 }',
+    'subscription_max_evals is 8, below max_subscriptions at 64, and it has to be at least that' },
 }
 
 -- A file that does not read logs one ERROR line naming why, publishes no
@@ -183,7 +192,7 @@ do
 end
 
 -- The hook driver's reader and the bootstrap agree on one file: on its sim
--- values when it reads, and on the reason when it does not.
+-- values when it reads, and on the reason when a sim key refuses it.
 do
   local good = 'return { drain_max_records = 128, options = { a = { 1 } }, mission_sim_driver_dirs = true }'
   local mission, dir, driver = run(good)
@@ -199,6 +208,17 @@ do
       case[1] .. ' gave ' .. tostring(errors[1]) .. ' and the hook driver ' .. reason)
   end
   print('ok  the hook driver and the bootstrap agree on the sim keys')
+end
+
+-- A file the hook driver refuses for a pair across owners, or for a key
+-- the sim driver does not own, still loads here. ADR 0069 says why.
+do
+  for _, config in ipairs({ 'return { recent_idempotency_keys = 8 }', 'return { port = "x" }' }) do
+    local mission, dir, driver = run(config)
+    assert(driver.config.read(dir .. 'Config/DCSBridge.lua') == nil, config .. ' reads in the hook driver')
+    assert(rawget(mission, 'DCSBridge'), config .. ' did not load the sim driver')
+  end
+  print('ok  a file refused for another owner\'s key still loads the sim driver')
 end
 
 -- With no lfs the bootstrap logs one ERROR line, and with no log it loads
