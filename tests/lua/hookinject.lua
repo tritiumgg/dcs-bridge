@@ -2,8 +2,9 @@
 -- switch from a tick, reads the sim driver's grammar from disk, hands it the
 -- load's parameters as one literal inside a chunk no larger than
 -- bridge_return_max_bytes, and reads the epoch back from the global the sim
--- driver set. A refusal is one logged line and nothing crosses. ADR 0063,
--- ADR 0065.
+-- driver set. A refusal is one logged line and nothing crosses. Each answer
+-- the server state gives falls in one case and logs a line of its own.
+-- ADR 0063, ADR 0065, ADR 0066.
 --
 -- Each case installs the hook driver into a scratch write directory, under a
 -- stock Lua 5.1 with lfs, DCS's log, the DCS namespace and net stubbed.
@@ -477,9 +478,13 @@ end
 -- sets no global is one ERROR line, and the load is not counted.
 do
   local driver, dir = started()
-  assert(driver.inject(5) == true, 'an injection that read back 5 answered false')
+  local loaded, name = driver.inject(5)
+  assert(loaded == true and name == 'loaded', 'an injection that read back 5 answered '
+    .. tostring(loaded) .. ' and ' .. tostring(name))
   hook.sim(dir, "local GRAMMAR_VERSION = '1'\nDCSBridge_load = nil\n")
-  assert(driver.inject(6) == false, 'an injection that read nothing back answered true')
+  loaded, name = driver.inject(6)
+  assert(loaded == false and name == 'epoch', 'an injection that read nothing back answered '
+    .. tostring(loaded) .. ' and ' .. tostring(name))
   local found = matching(dir, '^ERROR ')
   assert(#found == 1 and found[1] == 'ERROR the sim driver set no epoch: sent 6, read back 5: not loaded',
     'the read-back line was ' .. tostring(found[1]))
@@ -556,18 +561,72 @@ do
   print('ok  a mission name that does not read refuses the injection')
 end
 
--- Any other answer is logged as it came, and a net that is gone is one
--- ERROR line. Neither raises into DCS.
+-- Each answer that is not a load writes one ERROR line of its own, and
+-- inject answers false and the case. The sim driver that fails to load is
+-- told apart from an answer with no prefix, and nothing raises into DCS.
 do
-  local driver, dir = started()
-  net.refusal = 'Invalid state name'
-  assert(driver.inject(1) == false, 'a refusal answered true')
-  assert(#matching(dir, '^INFO injection returned: Invalid state name$') == 1, 'the refusal was not logged')
+  local cases = {
+    { 'nil', function()
+      net.states.server = nil
+    end, 'ERROR injection answered nil: no Lua state named server: not injected' },
+    { 'invalid', function()
+      net.refusal = 'Invalid state name'
+    end, 'ERROR injection refused: the server state is not available: not injected' },
+    { 'noprefix', function()
+      net.refusal = 'not allowed'
+    end, 'ERROR injection answered with no OK| prefix, refused or unreachable: not allowed: not injected' },
+    { 'unknown', function()
+      net.refusal = 'OK|something'
+    end, 'ERROR the injection chunk answered an unknown body: something: not loaded' },
+    { 'failed', function(dir)
+      hook.sim(dir, "local GRAMMAR_VERSION = '1'\nerror('deliberate', 0)\n")
+    end, 'ERROR the sim driver failed to load: deliberate: not loaded' },
+  }
+  for _, case in ipairs(cases) do
+    local driver, dir = started()
+    case[2](dir)
+    local loaded, name = driver.inject(1)
+    assert(loaded == false and name == case[1], 'the ' .. case[1] .. ' answer gave '
+      .. tostring(loaded) .. ' and ' .. tostring(name))
+    assert(#net.calls == 1, #net.calls .. ' injections for the ' .. case[1] .. ' answer, expected 1')
+    local found = matching(dir, '^ERROR ')
+    assert(#found == 1 and found[1] == case[3], 'the ' .. case[1] .. ' line was ' .. tostring(found[1]))
+    assert(#matching(dir, 'injection returned') == 0, 'the ' .. case[1] .. ' answer was logged as it came')
+    assert(#matching(dir, 'raised') == 0, 'the ' .. case[1] .. ' answer raised')
+  end
+  print('ok  each answer that is not a load logs its own line and answers its case')
+end
+
+-- A call that gets no answer names why: a skipped load, a refusal before
+-- the call, or a call that did not run. A net that is gone is one ERROR
+-- line, and nothing raises into DCS.
+do
+  local driver = started('return { route = "modified" }')
+  local loaded, name = driver.inject(1)
+  assert(loaded == false and name == 'skipped', 'the modified route gave ' .. tostring(name))
+
+  driver = started('return { enabled = false }')
+  loaded, name = driver.inject(1)
+  assert(loaded == false and name == 'skipped', 'a disabled bridge gave ' .. tostring(name))
+
+  driver = started()
+  DCS.getMissionName = nil
+  loaded, name = driver.inject(1)
+  assert(loaded == false and name == 'unprepared', 'no mission name gave ' .. tostring(name))
+
+  local dir
+  driver, dir = started()
+  hook.sim(dir, "local GRAMMAR_VERSION = '2'\n")
+  loaded, name = driver.inject(1)
+  assert(loaded == false and name == 'unprepared', 'a grammar mismatch gave ' .. tostring(name))
+
+  driver, dir = started()
   net = nil
-  DCS.registered[1].onMissionLoadEnd()
+  loaded, name = driver.inject(1)
+  assert(loaded == false and name == 'unreached', 'an absent net gave ' .. tostring(name))
   assert(#matching(dir, '^ERROR injection did not run: no net namespace$') == 1, 'an absent net was not logged')
   assert(#matching(dir, 'raised') == 0, 'an injection raised')
-  print('ok  another answer is logged as it came, and an absent net is one ERROR')
+  print('ok  a call with no answer names why, and an absent net is one ERROR')
 end
 
 hook.remove()

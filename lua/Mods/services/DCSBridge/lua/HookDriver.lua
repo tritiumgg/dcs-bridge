@@ -862,7 +862,8 @@ local FAILED = 'failed: '
 -- The case the injection chunk's answer for epoch falls in, and the detail
 -- its log line carries. The chunk answers OK|loaded <epoch> or OK|failed:
 -- <error>, so the prefix proves it ran; a string without it is one DCS
--- wrote. ADR 0065.
+-- wrote, a refusal or the message of a chunk that raised outside its
+-- pcall. ADR 0065, ADR 0066.
 --   loaded    the epoch sent read back; the detail is the epoch
 --   epoch     another epoch read back; the detail is what read back
 --   failed    the sim driver raised; the detail is its error
@@ -1077,50 +1078,72 @@ end
 -- known to be present.
 local TARGET = 'server'
 
+-- The ERROR line each answer case but loaded writes, from the epoch sent
+-- and the case's detail. The cases are named for the answer's shape, since
+-- a string with no prefix may be a policy refusal or a chunk that raised
+-- outside its pcall, and nothing in the shape tells which. ADR 0066.
+local UNLOADED = {
+  epoch = function(epoch, detail)
+    return 'the sim driver set no epoch: sent ' .. tostring(epoch) .. ', read back '
+      .. detail .. ': not loaded'
+  end,
+  failed = function(_, detail)
+    return 'the sim driver failed to load: ' .. detail .. ': not loaded'
+  end,
+  unknown = function(_, detail)
+    return 'the injection chunk answered an unknown body: ' .. detail .. ': not loaded'
+  end,
+  ['nil'] = function()
+    return 'injection answered nil: no Lua state named ' .. TARGET .. ': not injected'
+  end,
+  invalid = function()
+    return 'injection refused: the ' .. TARGET .. ' state is not available: not injected'
+  end,
+  noprefix = function(_, detail)
+    return 'injection answered with no OK| prefix, refused or unreachable: '
+      .. detail .. ': not injected'
+  end,
+}
+
 -- Inject the sim driver for epoch. Returns true when the sim driver's
 -- global reads back the epoch sent, and false otherwise, with one line
--- logged either way. Only while the bridge is enabled, and only on the
--- stock route: the modified route loads the sim driver from
--- MissionScripting.lua, so an injection there would load it twice. An
--- answer that is neither the epoch read back nor another epoch is logged
--- as it came, for the code that sorts the answers into their cases.
--- ADR 0063, ADR 0065.
+-- logged either way, and as a second value the case: an answer case of
+-- injection.answer, or skipped, unprepared or unreached for a call that
+-- got no answer. The code that acts on a refusal branches on the name.
+-- Only while the bridge is enabled, and only on the stock route: the
+-- modified route loads the sim driver from MissionScripting.lua, so an
+-- injection there would load it twice. ADR 0063, ADR 0065, ADR 0066.
 function driver.inject(epoch)
   if not driver.enabled() then
     log.info('injection skipped: bridge disabled')
-    return false
+    return false, 'skipped'
   end
   if state.hook.route ~= 'stock' then
     log.info('injection skipped: route is ' .. tostring(state.hook.route)
       .. ', where the sim driver loads itself')
-    return false
+    return false, 'skipped'
   end
   local read, mission = dcs.call('getMissionName')
   if not read or type(mission) ~= 'string' then
     log.error('the mission name does not read: ' .. text(mission) .. ': not injected')
-    return false
+    return false, 'unprepared'
   end
   local chunk, path = injection.prepare(epoch, mission)
   if not chunk then
-    return false
+    return false, 'unprepared'
   end
   local ran, answer = dcs.dostring(TARGET, chunk)
   if not ran then
     log.error('injection did not run: ' .. answer)
-    return false
+    return false, 'unreached'
   end
   local case, detail = injection.answer(answer, epoch)
   if case == 'loaded' then
     log.info('injected ' .. path .. ': ' .. answer)
-    return true
+    return true, case
   end
-  if case == 'epoch' then
-    log.error('the sim driver set no epoch: sent ' .. tostring(epoch) .. ', read back '
-      .. detail .. ': not loaded')
-    return false
-  end
-  log.info('injection returned: ' .. text(answer))
-  return false
+  log.error(UNLOADED[case](epoch, detail))
+  return false, case
 end
 
 -- Mission loads in this process. The epoch is the count, from 1, until the
