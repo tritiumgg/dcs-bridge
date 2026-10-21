@@ -65,10 +65,15 @@ end
 -- does, without one. Its interface is the driver's unless given, its schema
 -- answers the hash of abc unless given another function, and configure
 -- answers nothing applied or pending unless given another answer.
+--
+-- The third value holds each mission time tick was called with, in order,
+-- and answer, what tick returns: true until a test sets it, and nothing at
+-- all when a test sets it to nil, as a module older than the answer does.
 function hook.recording(driver, interface, schema, answer)
   interface = interface or driver.INTERFACE
   answer = answer or { interface = interface, applied = 0, unknown = 0, pending_restart = 0, pending = {} }
   local calls = {}
+  local ticks = { answer = true }
   local function open()
     return {
       interface = interface,
@@ -76,13 +81,20 @@ function hook.recording(driver, interface, schema, answer)
         calls[#calls + 1] = table
         return answer
       end,
+      tick = function(time)
+        ticks[#ticks + 1] = time
+        if ticks.answer == nil then
+          return
+        end
+        return ticks.answer
+      end,
       schema = schema or function(bytes)
         assert(bytes == 'abc', 'the schema was handed as ' .. tostring(bytes))
         return hook.ABC
       end,
     }
   end
-  return open, calls
+  return open, calls, ticks
 end
 
 -- DCSBridge.log as lines, without their timestamps.

@@ -89,17 +89,22 @@ function dcs.log()
   }
 end
 
--- DCS's hook namespace, holding the one function the hook driver calls at
--- start. setUserCallbacks keeps each table it is handed in registered, so a
--- test can call what DCS would.
+-- DCS's hook namespace, holding the functions the hook driver calls.
+-- setUserCallbacks keeps each table it is handed in registered, so a test
+-- can call what DCS would. getModelTime answers time, which a test moves.
 function dcs.DCS()
   local registered = {}
-  return {
+  local namespace = {
     registered = registered,
+    time = 0,
     setUserCallbacks = function(callbacks)
       registered[#registered + 1] = callbacks
     end,
   }
+  namespace.getModelTime = function()
+    return namespace.time
+  end
+  return namespace
 end
 
 -- The repository root with a trailing slash, from the path the test script
