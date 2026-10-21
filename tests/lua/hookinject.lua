@@ -292,4 +292,118 @@ do
   print('ok  an absent or unlistable directory is no files')
 end
 
+-- A hook driver started on the file given, against the recording stub.
+-- Returns the driver, its directory and the stub's ticks.
+local function started(config, omit)
+  local driver, dir = install(config, omit)
+  local open, _, ticks = hook.recording(driver)
+  driver.open = open
+  driver.start({ banner = 'the banner' })
+  return driver, dir, ticks
+end
+
+-- The lines DCSBridge.log holds that match pattern.
+local function matching(dir, pattern)
+  local found = {}
+  for _, line in ipairs(hook.lines(dir)) do
+    if line:find(pattern) then
+      found[#found + 1] = line
+    end
+  end
+  return found
+end
+
+-- A sim driver whose grammar is not the hook driver's, that declares none,
+-- or that is not there is refused with one ERROR line, and no chunk.
+do
+  local cases = {
+    { "local GRAMMAR_VERSION = '2'\n",
+      'the sim driver declares grammar 2, and this hook driver is grammar 1: not injected' },
+    { "local version = '1'\n", ' declares no GRAMMAR_VERSION: not injected' },
+    { false, 'the sim driver does not open: ' },
+  }
+  for _, case in ipairs(cases) do
+    local driver, dir = started(nil, { [hook.SIM] = true })
+    if case[1] then
+      hook.sim(dir, case[1])
+    end
+    local chunk, reason = driver.injection.prepare(1, 'mission')
+    assert(chunk == nil, 'a sim driver with the wrong grammar was prepared')
+    assert(reason:find(case[2], 1, true), 'the refusal was ' .. tostring(reason))
+    local found = matching(dir, '^ERROR ')
+    assert(#found == 1 and found[1] == 'ERROR ' .. reason,
+      #found .. ' ERROR lines, the first ' .. tostring(found[1]))
+  end
+  print('ok  a sim driver of another grammar, of none, or absent is refused')
+end
+
+-- An options table past bridge_return_max_bytes refuses the chunk with one
+-- ERROR line naming its size and the bound. Under a larger bound the same
+-- table is prepared whole.
+do
+  local pad = string.rep('x', 40000)
+  local driver, dir = started('return { options = { pad = "' .. pad .. '" } }')
+  local chunk, reason = driver.injection.prepare(1, 'mission')
+  assert(chunk == nil, 'an oversize chunk was prepared')
+  local size = reason:match('^the injection chunk is (%d+) bytes, over bridge_return_max_bytes 32768: not injected$')
+  assert(size and tonumber(size) > 40000, 'the refusal was ' .. tostring(reason))
+  local found = matching(dir, '^ERROR ')
+  assert(#found == 1 and found[1] == 'ERROR ' .. reason, #found .. ' ERROR lines')
+
+  driver = started('return { bridge_return_max_bytes = 65536, options = { pad = "' .. pad .. '" } }')
+  chunk = assert(driver.injection.prepare(1, 'mission'))
+  assert(#chunk == tonumber(size), 'the chunk under a larger bound is ' .. #chunk .. ' bytes, not ' .. size)
+  assert(chunk:find(pad, 1, true), 'the chunk under a larger bound does not carry the options whole')
+  print('ok  an oversize chunk is refused and logged, and a larger bound carries it whole')
+end
+
+-- The bound is inclusive: a chunk exactly bridge_return_max_bytes long is
+-- prepared, and one byte under it refuses. The options are padded so the
+-- bound has five digits whichever value it takes, since the chunk carries
+-- the bound and its length moves with the digits.
+do
+  local pad = 'options = { pad = "' .. string.rep('x', 20000) .. '" }'
+  local driver = started('return { bridge_return_max_bytes = 65536, ' .. pad .. ' }')
+  local size = #assert(driver.injection.prepare(1, 'mission'))
+  assert(size >= 10001 and size < 65536, 'the chunk is ' .. size .. ' bytes')
+
+  driver = started('return { bridge_return_max_bytes = ' .. size .. ', ' .. pad .. ' }')
+  local chunk = assert(driver.injection.prepare(1, 'mission'))
+  assert(#chunk == size, 'the chunk at the bound is ' .. #chunk .. ' bytes, not ' .. size)
+
+  local dir
+  driver, dir = started('return { bridge_return_max_bytes = ' .. (size - 1) .. ', ' .. pad .. ' }')
+  local refused, reason = driver.injection.prepare(1, 'mission')
+  assert(refused == nil, 'a chunk one byte over the bound was prepared')
+  assert(reason == 'the injection chunk is ' .. size .. ' bytes, over bridge_return_max_bytes '
+    .. (size - 1) .. ': not injected', 'the refusal was ' .. tostring(reason))
+  assert(#matching(dir, '^ERROR ') == 1, 'the refusal was not logged once')
+  print('ok  a chunk at the bound is prepared, and one byte over is refused')
+end
+
+-- A name in sim_driver_disabled_files is not in the list the prepared
+-- chunk hands the sim driver.
+do
+  local driver, dir = started('return { sim_driver_disabled_files = { "off.lua" } }')
+  local d = dir .. 'DCSBridge/simdriver.d/'
+  hook.write(d .. 'off.lua', '')
+  hook.write(d .. 'a.lua', '')
+  local chunk = assert(driver.injection.prepare(1, 'mission'))
+  assert(net.dostring_in('server', chunk) == 'OK|loaded 1', 'the prepared chunk did not load')
+  local files = net.states.server.DCSBridge.load.files
+  assert(#files == 1 and files[1] == d .. 'a.lua', 'the files were ' .. table.concat(files, ', '))
+  print('ok  a disabled extension file is not handed to the sim driver')
+end
+
+-- A function nested in options, which the file check does not reach, is
+-- refused naming where it is.
+do
+  local driver, dir = started('return { options = { builtin = { resync = function() end } } }')
+  local chunk, reason = driver.injection.prepare(1, 'mission')
+  assert(chunk == nil, 'a function was prepared')
+  assert(reason:find('^settings%.options%.builtin%.resync is a function'), 'the refusal was ' .. reason)
+  assert(#matching(dir, '^ERROR settings%.options%.builtin%.resync') == 1, 'the refusal was not logged')
+  print('ok  a nested function in options is refused naming its path')
+end
+
 hook.remove()

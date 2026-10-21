@@ -792,6 +792,67 @@ function driver.enabled()
   return state.enabled
 end
 
+-- The sim driver's extension directory, which the hook driver lists for it.
+local SIMDRIVER_D = 'DCSBridge/simdriver.d/'
+
+-- The grammar the file at path declares, read by the one-line shape both
+-- drivers write it in, or nil and the reason there is none.
+local function grammar(path)
+  local file, reason = io.open(path, 'rb')
+  if not file then
+    return nil, 'the sim driver does not open: ' .. tostring(reason)
+  end
+  local source = file:read('*a')
+  file:close()
+  local declared = ('\n' .. source):match("\nlocal GRAMMAR_VERSION = '([^'\n]*)'")
+  if not declared then
+    return nil, path .. ' declares no GRAMMAR_VERSION'
+  end
+  return declared
+end
+
+-- Log reason as the one ERROR a refused injection writes, and return nil
+-- and it.
+local function refuse(reason)
+  reason = reason .. ': not injected'
+  log.error(reason)
+  return nil, reason
+end
+
+-- The chunk that injects the sim driver for epoch and mission, and the
+-- path it loads, or nil and the reason it is refused, logged as one ERROR.
+-- The sim driver's grammar is compared first, from its file, since its
+-- source never crosses. The chunk is measured whole and refused above
+-- bridge_return_max_bytes, never shortened: a sim driver started on part of
+-- its settings would run on defaults it was not given. The keys are read
+-- at each call, so a reload's values are the next injection's. ADR 0065.
+function injection.prepare(epoch, mission)
+  local path = lfs.writedir() .. state.hook.sim_driver_path
+  local declared, missing = grammar(path)
+  if not declared then
+    return refuse(missing)
+  end
+  if declared ~= GRAMMAR_VERSION then
+    return refuse('the sim driver declares grammar ' .. declared
+      .. ', and this hook driver is grammar ' .. GRAMMAR_VERSION)
+  end
+  local chunk, refused = injection.chunk(path, {
+    epoch = epoch,
+    mission = mission,
+    settings = state.sim,
+    files = injection.files(lfs.writedir() .. SIMDRIVER_D, state.sim.sim_driver_disabled_files),
+  })
+  if not chunk then
+    return refuse(refused)
+  end
+  local bound = state.sim.bridge_return_max_bytes
+  if #chunk > bound then
+    return refuse('the injection chunk is ' .. #chunk
+      .. ' bytes, over bridge_return_max_bytes ' .. bound)
+  end
+  return chunk, path
+end
+
 -- Every DCS callback the bridge uses, registered once at start. DCS keeps a
 -- registered table for the life of the process, so the set carries every
 -- name any part of the bridge will need. ADR 0061.
