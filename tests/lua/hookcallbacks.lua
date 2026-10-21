@@ -2,8 +2,9 @@
 -- never raises, and one callback table registered at start, before the
 -- configure that binds, whose callbacks run no body until start finishes.
 -- A body that raises returns nothing to DCS and is logged once per name
--- until the next mission load, to DCSBridge.log alone. ADR 0060, ADR 0061,
--- ADR 0062, ADR 0064.
+-- until the next mission load, to DCSBridge.log alone. Five callbacks run
+-- the dispatch loop, and none does during a mission load. ADR 0060,
+-- ADR 0061, ADR 0062, ADR 0064, ADR 0071.
 --
 -- Each case installs the hook driver into a scratch write directory, under a
 -- stock Lua 5.1 with lfs, DCS's log and the DCS namespace stubbed, and runs
@@ -364,6 +365,112 @@ do
   assert(n == 0, n .. ' values returned behind a raising logger')
   assert(tried == 1, 'the logger was called ' .. tried .. ' times, expected 1')
   print('ok  a logger that raises while reporting a raise raises nothing')
+end
+
+-- A hook driver started against the recording stub, whose poll notes the
+-- ticks taken before it. Returns the driver, the table DCS was handed, the
+-- ring and the tick count at each poll.
+local function polling()
+  local driver = install()
+  local open, _, ticks, _, ring = recording(driver)
+  local at = {}
+  driver.open = function()
+    local shim = open()
+    local poll = shim.poll
+    shim.poll = function(...)
+      at[#at + 1] = #ticks
+      return poll(...)
+    end
+    return shim
+  end
+  driver.start({ banner = 'the banner' })
+  return driver, DCS.registered[1], ring, at
+end
+
+-- The five callbacks the dispatch loop runs from each poll the hook driver
+-- ring, and the frame ticks before it polls. ADR 0061, ADR 0063, ADR 0071.
+do
+  local _, callbacks, ring, at = polling()
+  local five = { 'onSimulationFrame', 'onPlayerConnect', 'onPlayerDisconnect',
+    'onPlayerChangeSlot', 'onMissionLoadEnd' }
+  for _, name in ipairs(five) do
+    local before = ring.polls
+    callbacks[name](1)
+    assert(ring.polls == before + 1, name .. ' polled ' .. (ring.polls - before) .. ' times, expected 1')
+  end
+  assert(at[1] == 1, 'the frame polled after ' .. tostring(at[1]) .. ' ticks, expected 1')
+  -- onMissionLoadBegin goes last, since the blackout it starts would keep
+  -- any callback after it from polling whatever its body did.
+  local unlisted = {}
+  for _, name in ipairs(NAMES) do
+    local listed = name == 'onMissionLoadBegin'
+    for _, other in ipairs(five) do
+      listed = listed or other == name
+    end
+    if not listed then
+      unlisted[#unlisted + 1] = name
+    end
+  end
+  unlisted[#unlisted + 1] = 'onMissionLoadBegin'
+  for _, name in ipairs(unlisted) do
+    local before = ring.polls
+    callbacks[name](1)
+    assert(ring.polls == before, name .. ' polled the hook driver ring')
+  end
+  print('ok  the five callbacks poll the hook driver ring, the frame after its tick')
+end
+
+-- Nothing dispatches between onMissionLoadBegin and onMissionLoadEnd, and
+-- what waited is dispatched at the end. ADR 0071.
+do
+  local driver, callbacks, ring = polling()
+  local seen = 0
+  driver.handlers['dcsbridge.hook.ReloadConfig'] = function()
+    seen = seen + 1
+  end
+  callbacks.onMissionLoadBegin()
+  ring[1] = { 1, 'dcsbridge.hook.ReloadConfig', '' }
+  for _, name in ipairs({ 'onPlayerConnect', 'onPlayerDisconnect', 'onPlayerChangeSlot' }) do
+    callbacks[name](1)
+  end
+  assert(ring.polls == 0 and seen == 0, 'a load polled ' .. ring.polls .. ' times')
+  callbacks.onMissionLoadEnd()
+  assert(seen == 1 and #ring == 0, 'the end of the load dispatched ' .. seen .. ' records')
+  print('ok  nothing dispatches during a mission load, and the load\'s end dispatches')
+end
+
+-- A frame ends a load whose end DCS did not call, since no frame runs
+-- during one. ADR 0071.
+do
+  local driver, callbacks, ring = polling()
+  local seen = 0
+  driver.handlers['dcsbridge.hook.ReloadConfig'] = function()
+    seen = seen + 1
+  end
+  callbacks.onMissionLoadBegin()
+  ring[1] = { 1, 'dcsbridge.hook.ReloadConfig', '' }
+  callbacks.onPlayerConnect(1)
+  assert(seen == 0, 'a load dispatched')
+  callbacks.onSimulationFrame()
+  assert(seen == 1 and #ring == 0, 'a frame after the begin dispatched ' .. seen .. ' records')
+  print('ok  a frame ends the blackout')
+end
+
+-- A clock that does not read still lets the frame dispatch. ADR 0063,
+-- ADR 0071.
+do
+  local driver, callbacks, ring = polling()
+  local seen = 0
+  driver.handlers['dcsbridge.hook.ReloadConfig'] = function()
+    seen = seen + 1
+  end
+  DCS.getModelTime = function()
+    error('no clock', 0)
+  end
+  ring[1] = { 1, 'dcsbridge.hook.ReloadConfig', '' }
+  callbacks.onSimulationFrame()
+  assert(seen == 1, 'a frame with no clock dispatched ' .. seen .. ' records')
+  print('ok  a frame with no clock still dispatches')
 end
 
 -- The next mission load lets a raise log once more, and only once.

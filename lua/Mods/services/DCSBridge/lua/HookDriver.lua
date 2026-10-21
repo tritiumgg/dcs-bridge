@@ -1176,6 +1176,10 @@ driver.handlers = {}
 -- bytes, dispatched first at the next invocation. ADR 0071.
 state.held = nil
 
+-- Whether a mission load is running, between onMissionLoadBegin and the
+-- load's end, when nothing dispatches. ADR 0071.
+state.loading = false
+
 -- Log a record the loop drops, once per topic until the next mission load,
 -- in the set a raising callback is logged through: a hot topic sent with no
 -- handler would otherwise write a line per record. ADR 0062, ADR 0071.
@@ -1223,10 +1227,14 @@ end
 -- from the last invocation first, then each one the ring answers. At the
 -- cap the ring is popped once more, since the module cannot look without
 -- popping, and a record there is held and counted as one deferral. A ring
--- that held exactly the cap counts nothing, because no work waited. A poll
--- that raises raises here, and the callback that called this contains it.
--- ADR 0071.
+-- that held exactly the cap counts nothing, because no work waited. During
+-- a mission load it pops nothing, and a held record waits for the load to
+-- end. A poll that raises raises here, and the callback that called this
+-- contains it. ADR 0071.
 function driver.dispatch()
+  if state.loading then
+    return
+  end
   local cap = state.hook.hook_driver_dispatch_max_commands
   local ran = 0
   local record = state.held
@@ -1382,12 +1390,34 @@ end
 -- dead sim. It runs whether the bridge is enabled or not, since the tick is
 -- how a disabled bridge stays alive to Pong and how it hears a re-enable.
 -- A clock that does not read raises, so the containment logs it once per
--- mission load and no tick is taken. ADR 0063.
+-- mission load and no tick is taken. The raise comes after the dispatch, so
+-- a broken clock does not stop the commands. No frame runs during a mission
+-- load, so a frame ends a load whose end DCS did not call. ADR 0063,
+-- ADR 0071.
 driver.callbacks.onSimulationFrame = function()
   local heard, reason = hear()
+  state.loading = false
+  driver.dispatch()
   if not heard then
     error(reason, 0)
   end
+end
+
+-- The player-event bodies dispatch, so a command waiting at the menu, where
+-- frames come seconds apart, runs at the next player event. ADR 0071.
+driver.callbacks.onPlayerConnect = function()
+  driver.dispatch()
+end
+driver.callbacks.onPlayerDisconnect = function()
+  driver.dispatch()
+end
+driver.callbacks.onPlayerChangeSlot = function()
+  driver.dispatch()
+end
+
+-- Nothing dispatches from here until the load ends. ADR 0071.
+driver.callbacks.onMissionLoadBegin = function()
+  state.loading = true
 end
 
 -- The state the sim driver is injected into, where dofile and pcall are
@@ -1510,14 +1540,17 @@ state.loads = 0
 -- The body for a mission load's end. No frame runs during a load, so the
 -- switch is taken from a tick here first, or a SetEnabled sent during the
 -- load would be seen a frame late. A clock that does not read leaves the
--- switch where it was. ADR 0063, ADR 0065.
+-- switch where it was. The commands that waited out the load dispatch
+-- after the injection. ADR 0063, ADR 0065, ADR 0071.
 driver.callbacks.onMissionLoadEnd = function()
+  state.loading = false
   local heard, reason = hear()
   if not heard then
     log.error(reason .. '; the switch stays ' .. (state.enabled and 'on' or 'off'))
   end
   state.loads = state.loads + 1
   driver.inject(state.loads)
+  driver.dispatch()
 end
 
 -- The inbound ring sizes. The first configure allocates both rings and no
