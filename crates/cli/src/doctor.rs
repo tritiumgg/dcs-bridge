@@ -741,6 +741,57 @@ pub(crate) mod tests {
         );
     }
 
+    /// A file of the repository, by its path from the workspace root.
+    fn repo(rel: &str) -> String {
+        let path = format!("{}/../../{rel}", env!("CARGO_MANIFEST_DIR"));
+        fs::read_to_string(&path).unwrap_or_else(|e| panic!("could not read {path}: {e}"))
+    }
+
+    /// doctor holds its own copy of every string it finds a line or a
+    /// version by, since it links none of the files that write them. Each
+    /// copy is checked against the file that writes it, so a change there
+    /// fails here rather than in a user's diagnosis.
+    #[test]
+    fn every_string_doctor_keys_on_is_in_the_repository() {
+        let loader = repo(&format!("lua/{LOADER}"));
+        let quoted = [
+            dcslog::SOURCE,
+            dcslog::BANNER,
+            dcslog::DISABLED,
+            dcslog::STOPS[0],
+            dcslog::STOPS[1],
+            " bytes, modified ",
+            " missing",
+            "!%Y-%m-%d %H:%M:%S",
+            LOADER,
+            DRIVER,
+        ];
+        for text in quoted {
+            assert!(
+                loader.contains(&format!("'{text}'")),
+                "the loader writes no '{text}'"
+            );
+        }
+
+        let driver = repo(&format!("lua/{DRIVER}"));
+        assert!(
+            driver_interface(&driver).is_some_and(|version| !version.is_empty()),
+            "the hook driver's interface line does not read"
+        );
+
+        let module = repo("crates/lua-module/src/lib.rs");
+        let marker = format!("b\"{}\"", String::from_utf8_lossy(MARKER));
+        assert!(module.contains(&marker), "the module builds no {marker}");
+
+        // The Lua files ship from lua/ as they are, so each one doctor
+        // looks for is there; the rest are built.
+        for rel in SHIPPED.iter().filter(|rel| rel.ends_with(".lua")) {
+            let built = rel.ends_with(".gen.lua");
+            let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("../../lua/{rel}"));
+            assert_eq!(path.is_file(), !built, "lua/{rel}");
+        }
+    }
+
     /// The marker is found among other bytes and read to its NUL; no
     /// marker, no NUL within reach, or an empty or unprintable version is
     /// none.
