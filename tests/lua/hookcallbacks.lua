@@ -1,7 +1,9 @@
 -- The hook driver's reach into DCS: every call through one accessor, which
 -- never raises, and one callback table registered at start, before the
 -- configure that binds, whose callbacks run no body until start finishes.
--- ADR 0060, ADR 0061.
+-- A body that raises returns nothing to DCS and is logged once per name
+-- until the next mission load, to DCSBridge.log alone. ADR 0060, ADR 0061,
+-- ADR 0062.
 --
 -- Each case installs the hook driver into a scratch write directory, under a
 -- stock Lua 5.1 with lfs, DCS's log and the DCS namespace stubbed, and runs
@@ -242,6 +244,115 @@ do
   DCS.registered[1].onSimulationFrame(42)
   assert(seen == 42, 'the body set before start saw ' .. tostring(seen))
   print('ok  a body set before start is the one called')
+end
+
+-- The ERROR lines DCSBridge.log holds.
+local function errors(dir)
+  local found = {}
+  for _, line in ipairs(lines(dir)) do
+    if line:find('^ERROR ') then
+      found[#found + 1] = line
+    end
+  end
+  return found
+end
+
+-- A per-frame raise reaches DCS on no call, writes one line to
+-- DCSBridge.log, and writes nothing to dcs.log.
+do
+  local driver, dir, _, callbacks = started()
+  driver.callbacks.onSimulationFrame = function()
+    error('deliberate', 0)
+  end
+  local before = #log.lines
+  for _ = 1, 1000 do
+    local n = select('#', callbacks.onSimulationFrame())
+    assert(n == 0, n .. ' values returned by a raising body')
+  end
+  local found = errors(dir)
+  assert(#found == 1, #found .. ' ERROR lines over 1000 raises, expected 1')
+  assert(found[1] == 'ERROR onSimulationFrame raised: deliberate; suppressed until the next mission load',
+    'the line was ' .. found[1])
+  assert(#log.lines == before, (#log.lines - before) .. ' lines written to dcs.log')
+  print('ok  a per-frame raise is contained and logged once, outside dcs.log')
+end
+
+-- A raising onPlayerTry* body returns nothing, so the event passes on, and
+-- each name is logged once on its own.
+do
+  local driver, dir, _, callbacks = started()
+  driver.callbacks.onPlayerTrySendChat = function()
+    error('chat', 0)
+  end
+  driver.callbacks.onPlayerConnect = function()
+    error('connect', 0)
+  end
+  for _ = 1, 10 do
+    local n = select('#', callbacks.onPlayerTrySendChat(2, 'hello', -1))
+    assert(n == 0, n .. ' values returned by a raising onPlayerTrySendChat')
+    callbacks.onPlayerConnect(2, 'pilot')
+  end
+  local found = errors(dir)
+  assert(#found == 2, #found .. ' ERROR lines for two raising names, expected 2')
+  assert(found[1]:find('^ERROR onPlayerTrySendChat raised: chat'), found[1])
+  assert(found[2]:find('^ERROR onPlayerConnect raised: connect'), found[2])
+  print('ok  a raising onPlayerTry* body returns nothing, and each name logs once')
+end
+
+-- A raised value whose __tostring raises still gives one line and nothing
+-- reaching DCS.
+do
+  local driver, dir, _, callbacks = started()
+  driver.callbacks.onSimulationFrame = function()
+    error(setmetatable({}, { __tostring = function() error('again') end }))
+  end
+  for _ = 1, 3 do
+    local n = select('#', callbacks.onSimulationFrame())
+    assert(n == 0, n .. ' values returned by a body raising an unprintable value')
+  end
+  local found = errors(dir)
+  assert(#found == 1, #found .. ' ERROR lines for an unprintable raise, expected 1')
+  assert(found[1]:find('^ERROR onSimulationFrame raised: '), found[1])
+  print('ok  a raise that does not convert to text is logged once')
+end
+
+-- A logger that raises while reporting a raise still leaves nothing
+-- reaching DCS.
+do
+  local driver, _, _, callbacks = started()
+  local tried = 0
+  driver.log.error = function()
+    tried = tried + 1
+    error('the log is gone', 0)
+  end
+  driver.callbacks.onSimulationFrame = function()
+    error('deliberate', 0)
+  end
+  local ok, n = pcall(function()
+    return select('#', callbacks.onSimulationFrame())
+  end)
+  assert(ok, 'a raising logger raised into DCS: ' .. tostring(n))
+  assert(n == 0, n .. ' values returned behind a raising logger')
+  assert(tried == 1, 'the logger was called ' .. tried .. ' times, expected 1')
+  print('ok  a logger that raises while reporting a raise raises nothing')
+end
+
+-- The next mission load lets a raise log once more, and only once.
+do
+  local driver, dir, _, callbacks = started()
+  driver.callbacks.onSimulationFrame = function()
+    error('deliberate', 0)
+  end
+  for _ = 1, 1000 do
+    callbacks.onSimulationFrame()
+  end
+  callbacks.onMissionLoadEnd()
+  for _ = 1, 1000 do
+    callbacks.onSimulationFrame()
+  end
+  local found = errors(dir)
+  assert(#found == 2, #found .. ' ERROR lines across a mission load, expected 2')
+  print('ok  a mission load logs a raise once more')
 end
 
 hook.remove()

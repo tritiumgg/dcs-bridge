@@ -613,17 +613,39 @@ local CALLBACKS = {
 -- onPlayerTry* callback pass the event on. ADR 0061.
 driver.callbacks = {}
 
+-- The names whose body raised since the last mission load. DCS keeps
+-- calling a callback that raises, so a raise is logged the first time and
+-- not again until the next load. ADR 0062.
+state.raised = {}
+
+-- A body's answer as DCS gets it: every value it returned, or nothing when
+-- it raised. A raise is logged to DCSBridge.log and never to dcs.log. The
+-- log call is guarded too, so nothing here raises into DCS.
+local function contained(name, ok, ...)
+  if ok then
+    return ...
+  end
+  if not state.raised[name] then
+    state.raised[name] = true
+    pcall(log.error, name .. ' raised: ' .. text((...))
+      .. '; suppressed until the next mission load')
+  end
+end
+
 -- The table handed to DCS: one function per name, which calls nothing until
--- start has finished.
+-- start has finished and runs each body under its own pcall.
 local registered = {}
 for _, name in ipairs(CALLBACKS) do
   registered[name] = function(...)
     if not state.started then
       return
     end
+    if name == 'onMissionLoadEnd' then
+      state.raised = {}
+    end
     local body = driver.callbacks[name]
     if body then
-      return body(...)
+      return contained(name, pcall(body, ...))
     end
   end
 end
