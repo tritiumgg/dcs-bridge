@@ -744,6 +744,9 @@ end
 -- union of what the file holds and what the bridge asks for. ADR 0068.
 local policy = {}
 
+-- The file DCS reads the two keys from, once, at its start.
+local AUTOEXEC = lfs.writedir() .. 'Config/autoexec.cfg'
+
 -- The two keys under net that gate dostring_in, and the names the bridge
 -- asks for under each, in the order its lines write them. ADR 0046.
 policy.KEYS = {
@@ -1233,7 +1236,8 @@ local TARGET = 'server'
 -- The ERROR line each answer case but loaded writes, from the epoch sent
 -- and the case's detail. The cases are named for the answer's shape, since
 -- a string with no prefix may be a policy refusal or a chunk that raised
--- outside its pcall, and nothing in the shape tells which. ADR 0066.
+-- outside its pcall, and nothing in the shape tells which for certain.
+-- ADR 0066, and ADR 0067 for the guess the disable makes.
 local UNLOADED = {
   epoch = function(epoch, detail)
     return 'the sim driver set no epoch: sent ' .. tostring(epoch) .. ', read back '
@@ -1257,16 +1261,47 @@ local UNLOADED = {
   end,
 }
 
+-- Whether an answer with no OK| prefix reads as a policy refusal: a string
+-- with no Lua position, chunk:line:, in front. A chunk that does not
+-- compile, or raises with a level, answers its message with one, so it
+-- reads as a fault in the chunk. ADR 0067.
+local function unpositioned(answer)
+  return type(answer) == 'string' and not answer:find('^[^\n]-:%d+: ')
+end
+
+-- Log the autoexec.cfg lines the injection needs, one ERROR line each so
+-- each is a whole statement after its level, and latch the hook driver off
+-- until DCS restarts: DCS reads the file only then, so a retry before it
+-- meets the same refusal. A file that does not read gives the bridge's
+-- names alone, and a line ahead of them says why. ADR 0067, ADR 0068.
+local function refused_by_policy()
+  local lists, reason, absent = policy.read(AUTOEXEC)
+  if absent then
+    log.info(reason .. ': create it holding the two lines below')
+  elseif not lists then
+    log.warn(reason .. ': the two lines below hold the bridge\'s names alone,'
+      .. ' so add any other names the file holds')
+  end
+  for _, line in ipairs(policy.lines(lists)) do
+    log.error(line)
+  end
+  driver.latch('DCS refused the injection by policy; set the two lines above in '
+    .. AUTOEXEC .. ' and restart DCS')
+end
+
 -- Inject the sim driver for epoch. Returns true when the sim driver's
 -- global reads back the epoch sent, and false otherwise, with one line
 -- logged either way, and as a second value the case: an answer case of
 -- injection.answer, or one for a call that got no answer: skipped,
 -- unprepared, absent when net or its dostring_in is missing, as it is to a
 -- hook script the policy hides it from, and unreached when the call raised.
--- The code that acts on a refusal branches on the name. Only while the
--- bridge is enabled, and only on the stock route: the modified route loads
--- the sim driver from MissionScripting.lua, so an injection there would
--- load it twice. ADR 0063, ADR 0065, ADR 0066, ADR 0067.
+-- The code that acts on a refusal branches on the name. absent, and
+-- noprefix with an answer that carries no position, are policy refusals:
+-- after the case's line they log the fix and latch the hook driver off.
+-- Only while the bridge is enabled, and only on the stock route: the
+-- modified route loads the sim driver from MissionScripting.lua, so an
+-- injection there would load it twice. ADR 0063, ADR 0065, ADR 0066,
+-- ADR 0067.
 function driver.inject(epoch)
   if not driver.enabled() then
     log.info('injection skipped: bridge disabled')
@@ -1289,7 +1324,11 @@ function driver.inject(epoch)
   local ran, answer, kind = dcs.dostring(TARGET, chunk)
   if not ran then
     log.error('injection did not run: ' .. answer)
-    return false, kind == 'absent' and 'absent' or 'unreached'
+    if kind == 'absent' then
+      refused_by_policy()
+      return false, 'absent'
+    end
+    return false, 'unreached'
   end
   local case, detail = injection.answer(answer, epoch)
   if case == 'loaded' then
@@ -1297,6 +1336,9 @@ function driver.inject(epoch)
     return true, case
   end
   log.error(UNLOADED[case](epoch, detail))
+  if case == 'noprefix' and unpositioned(answer) then
+    refused_by_policy()
+  end
   return false, case
 end
 

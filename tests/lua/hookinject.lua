@@ -3,8 +3,9 @@
 -- load's parameters as one literal inside a chunk no larger than
 -- bridge_return_max_bytes, and reads the epoch back from the global the sim
 -- driver set. A refusal is one logged line and nothing crosses. Each answer
--- the server state gives falls in one case and logs a line of its own.
--- ADR 0063, ADR 0065, ADR 0066.
+-- the server state gives falls in one case and logs a line of its own. A
+-- policy refusal logs the autoexec.cfg fix after it and turns the hook
+-- driver off until DCS restarts. ADR 0063, ADR 0065, ADR 0066, ADR 0067.
 --
 -- Each case installs the hook driver into a scratch write directory, under a
 -- stock Lua 5.1 with lfs, DCS's log, the DCS namespace and net stubbed.
@@ -561,9 +562,24 @@ do
   print('ok  a mission name that does not read refuses the injection')
 end
 
+-- The bridge's two autoexec.cfg lines, which a policy refusal logs as ERROR
+-- lines after its own when the file is absent.
+local FIX = {
+  'ERROR net.allow_unsafe_api = {"userhooks"}',
+  'ERROR net.allow_dostring_in = {"server", "mission", "scripting", "gui", "export", "config"}',
+}
+
+-- The ERROR lines a policy refusal logs: its own line, then the fix.
+local function policed(line)
+  return { line, FIX[1], FIX[2] }
+end
+
 -- Each answer that is not a load writes one ERROR line of its own, and
 -- inject answers false and the case. The sim driver that fails to load is
 -- told apart from an answer with no prefix, and nothing raises into DCS.
+-- An answer with no prefix and no position is a policy refusal, and its
+-- line is followed by the fix; one with a position is a chunk fault and
+-- logs its line alone. ADR 0067.
 do
   local cases = {
     { 'nil', function()
@@ -574,7 +590,10 @@ do
     end, 'ERROR injection refused: the server state is not available: not injected' },
     { 'noprefix', function()
       net.refusal = 'not allowed'
-    end, 'ERROR injection answered with no OK| prefix, refused or unreachable: not allowed: not injected' },
+    end, policed('ERROR injection answered with no OK| prefix, refused or unreachable: not allowed: not injected') },
+    { 'noprefix', function()
+      net.refusal = '[string "x"]:1: boom'
+    end, 'ERROR injection answered with no OK| prefix, refused or unreachable: [string "x"]:1: boom: not injected' },
     { 'unknown', function()
       net.refusal = 'OK|something'
     end, 'ERROR the injection chunk answered an unknown body: something: not loaded' },
@@ -589,12 +608,36 @@ do
     assert(loaded == false and name == case[1], 'the ' .. case[1] .. ' answer gave '
       .. tostring(loaded) .. ' and ' .. tostring(name))
     assert(#net.calls == 1, #net.calls .. ' injections for the ' .. case[1] .. ' answer, expected 1')
+    local expected = type(case[3]) == 'table' and case[3] or { case[3] }
     local found = matching(dir, '^ERROR ')
-    assert(#found == 1 and found[1] == case[3], 'the ' .. case[1] .. ' line was ' .. tostring(found[1]))
+    assert(#found == #expected, #found .. ' ERROR lines for ' .. expected[1] .. ', expected ' .. #expected)
+    for i = 1, #expected do
+      assert(found[i] == expected[i], 'the ' .. case[1] .. ' line was ' .. tostring(found[i]))
+    end
+    assert(driver.enabled() == (#expected == 1), expected[1] .. ': the latch did not follow the fix')
     assert(#matching(dir, 'injection returned') == 0, 'the ' .. case[1] .. ' answer was logged as it came')
     assert(#matching(dir, 'raised') == 0, 'the ' .. case[1] .. ' answer raised')
   end
   print('ok  each answer that is not a load logs its own line and answers its case')
+end
+
+-- An answer that is not a string carries no position and is still no
+-- policy refusal: it logs the noprefix line alone, latches nothing, and
+-- raises nothing into DCS. ADR 0067.
+do
+  for _, refusal in ipairs({ {}, 42 }) do
+    local driver, dir = started()
+    net.refusal = refusal
+    local ok, loaded, name = pcall(driver.inject, 1)
+    assert(ok, 'an answer of ' .. tostring(refusal) .. ' raised: ' .. tostring(loaded))
+    assert(loaded == false and name == 'noprefix', 'an answer of ' .. tostring(refusal)
+      .. ' gave ' .. tostring(name))
+    local found = matching(dir, '^ERROR ')
+    assert(#found == 1 and found[1] == 'ERROR injection answered with no OK| prefix, refused or unreachable: '
+      .. tostring(refusal) .. ': not injected', 'the line was ' .. tostring(found[1]))
+    assert(driver.enabled() == true, 'an answer of ' .. tostring(refusal) .. ' latched the hook driver off')
+  end
+  print('ok  an answer that is not a string is a chunk fault, not a refusal')
 end
 
 -- A call that gets no answer names why: a skipped load, a refusal before
@@ -621,28 +664,96 @@ do
   loaded, name = driver.inject(1)
   assert(loaded == false and name == 'unprepared', 'a grammar mismatch gave ' .. tostring(name))
 
+  -- A net or dostring_in that is not there is how the policy hides the
+  -- API, so its line is followed by the fix. A raise is not.
   local cases = {
     { 'absent', function()
       net = nil
-    end, 'ERROR injection did not run: no net namespace' },
+    end, policed('ERROR injection did not run: no net namespace') },
     { 'absent', function()
       net.dostring_in = nil
-    end, 'ERROR injection did not run: net.dostring_in is not a function' },
+    end, policed('ERROR injection did not run: net.dostring_in is not a function') },
     { 'unreached', function()
       net.dostring_in = function()
         error('deliberate', 0)
       end
-    end, 'ERROR injection did not run: net.dostring_in raised: deliberate' },
+    end, { 'ERROR injection did not run: net.dostring_in raised: deliberate' } },
   }
   for _, case in ipairs(cases) do
     driver, dir = started()
     case[2]()
     loaded, name = driver.inject(1)
-    assert(loaded == false and name == case[1], case[3] .. ' gave ' .. tostring(name))
+    assert(loaded == false and name == case[1], case[3][1] .. ' gave ' .. tostring(name))
     local found = matching(dir, '^ERROR ')
-    assert(#found == 1 and found[1] == case[3], 'the ' .. case[1] .. ' line was ' .. tostring(found[1]))
+    assert(#found == #case[3], #found .. ' ERROR lines for ' .. case[3][1] .. ', expected ' .. #case[3])
+    for i = 1, #case[3] do
+      assert(found[i] == case[3][i], 'the ' .. case[1] .. ' line was ' .. tostring(found[i]))
+    end
+    assert(driver.enabled() == (#case[3] == 1), case[3][1] .. ': the latch did not follow the fix')
   end
   print('ok  a call with no answer names why, and one that did not run is one ERROR')
+end
+
+-- A policy refusal logs the fix, says the bridge is off until DCS
+-- restarts, and tries nothing again: a second injection and the next
+-- mission load each skip, with no call and no second fix. The mission is
+-- not touched. ADR 0067.
+do
+  local driver, dir = started()
+  net.refusal = 'not allowed'
+  local loaded, name = driver.inject(1)
+  assert(loaded == false and name == 'noprefix', 'the refusal gave ' .. tostring(name))
+  assert(driver.enabled() == false, 'a policy refusal left the hook driver on')
+  local own = hook.lines(dir)
+  local at
+  for i, line in ipairs(own) do
+    if line == FIX[2] then
+      at = i
+    end
+  end
+  assert(at and own[at + 1] == 'INFO bridge disabled until DCS restarts: DCS refused the injection '
+    .. 'by policy; set the two lines above in ' .. dir .. 'Config/autoexec.cfg and restart DCS',
+    'the latch line was ' .. tostring(at and own[at + 1]))
+  assert(own[at - 2] == 'INFO no ' .. dir .. 'Config/autoexec.cfg: create it holding the two lines below',
+    'the absent file line was ' .. tostring(own[at - 2]))
+
+  loaded, name = driver.inject(2)
+  assert(loaded == false and name == 'skipped', 'a second injection gave ' .. tostring(name))
+  DCS.registered[1].onMissionLoadEnd()
+  assert(#net.calls == 1, #net.calls .. ' calls after a policy refusal, expected 1')
+  assert(#matching(dir, '^ERROR ') == 3, 'a skipped load logged an ERROR')
+  assert(#matching(dir, '^INFO injection skipped: bridge disabled$') == 2, 'the skips were not logged')
+  assert(#matching(dir, 'until DCS restarts') == 1, 'the latch was logged twice')
+  print('ok  a policy refusal logs the fix once and tries nothing again')
+end
+
+-- The fix is the union with the operator's file: another tool's names stay
+-- ahead of the bridge's. A file that does not compile gives the bridge's
+-- names, after a WARN line naming why. ADR 0068.
+do
+  local driver, dir = started()
+  hook.write(dir .. 'Config/autoexec.cfg', 'net.allow_dostring_in = {"srs", "server"}\n')
+  net.dostring_in = nil
+  driver.inject(1)
+  local found = matching(dir, '^ERROR net')
+  assert(#found == 2 and found[1] == FIX[1]
+    and found[2] == 'ERROR net.allow_dostring_in = {"srs", "server", "mission", "scripting", "gui", "export", "config"}',
+    'the merged line was ' .. tostring(found[2]))
+  assert(#matching(dir, '^WARN ') == 0 and #matching(dir, 'create it') == 0,
+    'a file that reads was logged as one that does not')
+
+  driver, dir = started()
+  hook.write(dir .. 'Config/autoexec.cfg', 'net.allow_dostring_in = {')
+  net.refusal = 'not allowed'
+  driver.inject(1)
+  found = matching(dir, '^ERROR net')
+  assert(#found == 2 and found[1] == FIX[1] and found[2] == FIX[2],
+    'a file that does not compile gave ' .. tostring(found[2]))
+  found = matching(dir, '^WARN ')
+  assert(#found == 1 and found[1]:find('^WARN ' .. dir:gsub('%p', '%%%0')
+    .. 'Config/autoexec%.cfg does not compile: .*: the two lines below hold the bridge\'s names alone,'
+    .. ' so add any other names the file holds$'), 'the WARN line was ' .. tostring(found[1]))
+  print('ok  the fix is the union with the operator\'s file')
 end
 
 hook.remove()
