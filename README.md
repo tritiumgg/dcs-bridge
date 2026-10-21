@@ -181,6 +181,11 @@ govern it, and all three are live.
 The bridge reads them from `Config\DCSBridge.lua` after the banner, so the
 banner is written whatever `log_level` says.
 
+A bridge callback that raises an error does not stop DCS or the mission. The
+bridge writes one ERROR line to `DCSBridge.log` for it, ending
+`suppressed until the next mission load`, and nothing to `dcs.log`. The same
+callback raising again writes nothing until the next mission loads.
+
 ## The Stock route and the Modified route
 
 The bridge loads its mission-side script, the sim driver, in one of two ways.
