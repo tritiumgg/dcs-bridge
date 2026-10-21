@@ -209,8 +209,10 @@ function config.read(path, held)
   -- start like any other file that does not read.
   local f, reason, errno = io.open(path, 'rb')
   if not f then
+    -- The third value says the file was absent, which a reload refuses.
+    -- ADR 0059.
     if errno == 2 then
-      return values, { { level = 'info', message = 'no ' .. path .. ', defaults in force' } }
+      return values, { { level = 'info', message = 'no ' .. path .. ', defaults in force' } }, true
     end
     return nil, 'the configuration does not open: ' .. tostring(reason)
   end
@@ -697,7 +699,13 @@ function driver.reload()
   if not state.shim then
     error('reload before the hook driver started', 2)
   end
-  local values, notes = config.read(CONFIG, state.rings)
+  local values, notes, absent = config.read(CONFIG, state.rings)
+  -- At start an absent file is the defaults. Here the defaults would drop
+  -- every token in force, so an absent file changes nothing. ADR 0059.
+  if absent then
+    notes = 'no ' .. CONFIG .. ': the running configuration stays in force'
+    values = nil
+  end
   if not values then
     log.error(notes)
     return false, notes

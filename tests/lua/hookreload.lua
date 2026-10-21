@@ -1,8 +1,9 @@
 -- The hook driver's reload: Config/DCSBridge.lua read again and every broker
 -- key handed over in one more configure. A live key and the log level move,
 -- a restart-tier key of the hook driver's is held at the value in force and
--- logged pending, and a file that does not read leaves the running
--- configuration in force and logs why. ADR 0057, ADR 0058.
+-- logged pending, and a file that does not read or is gone leaves the
+-- running configuration in force and logs why. ADR 0057, ADR 0058,
+-- ADR 0059.
 --
 -- Each case installs the hook driver into a scratch write directory, starts
 -- it against a module stub that records each configure, then rewrites the
@@ -132,6 +133,21 @@ for _, case in ipairs({
   local own = lines(dir)
   assert(#own == before + 1 and own[#own] == 'ERROR ' .. reason,
     case[1] .. ': the log after the refusal reads ' .. tostring(own[#own]))
+end
+
+-- A file gone since the start: not the defaults, which would drop every
+-- token in force, but no second configure and one ERROR line. ADR 0059.
+do
+  local driver, dir, calls = started("return { tokens = { { id = 'map', secret = 's', caps = { 'read' } } } }")
+  local before = #lines(dir)
+  assert(os.remove(dir .. 'Config/DCSBridge.lua'))
+  local ok, reason = driver.reload()
+  assert(not ok and reason == 'no ' .. dir .. 'Config/DCSBridge.lua: the running configuration stays in force',
+    'the reason reads ' .. tostring(reason))
+  assert(#calls == 1, #calls .. ' configure calls, expected 1')
+  local own = lines(dir)
+  assert(#own == before + 1 and own[#own] == 'ERROR ' .. reason,
+    'the log after the refusal reads ' .. tostring(own[#own]))
 end
 
 -- A table the broker refuses: one ERROR line naming the refusal, and the
