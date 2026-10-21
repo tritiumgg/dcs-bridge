@@ -522,6 +522,20 @@ local function read_schema()
   return bytes
 end
 
+-- The broker's answer to a configure, then one WARN for each key it left
+-- pending. A pending key keeps its value in force, so without the line an
+-- operator who edited it sees nothing change and nothing say why.
+local function report(answer)
+  log.info('configured: interface ' .. tostring(answer.interface)
+    .. ', applied ' .. tostring(answer.applied)
+    .. ', unknown ' .. tostring(answer.unknown)
+    .. ', pending_restart ' .. tostring(answer.pending_restart))
+  for _, key in ipairs(answer.pending or {}) do
+    log.warn(tostring(key.key) .. ': effective ' .. tostring(key.effective)
+      .. ', file ' .. tostring(key.file) .. ', waits for a DCS restart')
+  end
+end
+
 -- Called once by the loader, which wrote ctx.banner to dcs.log already and
 -- logs anything this raises there. The banner comes first, at the default
 -- level, so DCSBridge.log names the build even when the file does not read
@@ -569,10 +583,7 @@ function driver.start(ctx)
     fail(tostring(answer))
   end
   state.shim = shim
-  log.info('configured: interface ' .. tostring(answer.interface)
-    .. ', applied ' .. tostring(answer.applied)
-    .. ', unknown ' .. tostring(answer.unknown)
-    .. ', pending_restart ' .. tostring(answer.pending_restart))
+  report(answer)
 
   -- The one stop after the bind. The broker then listens with no schema:
   -- its handshake carries no hash and GetSchema answers an error. ADR 0056.

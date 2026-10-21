@@ -76,17 +76,19 @@ local function install(config, omit)
 end
 
 -- An opener whose module records each configure and answers as the broker
--- does, without one. Its interface is the driver's unless given, and its
--- schema answers the hash of abc unless given another function.
-local function recording(driver, interface, schema)
+-- does, without one. Its interface is the driver's unless given, its schema
+-- answers the hash of abc unless given another function, and configure
+-- answers nothing applied or pending unless given another answer.
+local function recording(driver, interface, schema, answer)
   interface = interface or driver.INTERFACE
+  answer = answer or { interface = interface, applied = 0, unknown = 0, pending_restart = 0, pending = {} }
   local calls = {}
   local function open()
     return {
       interface = interface,
       configure = function(table)
         calls[#calls + 1] = table
-        return { interface = interface, applied = 0, unknown = 0, pending_restart = 0, pending = {} }
+        return answer
       end,
       schema = schema or function(bytes)
         assert(bytes == 'abc', 'the schema was handed as ' .. tostring(bytes))
@@ -163,6 +165,27 @@ do
   assert(#handed.tokens == 1 and token.id == 'map' and token.secret == 'map-secret'
     and token.caps[1] == 'read', 'the token did not arrive as written')
   assert(handed.route == nil, 'the broker was handed route')
+end
+
+-- A key the broker left pending: the answer's count, then one WARN naming
+-- the key, the value in force and the file's, before the schema's line.
+do
+  local driver, dir = install()
+  driver.open = recording(driver, nil, nil, {
+    interface = driver.INTERFACE,
+    applied = 19,
+    unknown = 0,
+    pending_restart = 1,
+    pending = { { key = 'ring_out_lossy_records', effective = 3584, file = 64 } },
+  })
+  driver.start({ banner = 'the banner' })
+  local own = lines(dir)
+  assert(own[3] == 'INFO configured: interface ' .. driver.INTERFACE
+    .. ', applied 19, unknown 0, pending_restart 1',
+    'the third line is not the answer: ' .. tostring(own[3]))
+  assert(own[4] == 'WARN ring_out_lossy_records: effective 3584, file 64, waits for a DCS restart',
+    'the pending key is not a warning: ' .. tostring(own[4]))
+  assert(own[5] == 'INFO schema ' .. ABC, 'the fifth line is not the hash: ' .. tostring(own[5]))
 end
 
 -- A file at error: the banner is there, and no INFO line follows it.
