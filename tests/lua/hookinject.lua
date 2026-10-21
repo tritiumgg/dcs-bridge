@@ -81,8 +81,8 @@ do
 end
 
 -- The sim driver takes the parameters the chunk set, clears their name and
--- publishes them under DCSBridge. Run without them, it raises and sets
--- nothing.
+-- publishes them under DCSBridge with the stock route. Run without them, it
+-- is the modified route, and it loads itself without raising.
 do
   local driver, dir = install()
   local server = net.states.server
@@ -90,15 +90,15 @@ do
   server.DCSBridge_load = params
   server.dofile(dir .. hook.SIM)
   assert(server.DCSBridge.load == params, 'the sim driver published ' .. tostring(server.DCSBridge.load))
+  assert(params.route == 'stock', 'the stock load carries route ' .. tostring(params.route))
   assert(server.DCSBridge.grammar == driver.GRAMMAR_VERSION,
     'the sim driver published grammar ' .. tostring(server.DCSBridge.grammar))
   assert(rawget(server, 'DCSBridge_load') == nil, 'the sim driver left DCSBridge_load set')
 
   local mission = net.states.mission
-  local ok, err = pcall(mission.dofile, dir .. hook.SIM)
-  assert(not ok and err:find('DCSBridge_load is not a table'), 'a bare dofile answered ' .. tostring(err))
-  assert(rawget(mission, 'DCSBridge') == nil, 'a bare dofile published DCSBridge')
-  print('ok  the sim driver publishes what the chunk handed it, and needs it')
+  mission.dofile(dir .. hook.SIM)
+  assert(rawget(mission, 'DCSBridge').load.route == 'modified', 'a bare dofile published no modified-route load')
+  print('ok  the sim driver publishes what the chunk handed it, and loads itself without it')
 end
 
 -- Whether two values are the same, tables by their contents.
@@ -234,6 +234,7 @@ do
   local answer = net.dostring_in('server', chunk)
   assert(answer == 'OK|loaded 7', 'the chunk answered ' .. tostring(answer))
   local server = net.states.server
+  params.route = 'stock'
   assert(same(server.DCSBridge.load, params), 'the sim driver published other parameters')
   assert(rawget(server, 'DCSBridge_load') == nil, 'the chunk left DCSBridge_load set')
   print('ok  the chunk hands the sim driver its parameters and reads the epoch back')
