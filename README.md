@@ -68,6 +68,8 @@ Saved Games\DCS\
     lua\HookDriver.lua             The hook driver, which the loader runs.
     lua\HookDriver.gen.lua         The hook driver's generated tables, and the
                                    hash of the schema they were built from.
+    lua\HookDriver.builtin.lua     The hook driver's built-in handlers. The
+                                   handlers are planned; the file is empty.
     lua\SimDriver.lua              The sim driver, which loads into the mission
                                    on every mission load.
     bin\lua-dcsbridge.dll          The broker, which the hook driver loads.
@@ -87,6 +89,15 @@ loader or could not parse it.
 A release overwrites every file under `Mods\services\DCSBridge\`. Do not put
 your own files there. Your own extension files go under `DCSBridge\` in the
 Saved Games directory. A release never touches that directory.
+
+The hook driver loads `DCSBridge\hookdriver.d\` once at DCS start, after
+`HookDriver.builtin.lua`: the `*.gen.lua` files first, then the rest, each
+in name order. The directory need not exist. A file that does not compile or
+raises is skipped with one ERROR line naming it in
+`Logs\DCSBridge\DCSBridge.log`, and the rest load. A missing
+`HookDriver.builtin.lua` is logged the same way, and the bridge starts
+without it. Each file runs as a plain Lua chunk in the hook state.
+The surface a file registers its handlers through is not yet built.
 
 To uninstall, delete `Scripts\Hooks\DCSBridge.lua` and
 `Mods\services\DCSBridge\`. Delete `DCSBridge\`, `Config\DCSBridge.lua` and
@@ -127,7 +138,9 @@ which binds the address and sizes the queues. A later call, on
 address, the port, the connection cap or a queue size waits for a DCS
 restart. `DCSBridge.log` names each such key with the value in force and the
 file's, on a line ending `waits for a DCS restart`. `route` and
-`hook_driver_disabled_files` wait for a restart the same way. Each connection
+`hook_driver_disabled_files` wait for a restart the same way.
+`hook_driver_disabled_files` lists hook driver files to skip by name, such
+as `HookDriver.builtin.lua` or a file in `DCSBridge\hookdriver.d\`. Each connection
 has a queue per record class, so a flood of records a consumer can afford to
 lose pushes out none of the others. Their sizes are `ring_out_lossy_records`,
 `ring_out_durable_records` and `ring_out_lifecycle_records`.

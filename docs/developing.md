@@ -99,6 +99,12 @@ log past its cap over real files. Stock Lua has no `lfs` and no DCS `log`, so
 `tests/lua/support/dcs.lua` stands in for both. It sits in a subdirectory so
 the step does not run it as a test.
 
+`tests/lua/hookchain.lua` runs the hook driver's extension chain, which loads
+`HookDriver.builtin.lua` and then `DCSBridge/hookdriver.d/` after the schema
+is handed to the broker. `hook_driver_files_failed_total` is held by the hook
+driver and is not published yet, so the test reads it through
+`driver.counters()` (ADR 0070).
+
 ### Windows
 
 The product target is `x86_64` Windows for as long as DCS runs nowhere else,
