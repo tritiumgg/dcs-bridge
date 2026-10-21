@@ -189,6 +189,9 @@ struct DoctorArgs {
     /// `USERPROFILE` are checked, each that holds the loader.
     #[arg(long, value_name = "PATH")]
     dir: Option<PathBuf>,
+
+    #[command(flatten)]
+    addr: Addr,
 }
 
 /// The environment variable a secret is read from when no file names one.
@@ -212,8 +215,8 @@ fn main() -> ExitCode {
     }
 }
 
-/// Check each write directory found, print one line per check, and exit by
-/// the lines.
+/// Check each write directory found, then ask the port whether a bridge
+/// answers, print one line per check, and exit by the lines.
 ///
 /// Every check passed exits 0, with any notes printed. A check that failed
 /// exits 1, after every other check has run. No write directory to check
@@ -237,6 +240,11 @@ fn doctor_verb(args: &DoctorArgs) -> ExitCode {
         failed |= report.failed();
         let _ = write!(out, "{report}");
     }
+    let _ = out.flush();
+    let mut report = doctor::Report::default();
+    doctor::port(&args.addr.addr, &mut report);
+    failed |= report.failed();
+    let _ = write!(out, "{report}");
     let _ = out.flush();
     if failed {
         ExitCode::from(1)

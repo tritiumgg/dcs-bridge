@@ -6,10 +6,11 @@
 
 use std::io::{self, BufReader};
 use std::path::{MAIN_SEPARATOR_STR, Path, PathBuf};
-use std::time::UNIX_EPOCH;
+use std::time::{Duration, UNIX_EPOCH};
 use std::{fmt, fs};
 
 use crate::dcslog::{self, Identity, Start};
+use crate::ping;
 
 /// The files a release extracts over the write directory, each of which
 /// the bridge needs to start. The paths are the write directory's, with
@@ -195,6 +196,56 @@ fn interfaces(dir: &Path, report: &mut Report) {
     }
 }
 
+/// Whether a bridge answers a `Ping` at `addr`, with `ping`'s frame and
+/// deadline. The sim not heard from and a bridge switched off are each a
+/// note, since a sim mid-load reads as dead and neither is a broken
+/// install. ADR 0075.
+pub fn port(addr: &str, report: &mut Report) {
+    port_within(addr, crate::ANSWER_WAIT, report);
+}
+
+/// [`port`], waiting at most `wait` for the connect and the answer.
+fn port_within(addr: &str, wait: Duration, report: &mut Report) {
+    let reader = match ping::ask(addr, wait) {
+        Ok(reader) => reader,
+        Err(error) => {
+            report.fail(format!(
+                "{error}; DCS is not running with the bridge, or the bridge listens on another address, which --addr names"
+            ));
+            return;
+        }
+    };
+    // ping prints its own line, and doctor's is the one wanted here.
+    match ping::run(reader, io::sink()) {
+        Ok(Some(pong)) => {
+            report.ok(format!("{addr} answers"));
+            if !pong.dcs_alive {
+                report.note(format!(
+                    "the bridge has not heard from the sim lately (dcs_alive=false, dcs_last_heard_ms={}); a mission load longer than dcs_alive_threshold_ms, 30 s by default, reads this way",
+                    pong.dcs_last_heard_ms
+                        .map_or_else(|| "-".to_owned(), |age| age.to_string())
+                ));
+            }
+            if !pong.bridge_enabled {
+                report.note("the bridge is switched off (bridge_enabled=false)");
+            }
+        }
+        Ok(None) => report.fail(format!("{addr} closed the connection without answering")),
+        Err(error)
+            if matches!(
+                error.kind(),
+                io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+            ) =>
+        {
+            report.fail(format!(
+                "no answer from {addr} within {} seconds",
+                wait.as_secs()
+            ));
+        }
+        Err(error) => report.fail(format!("{addr} answered with no Pong that reads: {error}")),
+    }
+}
+
 /// The hook driver's interface version: the first line of the shape
 /// `local INTERFACE = '...'`.
 pub fn driver_interface(text: &str) -> Option<String> {
@@ -327,6 +378,11 @@ fn placement(dir: &Path, report: &mut Report) {
 pub(crate) mod tests {
     use super::*;
     use std::{fs, slice};
+
+    use prost::Message;
+    use std::io::{Read, Write};
+    use std::net::{TcpListener, TcpStream};
+    use std::thread::{self, JoinHandle};
 
     /// An empty scratch directory under the system's temporary one, named
     /// for the test and the process so parallel tests and runs never meet.
@@ -563,6 +619,126 @@ pub(crate) mod tests {
 
         fs::remove_dir_all(&home).unwrap();
         fs::remove_dir_all(&named).unwrap();
+    }
+
+    /// A live bridge on loopback answers, which is one `ok` line naming the
+    /// address. The bridge is a process static that `ping`'s test ticks,
+    /// so whether the sim reads alive depends on which test ran first, and
+    /// this one neither ticks it nor asserts either way.
+    #[test]
+    fn a_live_bridge_answers_on_its_port() {
+        use dcsbridge_broker::fanout::{Capacities, Writer};
+        use dcsbridge_broker::transport::Listener;
+        use std::sync::Arc;
+
+        let (writer, _commit, connections) = Writer::spawn(64);
+        let answers = Arc::new(dcsbridge_broker::state::Global);
+        let listener =
+            Listener::spawn("127.0.0.1:0", connections, Capacities::each(4), answers).unwrap();
+        let addr = listener.local_addr().to_string();
+        let mut report = Report::default();
+        port(&addr, &mut report);
+        assert!(!report.failed(), "{report}");
+        assert_eq!(marked(&report, Mark::Ok), [format!("{addr} answers")]);
+        drop(listener);
+        drop(writer);
+    }
+
+    /// A port nothing listens on fails, naming the address tried and
+    /// saying `--addr` names another.
+    #[test]
+    fn a_closed_port_names_the_address_and_addr() {
+        let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = closed.local_addr().unwrap().to_string();
+        drop(closed);
+        let mut report = Report::default();
+        port(&addr, &mut report);
+        let fails = marked(&report, Mark::Fail);
+        assert_eq!(fails.len(), 1, "{report}");
+        assert!(
+            fails[0].starts_with(&format!("cannot connect to {addr}: ")),
+            "{report}"
+        );
+        assert!(fails[0].ends_with("which --addr names"), "{report}");
+    }
+
+    /// A one-connection server on loopback that reads the `Ping` and then
+    /// does whatever `then` does with the socket. Reading first means a
+    /// close is a clean end of stream and never a reset.
+    fn serve(then: impl FnOnce(&mut TcpStream) + Send + 'static) -> (String, JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut ping = vec![0; ping::ping_frame().len()];
+            stream.read_exact(&mut ping).unwrap();
+            then(&mut stream);
+        });
+        (addr, server)
+    }
+
+    /// The port check against `then`'s server, with a short wait.
+    fn ask(then: impl FnOnce(&mut TcpStream) + Send + 'static) -> (String, Report) {
+        let (addr, server) = serve(then);
+        let mut report = Report::default();
+        port_within(&addr, Duration::from_millis(300), &mut report);
+        server.join().unwrap();
+        (addr, report)
+    }
+
+    /// A bridge that closes without answering, one that never answers,
+    /// and one whose answer does not decode each fail by what happened.
+    #[test]
+    fn a_port_that_does_not_answer_fails_by_how() {
+        let (addr, report) = ask(|_| {});
+        assert_eq!(
+            marked(&report, Mark::Fail),
+            [format!("{addr} closed the connection without answering")]
+        );
+
+        let (addr, report) = ask(|_| thread::sleep(Duration::from_millis(600)));
+        assert_eq!(
+            marked(&report, Mark::Fail),
+            [format!("no answer from {addr} within 0 seconds")]
+        );
+
+        let (addr, report) = ask(|stream| {
+            let garbled = crate::wire::frame(1, dcsbridge_topic::PONG, vec![0xff, 0xff, 0xff]);
+            stream.write_all(&garbled).unwrap();
+        });
+        let fails = marked(&report, Mark::Fail);
+        assert_eq!(fails.len(), 1, "{report}");
+        assert!(
+            fails[0].starts_with(&format!("{addr} answered with no Pong that reads: ")),
+            "{report}"
+        );
+    }
+
+    /// A sim not heard from and a bridge switched off are notes beside an
+    /// `ok`, never failures.
+    #[test]
+    fn a_dead_sim_and_a_disabled_bridge_are_notes() {
+        let (addr, report) = ask(|stream| {
+            let pong = ping::Pong {
+                dcs_alive: false,
+                dcs_last_heard_ms: Some(45_000),
+                bridge_enabled: false,
+            };
+            let frame = crate::wire::frame(1, dcsbridge_topic::PONG, pong.encode_to_vec());
+            stream.write_all(&frame).unwrap();
+        });
+        assert!(!report.failed(), "{report}");
+        assert_eq!(marked(&report, Mark::Ok), [format!("{addr} answers")]);
+        let notes = marked(&report, Mark::Note);
+        assert_eq!(notes.len(), 2, "{report}");
+        assert!(
+            notes[0].contains("dcs_alive=false, dcs_last_heard_ms=45000"),
+            "{report}"
+        );
+        assert_eq!(
+            notes[1],
+            "the bridge is switched off (bridge_enabled=false)"
+        );
     }
 
     /// The marker is found among other bytes and read to its NUL; no
