@@ -2025,6 +2025,44 @@ mod tests {
         assert_eq!(bridge.pending_restart(), 1);
     }
 
+    /// A later `configure` that lowers a ring size reports it pending with
+    /// the size in force and the file's, and the ring keeps the size the
+    /// first call allocated.
+    #[test]
+    fn a_later_configure_leaves_the_rings_at_their_first_size() {
+        let bridge = Bridge::new(2);
+        let n = Value::Number;
+        bridge
+            .configure([("port", n(0.0)), ("ring_in_hook_driver_records", n(64.0))])
+            .expect("a valid table");
+        let applied = bridge
+            .configure([
+                ("ring_in_hook_driver_records", n(16.0)),
+                ("ring_out_lossy_records", n(64.0)),
+            ])
+            .expect("a valid table");
+
+        let pending: Vec<_> = applied
+            .pending
+            .iter()
+            .map(|p| (p.key, p.effective.clone(), p.file.clone()))
+            .collect();
+        assert_eq!(
+            pending,
+            [
+                ("ring_in_hook_driver_records", n(64.0), n(16.0)),
+                ("ring_out_lossy_records", n(3584.0), n(64.0)),
+            ]
+        );
+        assert_eq!(bridge.pending_restart(), 2);
+        let inbound = bridge.inbound().expect("allocated at the first call");
+        assert_eq!(
+            inbound.hook.consumer.lock().unwrap().capacity(),
+            64,
+            "the hook driver ring was resized"
+        );
+    }
+
     /// The schema is refused before the first `configure` and when empty,
     /// held once with its hash in every handshake after, handed to the
     /// reader byte for byte, and refused a second time with the first still
