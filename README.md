@@ -68,6 +68,8 @@ Saved Games\DCS\
     lua\HookDriver.lua             The hook driver, which the loader runs.
     lua\HookDriver.gen.lua         The hook driver's generated tables, and the
                                    hash of the schema they were built from.
+    lua\SimDriver.lua              The sim driver, which loads into the mission
+                                   on every mission load.
     bin\lua-dcsbridge.dll          The broker, which the hook driver loads.
     schema.pb                      The compiled schema. The hook driver hands
                                    it to the broker at start.
@@ -287,21 +289,28 @@ or add it where the file has no such line. Then restart DCS.
 
 ### The Modified route
 
-The Modified route edits a file in the DCS install directory. Add one `dofile`
-line to `Scripts\MissionScripting.lua`, after the line that loads
-`ScriptingSystem.lua` and before the block that removes `os`, `io` and `lfs`.
+The Modified route edits a file in the DCS install directory. Set
+`route = 'modified'` in `Config\DCSBridge.lua`, then add this line to
+`Scripts\MissionScripting.lua`, after the line that loads
+`ScriptingSystem.lua` and before the block that removes `os`, `io` and `lfs`:
+
+```lua
+pcall(dofile, lfs.writedir() .. 'Mods/services/DCSBridge/lua/SimDriver.lua')
+```
+
 The sim driver then loads as part of the mission scripting environment
 itself. The Modified route does not use `net.dostring_in` and needs no
-`autoexec.cfg` change. The exact line to add is not final.
+`autoexec.cfg` change. The `pcall` keeps a missing or damaged `SimDriver.lua`
+from stopping the file before the sanitize block runs.
 
-The edited file looks like this. The `dofile` line is the addition.
+The edited file looks like this. The `pcall` line is the addition.
 
 ```lua
 --Initialization script for the Mission lua Environment (SSE)
 
 dofile('Scripts/ScriptingSystem.lua')
 
-dofile(lfs.writedir() .. 'Mods/services/DCSBridge/lua/SimDriver.lua')
+pcall(dofile, lfs.writedir() .. 'Mods/services/DCSBridge/lua/SimDriver.lua')
 
 --Sanitize Mission Scripting environment
 --This makes unavailable some unsecure functions.
@@ -325,8 +334,24 @@ end
 
 Do not remove the sanitize block. It keeps mission scripts sandboxed.
 
+On this route the sim driver reads its own keys from `Config\DCSBridge.lua`
+at every mission load, so a change to one of them takes effect at the next
+mission load. The hook driver still reads the whole file at DCS start. Each
+mission load writes one INFO line to `Logs\dcs.log` under `DCSBridge`, such
+as this one:
+
+```
+the sim driver loaded on the modified route: read C:\Users\you\Saved Games\DCS\Config/DCSBridge.lua, drain_max_records 128
+```
+
+The line names each sim driver key the file moves from its default. With no
+file it says `defaults in force`. When the file does not read, the line is
+an ERROR beginning `the sim driver did not load on the modified route:` and
+naming why, and the sim driver does not load for that mission.
+
 Every DCS update overwrites `MissionScripting.lua` and removes the line. The
 bridge then stops loading with no error. Reapply the edit after every update.
+A line left after the bridge is uninstalled does nothing.
 
 ## Use `dcsb`
 
