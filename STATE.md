@@ -18,7 +18,7 @@ is just deleted. Write entries as one or two lines, never paragraphs.
 
 ## In progress
 
-Nothing. 4.11 is built; 4.12 is next.
+Nothing. 4.12 is built; 4.C1 is next.
 
 *One task at most. Say what is done, what is not, and where to resume. Say what
 is committed and what is only in the working tree. Say what is knowingly
@@ -26,27 +26,23 @@ broken. Empty this when the task closes.*
 
 ## Just finished
 
+- **4.12** — `dcsbridge.hook.ReloadConfig` (command, hook route, `reload`) dispatches to `driver.reload`; `start` registers `state.gen`'s tables after the schema line, a refusal stopping it; the loop polls from five callbacks, at most the cap, holds one record past it and counts that in `hook_driver_dispatch_deferred_total`; nothing between load begin and end or a frame; disabled, it runs `ReloadConfig` alone and discards the rest with one WARN a topic; no answer (row 7.5); agent-verified under stock Lua, the live reload and the 4.4 check are the maintainer's (PR #105 "With DCS"). PR #105, ADR 0071, 0072.
 - **4.11** — after the schema line `start` runs `HookDriver.builtin.lua` (shipped, registers nothing), then `hookdriver.d` (`*.gen.lua` first, name order) as bare chunks; a missing, uncompilable or raising file logs one ERROR and counts in `hook_driver_files_failed_total`, held in the hook driver; `hook_driver_disabled_files` drops names from both; an absent directory is silent; plan row 5.13 holds the hook-side surface; agent-verified under stock Lua, ED's `lfs.dir` on a missing directory is the maintainer's (PR #104 "With DCS"). PR #104, ADR 0070.
 - **4.10** — with no `DCSBridge_load` the sim driver bootstraps itself: reads its 21 sim keys from `Config/DCSBridge.lua` with the hook driver's checks, lists `simdriver.d`, publishes `route = 'modified'`, logs one INFO or ERROR line to `dcs.log`, never raises; holds `package.loadlib` and returns an opener it never publishes; the shipped line is `pcall(dofile, ...)`; agent-verified under stock Lua, the edited `MissionScripting.lua` is the maintainer's (PR #103 "With DCS"). PR #103, ADR 0069.
-- **4.9** — `absent` (no `net` or `net.dostring_in`) and `noprefix` with an unpositioned string answer are policy refusals: one ERROR line per `autoexec.cfg` line, the union with the operator's file read under a stub environment, then a latch `driver.enabled()` consults until DCS restarts; `unreached` and a positioned answer do not fire; agent-verified under stock Lua, the live refusal is the maintainer's (PR #102 "With DCS"). PR #102, ADR 0067, 0068.
 
 *The last three at most, one line each. Git log holds the rest.*
 
 ## Next
 
-**Task 4.12** — Hook driver dispatch loop: ring poll in five callbacks,
-`hook_driver_dispatch_max_commands` per invocation, `hook_driver_dispatch_deferred_total`,
-nothing between `onMissionLoadBegin` and `onMissionLoadEnd`; registers the tables of
-`state.gen` without a second load (ADR 0055); adds the hook-package `ReloadConfig` record
-with `CAPABILITY_RELOAD` dispatched to `driver.reload`; poll and ferrying gated on
-`driver.enabled()`, `ReloadConfig` excepted (ADR 0063). Done when a hook-targeted command
-dispatches at the menu, a burst above the cap defers, and `ReloadConfig` moves a live key
-and logs a ring size pending at a live install. Dispatch and the cap are agent-verifiable
-under stock Lua; the live reload check is the maintainer's and pays the 4.4 carry-forward.
+**Task 4.C1** — CLI `doctor`, first increment: install placement, hook driver load, port,
+load banner, and both interface versions. Done when a broken install is diagnosed in one
+command before any sim driver exists. Install placement and the port are agent-verifiable
+against a scratch tree and a loopback bridge; the load banner and the hook driver load
+against a real Saved Games tree are the maintainer's.
 
 ## After that
 
-- **4.C1**, then **4.13** closes Phase 4; Phase 5 from 5.1; 3.5 waits behind 7.6.
+- **4.13** closes Phase 4; Phase 5 from 5.1; 3.5 waits behind 7.6.
 
 ## Carries forward
 
@@ -97,12 +93,5 @@ entries at most: an eleventh means something here is finished, or belongs in
   `dcs_alive_threshold_loading_ms` and nothing in Lua calls it, so a load
   over 30 s reads as a dead sim until `MissionLoadBegan` sets it. Delete
   this when 6.5 closes.
-- **4.11 and 4.12 build on `state.gen`.** 4.3 loads `HookDriver.gen.lua` at
-  start, fatally; 4.11's chain starts after it, 4.12 registers its tables
-  without a second load (ADR 0055). Delete when 4.12 closes.
-- **4.4's live reload check is owed by 4.12's PR.** With `ReloadConfig` sendable,
-  set `ring_out_lossy_records = 64` and expect `configured: ... pending_restart 1`
-  then `WARN ring_out_lossy_records: effective 3584, file 64, waits for a DCS
-  restart`; a live key moves; a file that raises logs one ERROR and nothing else.
 - **Task 7.10 does not exist.** Phase 7 runs 7.1 to 7.9 then 7.11, with no note
   explaining the gap. Retired ID or omission, unresolved.
