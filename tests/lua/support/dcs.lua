@@ -35,7 +35,11 @@ function dcs.lfs(writedir)
     return writedir
   end
 
+  -- A path that is not a directory raises, as DCS's lfs.dir does.
   function lfs.dir(path)
+    if os.execute('test -d ' .. quote(path)) ~= 0 then
+      error('cannot open ' .. path .. ': No such file or directory', 2)
+    end
     local names = {}
     local p = assert(io.popen('ls -a ' .. quote(path)))
     for name in p:lines() do

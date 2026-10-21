@@ -212,4 +212,84 @@ do
   print('ok  a value that does not cross is refused, naming its path')
 end
 
+-- The chunk runs the real sim driver in the server state, which publishes
+-- the parameters whole, and its answer carries the epoch read back from
+-- the sim driver's global. The handoff name is gone after it.
+do
+  local driver, dir = install()
+  local params = {
+    epoch = 7,
+    mission = 'a "quoted"\nmission',
+    settings = { bridge_return_max_bytes = 32768, options = { nested = { 'x' } } },
+    files = { dir .. 'DCSBridge/simdriver.d/a.lua' },
+  }
+  local chunk = assert(driver.injection.chunk(dir .. hook.SIM, params))
+  assert(loadstring(chunk), 'the chunk does not compile')
+  local answer = net.dostring_in('server', chunk)
+  assert(answer == 'OK|loaded 7', 'the chunk answered ' .. tostring(answer))
+  local server = net.states.server
+  assert(same(server.DCSBridge.load, params), 'the sim driver published other parameters')
+  assert(rawget(server, 'DCSBridge_load') == nil, 'the chunk left DCSBridge_load set')
+  print('ok  the chunk hands the sim driver its parameters and reads the epoch back')
+end
+
+-- A sim driver that raises answers its error after the failed: prefix, and
+-- one that sets no global answers no epoch. Neither leaves the handoff name.
+do
+  local driver, dir = install()
+  hook.sim(dir, 'error("deliberate", 0)')
+  local chunk = assert(driver.injection.chunk(dir .. hook.SIM, { epoch = 1 }))
+  local answer = net.dostring_in('server', chunk)
+  assert(answer == 'OK|failed: deliberate', 'a raising sim driver answered ' .. tostring(answer))
+  assert(rawget(net.states.server, 'DCSBridge_load') == nil, 'a raise left DCSBridge_load set')
+
+  hook.sim(dir, 'local quiet = DCSBridge_load')
+  answer = net.dostring_in('mission', chunk)
+  assert(answer == 'OK|loaded nil', 'a sim driver that set nothing answered ' .. tostring(answer))
+  assert(rawget(net.states.mission, 'DCSBridge_load') == nil, 'the chunk left DCSBridge_load set')
+  print('ok  a raise answers failed, and a sim driver that sets nothing answers no epoch')
+end
+
+-- A value in the parameters that does not cross refuses the chunk, naming
+-- where it is.
+do
+  local driver, dir = install()
+  local chunk, reason = driver.injection.chunk(dir .. hook.SIM,
+    { epoch = 1, settings = { options = { builtin = { resync = print } } } })
+  assert(chunk == nil, 'a function crossed')
+  assert(reason:find('settings.options.builtin.resync is a function', 1, true) == 1,
+    'the refusal was ' .. tostring(reason))
+  print('ok  a value that does not cross refuses the chunk')
+end
+
+-- The extension list: *.lua files only, *.gen.lua first, each part in name
+-- order, full paths, a disabled name dropped.
+do
+  local driver, dir = install()
+  local d = dir .. 'DCSBridge/simdriver.d/'
+  for _, name in ipairs({ 'b.lua', 'a.lua', 'z.gen.lua', 'notes.txt', 'off.lua', 'c.gen.lua' }) do
+    hook.write(d .. name, '')
+  end
+  local files = driver.injection.files(d, { 'off.lua', 'SimDriver.builtin.lua' })
+  local expected = { 'c.gen.lua', 'z.gen.lua', 'a.lua', 'b.lua' }
+  assert(#files == #expected, #files .. ' files listed, expected ' .. #expected)
+  for i, name in ipairs(expected) do
+    assert(files[i] == d .. name, 'file ' .. i .. ' is ' .. tostring(files[i]) .. ', expected ' .. name)
+  end
+  print('ok  the extension list is ordered and drops a disabled name')
+end
+
+-- An absent directory, or one that does not list, is no files.
+do
+  local driver, dir = install()
+  local files = driver.injection.files(dir .. 'DCSBridge/simdriver.d/', {})
+  assert(#files == 0, #files .. ' files listed from an absent directory')
+  lfs.dir = function()
+    error('denied', 0)
+  end
+  files = driver.injection.files(dir, {})
+  assert(#files == 0, #files .. ' files listed from a directory that does not list')
+  print('ok  an absent or unlistable directory is no files')
+end
+
 hook.remove()

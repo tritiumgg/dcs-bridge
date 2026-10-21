@@ -675,6 +675,71 @@ function injection.literal(value, path)
   return table.concat(out)
 end
 
+-- The chunk that runs the sim driver at path with params, or nil and the
+-- reason a value in params does not cross. It hands params over in one
+-- global the sim driver takes and clears, and clears it again after, so the
+-- name is gone whether the file loaded or raised. Its answer carries the
+-- epoch read from the global the sim driver set, so a file that ran and
+-- set nothing does not read as loaded. ADR 0065.
+function injection.chunk(path, params)
+  local names = {}
+  for name in pairs(params) do
+    names[#names + 1] = name
+  end
+  table.sort(names)
+  local fields = {}
+  for _, name in ipairs(names) do
+    local source, refused = injection.literal(params[name], name)
+    if not source then
+      return nil, refused
+    end
+    fields[#fields + 1] = name .. '=' .. source
+  end
+  return table.concat({
+    'DCSBridge_load = {' .. table.concat(fields, ',') .. '}',
+    'local ok, err = pcall(dofile, ' .. quoted(path) .. ')',
+    'DCSBridge_load = nil',
+    'if not ok then return "OK|failed: " .. tostring(err) end',
+    'local bridge = DCSBridge',
+    'local epoch = type(bridge) == "table" and type(bridge.load) == "table" and bridge.load.epoch or nil',
+    'return "OK|loaded " .. tostring(epoch)',
+  }, '\n')
+end
+
+-- The sim driver's extension files in dir, a directory path with a trailing
+-- slash: every *.lua it holds as a full path, the *.gen.lua files first and
+-- each part in name order, less each name in disabled. A directory that is
+-- absent or does not list is no files, and logs nothing, since most
+-- installs have none. SimDriver.builtin.lua is not here: the sim driver
+-- loads it by name and reads the disabled list itself. ADR 0065.
+function injection.files(dir, disabled)
+  local skip = {}
+  for _, name in ipairs(disabled) do
+    skip[name] = true
+  end
+  local gen, rest = {}, {}
+  local listed = pcall(function()
+    for name in lfs.dir(dir) do
+      if name:find('%.lua$') and not skip[name] then
+        local part = name:find('%.gen%.lua$') and gen or rest
+        part[#part + 1] = name
+      end
+    end
+  end)
+  if not listed then
+    return {}
+  end
+  table.sort(gen)
+  table.sort(rest)
+  local files = {}
+  for _, part in ipairs({ gen, rest }) do
+    for _, name in ipairs(part) do
+      files[#files + 1] = dir .. name
+    end
+  end
+  return files
+end
+
 -- The broker module, where the release zip puts it.
 local MODULE = lfs.writedir() .. 'Mods/services/DCSBridge/bin/lua-dcsbridge.dll'
 
