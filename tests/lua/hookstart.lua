@@ -2,11 +2,12 @@
 -- and its log keys handed to the logger, so every line after the banner is
 -- written at the file's level, then the broker module opened, its interface
 -- compared with the driver's, the generated file and schema.pb read, the
--- module handed every broker key and the generated hash in one call, and
--- the schema after it. A file that does not read stops the start before the
--- module opens, and a module from another build or a missing generated file
--- or schema stops it before configure. ADR 0048, ADR 0050, ADR 0051,
--- ADR 0054, ADR 0055, ADR 0056.
+-- module handed every broker key and the generated hash in one call, the
+-- schema after it, and the generated tables after that. A file that does
+-- not read stops the start before the module opens, a module from another
+-- build or a missing generated file or schema stops it before configure,
+-- and a refused registration stops it after. ADR 0048, ADR 0050, ADR 0051,
+-- ADR 0054, ADR 0055, ADR 0056, ADR 0072.
 --
 -- Each case installs the hook driver into a scratch write directory and
 -- runs its start directly, under a stock Lua 5.1 with lfs and DCS's log
@@ -277,6 +278,67 @@ do
   assert(not started, 'start ran past a refused schema')
   assert(err:find('^schema refused: .*no schema to serve$'), 'start raised ' .. tostring(err))
   assert(#calls == 1, #calls .. ' configure calls before the refusal, expected 1')
+  local own = lines(dir)
+  assert(own[#own] == 'ERROR ' .. err, 'the refusal is not logged: ' .. tostring(own[#own]))
+end
+
+-- The generated tables register after the configure and the schema, in the
+-- broker's order, and before the first extension file runs. They are the
+-- tables of the one load of HookDriver.gen.lua, and classes is handed no
+-- hash. ADR 0072.
+do
+  local driver, dir = install()
+  write(dir .. 'DCSBridge/hookdriver.d/a.lua', 'CHAINED()')
+  local open, calls, _, order = recording(driver)
+  driver.open = open
+  local chained
+  CHAINED = function()
+    chained = #order
+  end
+  local loads, loadfile = 0, loadfile
+  _G.loadfile = function(path, ...)
+    if path == dir .. GEN then
+      loads = loads + 1
+    end
+    return loadfile(path, ...)
+  end
+  driver.start({ banner = 'the banner' })
+  _G.loadfile = loadfile
+
+  local want = { 'configure', 'schema', 'classes', 'routes', 'caps', 'replies' }
+  assert(#order == #want, #order .. ' calls, expected ' .. #want)
+  for i, name in ipairs(want) do
+    assert(order[i] == name, 'call ' .. i .. ' was ' .. tostring(order[i]) .. ', expected ' .. name)
+  end
+  assert(chained == #want, 'the chain ran after ' .. tostring(chained) .. ' calls, expected all six')
+  assert(#calls == 1 and loads == 1, loads .. ' loads of the generated file, expected 1')
+  local topic = 'dcsbridge.hook.ReloadConfig'
+  assert(order.classes[topic] == 'command', 'the class was handed as ' .. tostring(order.classes[topic]))
+  assert(order.routes[topic] == 'hook_driver', 'the route was handed as ' .. tostring(order.routes[topic]))
+  assert(order.caps[topic] == 'reload', 'the capability was handed as ' .. tostring(order.caps[topic]))
+  assert(type(order.replies) == 'table' and next(order.replies) == nil, 'the replies were not the empty list')
+  CHAINED = nil
+end
+
+-- A registration the broker refuses stops the start after the configure,
+-- with an ERROR line naming the call, and no extension file runs.
+do
+  local driver, dir = install()
+  write(dir .. 'DCSBridge/hookdriver.d/a.lua', 'CHAINED = true')
+  local open, calls = recording(driver)
+  driver.open = function()
+    local shim = open()
+    shim.routes = function()
+      error('routes refused: conflicting', 0)
+    end
+    return shim
+  end
+  local started, err = pcall(driver.start, { banner = 'the banner' })
+  assert(not started, 'start ran past a refused registration')
+  assert(err == 'the generated routes were not registered: routes refused: conflicting',
+    'start raised ' .. tostring(err))
+  assert(#calls == 1, #calls .. ' configure calls before the refusal, expected 1')
+  assert(CHAINED == nil, 'an extension file ran behind a refused registration')
   local own = lines(dir)
   assert(own[#own] == 'ERROR ' .. err, 'the refusal is not logged: ' .. tostring(own[#own]))
 end

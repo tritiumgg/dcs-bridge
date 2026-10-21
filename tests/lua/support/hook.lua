@@ -85,15 +85,32 @@ end
 -- The third value holds each mission time tick was called with, in order,
 -- and answer, what tick returns: true until a test sets it, and nothing at
 -- all when a test sets it to nil, as a module older than the answer does.
+--
+-- The fourth holds the name of each configure, schema and registration
+-- call in order, and by each registration call's name the table it was
+-- handed. A registration answers the count of rows in its table.
 function hook.recording(driver, interface, schema, answer)
   interface = interface or driver.INTERFACE
   answer = answer or { interface = interface, applied = 0, unknown = 0, pending_restart = 0, pending = {} }
   local calls = {}
   local ticks = { answer = true }
+  local order = {}
+  local function registers(name)
+    return function(rows)
+      order[#order + 1] = name
+      order[name] = rows
+      local n = 0
+      for _ in pairs(rows) do
+        n = n + 1
+      end
+      return n
+    end
+  end
   local function open()
     return {
       interface = interface,
       configure = function(table)
+        order[#order + 1] = 'configure'
         calls[#calls + 1] = table
         return answer
       end,
@@ -104,13 +121,21 @@ function hook.recording(driver, interface, schema, answer)
         end
         return ticks.answer
       end,
-      schema = schema or function(bytes)
+      schema = function(bytes)
+        order[#order + 1] = 'schema'
+        if schema then
+          return schema(bytes)
+        end
         assert(bytes == 'abc', 'the schema was handed as ' .. tostring(bytes))
         return hook.ABC
       end,
+      classes = registers('classes'),
+      routes = registers('routes'),
+      caps = registers('caps'),
+      replies = registers('replies'),
     }
   end
-  return open, calls, ticks
+  return open, calls, ticks, order
 end
 
 -- DCSBridge.log as lines, without their timestamps.

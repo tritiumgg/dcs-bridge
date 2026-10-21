@@ -1205,6 +1205,26 @@ local function read_schema()
   return bytes
 end
 
+-- The registration calls, in the order the broker takes them.
+local REGISTERS = { 'classes', 'routes', 'caps', 'replies' }
+
+-- Hand the broker the generated file's tables, from the table start loaded
+-- and not from a second load (ADR 0055). Called after the first configure,
+-- so a LIFECYCLE row never freezes max_lifecycle_topics at its default
+-- (ADR 0029). classes takes no hash: the one configure carried was
+-- compared at the schema hand-off, and a second would count the same
+-- mismatch twice. A refusal stops the start, since a bridge that refuses
+-- every record routed to the hook driver looks healthy while it does.
+-- ADR 0072.
+local function register(shim)
+  for _, name in ipairs(REGISTERS) do
+    local taken, err = pcall(shim[name], state.gen[name])
+    if not taken then
+      fail('the generated ' .. name .. ' were not registered: ' .. text(err))
+    end
+  end
+end
+
 -- One WARN for each key in a pending list, the broker's or the hook
 -- driver's own, in one shape. A pending key keeps its value in force, so
 -- without the line an operator who edited it sees nothing change and
@@ -1472,8 +1492,8 @@ function driver.start(ctx)
   report(answer)
   switch(state.broker.enabled)
 
-  -- The one stop after the bind. The broker then listens with no schema:
-  -- its handshake carries no hash and GetSchema answers an error. ADR 0056.
+  -- A stop after the bind. The broker then listens with no schema: its
+  -- handshake carries no hash and GetSchema answers an error. ADR 0056.
   local held, sha256 = pcall(shim.schema, schema)
   if not held then
     fail(tostring(sha256) .. '; the broker listens with no schema to serve')
@@ -1486,6 +1506,7 @@ function driver.start(ctx)
     log.warn('schema ' .. sha256 .. ' but HookDriver.gen.lua was generated from '
       .. state.gen.schema_sha256)
   end
+  register(shim)
   -- After the bind, since a file that fails is contained and never stops
   -- the start, and before the start is marked finished, so no callback
   -- body runs while the files load. The built-ins file is listed by name,
