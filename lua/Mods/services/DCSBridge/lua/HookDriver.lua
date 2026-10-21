@@ -273,6 +273,58 @@ function config.split(values)
   return split
 end
 
+-- The hook driver's own keys that a reload does not move. The route is
+-- decided at load and the hook driver cannot reload itself, and its
+-- extension chain is read once at start. sim_driver_path is stored and
+-- takes effect at the next injection. Every other hook key is live. The
+-- sim driver's keys are stored for the next injection and not compared.
+-- ADR 0057.
+local RESTART = { route = true, hook_driver_disabled_files = true }
+
+-- A value as a log line shows it: a file list by its names, in order.
+local function shown(value)
+  if type(value) == 'table' then
+    return '{' .. table.concat(value, ', ') .. '}'
+  end
+  return tostring(value)
+end
+
+-- Whether two values are the same: a file list by its length and the name
+-- at each place, so the same list read again into a new table is no change.
+-- The joined text would not do: { 'a.lua, b.lua' } joins as two names do.
+local function same(a, b)
+  if type(a) ~= 'table' or type(b) ~= 'table' then
+    return a == b
+  end
+  if #a ~= #b then
+    return false
+  end
+  for i = 1, #a do
+    if a[i] ~= b[i] then
+      return false
+    end
+  end
+  return true
+end
+
+-- Each key in RESTART whose value in file differs from the one running,
+-- as { key, effective, file } in KEYS order, and a copy of file with each
+-- of those keys held at the running value. ADR 0057.
+function config.pending(running, file)
+  local held, pending = {}, {}
+  for name, value in pairs(file) do
+    held[name] = value
+  end
+  for _, row in ipairs(KEYS) do
+    local name = row[1]
+    if RESTART[name] and not same(running[name], file[name]) then
+      pending[#pending + 1] = { key = name, effective = running[name], file = file[name] }
+      held[name] = running[name]
+    end
+  end
+  return pending, held
+end
+
 -- Opened in binary mode, always. Text mode on Windows writes each newline
 -- as two bytes, so the length counted against the cap would not be the
 -- length written.
@@ -531,8 +583,8 @@ local function report(answer)
     .. ', unknown ' .. tostring(answer.unknown)
     .. ', pending_restart ' .. tostring(answer.pending_restart))
   for _, key in ipairs(answer.pending or {}) do
-    log.warn(tostring(key.key) .. ': effective ' .. tostring(key.effective)
-      .. ', file ' .. tostring(key.file) .. ', waits for a DCS restart')
+    log.warn(tostring(key.key) .. ': effective ' .. shown(key.effective)
+      .. ', file ' .. shown(key.file) .. ', waits for a DCS restart')
   end
 end
 

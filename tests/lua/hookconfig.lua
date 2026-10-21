@@ -256,6 +256,40 @@ do
   assert(split.broker.route == nil and split.broker.options == nil, 'the broker is handed a key it does not own')
 end
 
+-- The hook driver's restart-tier keys against the ones running: a changed
+-- route is reported with both values and held at the running one, a
+-- changed log_level is live and moves, and the same file list in a new
+-- table is no change. ADR 0057.
+do
+  local driver, dir = fresh()
+  local running = driver.config.split(assert(driver.config.read(dir .. 'none'))).hook
+  running.hook_driver_disabled_files = { 'a.lua', 'b.lua' }
+  local file = driver.config.split(assert(driver.config.read(dir .. 'none'))).hook
+  file.route = 'modified'
+  file.log_level = 'debug'
+  file.hook_driver_disabled_files = { 'a.lua', 'b.lua' }
+
+  local pending, held = driver.config.pending(running, file)
+  assert(#pending == 1, #pending .. ' keys pending, expected route alone')
+  assert(pending[1].key == 'route' and pending[1].effective == 'stock'
+    and pending[1].file == 'modified', 'route is not reported with both values')
+  assert(held.route == 'stock', 'route moved to ' .. tostring(held.route))
+  assert(held.log_level == 'debug', 'log_level did not move')
+  assert(file.route == 'modified', 'the file values were changed')
+
+  file.hook_driver_disabled_files = { 'a.lua' }
+  pending, held = driver.config.pending(running, file)
+  assert(#pending == 2 and pending[2].key == 'hook_driver_disabled_files',
+    'a shorter file list is not reported')
+  assert(#held.hook_driver_disabled_files == 2, 'the file list moved')
+
+  -- One name holding a comma joins as the two names do, and is a change.
+  file.hook_driver_disabled_files = { 'a.lua, b.lua' }
+  pending = driver.config.pending(running, file)
+  assert(#pending == 2 and pending[2].key == 'hook_driver_disabled_files',
+    'one name with a comma compared as two names')
+end
+
 for _, dir in ipairs(scratch) do
   dcs.remove(dir)
 end
