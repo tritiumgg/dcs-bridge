@@ -853,6 +853,45 @@ function injection.prepare(epoch, mission)
   return chunk, path
 end
 
+-- The prefix every answer the injection chunk writes starts with, and the
+-- two bodies it writes after it.
+local OK = 'OK|'
+local LOADED = 'loaded '
+local FAILED = 'failed: '
+
+-- The case the injection chunk's answer for epoch falls in, and the detail
+-- its log line carries. The chunk answers OK|loaded <epoch> or OK|failed:
+-- <error>, so the prefix proves it ran; a string without it is one DCS
+-- wrote. ADR 0065.
+--   loaded    the epoch sent read back; the detail is the epoch
+--   epoch     another epoch read back; the detail is what read back
+--   failed    the sim driver raised; the detail is its error
+--   unknown   any other body after the prefix; the detail is the body
+--   nil       no answer at all
+--   invalid   the answer is Invalid state name
+--   noprefix  any other answer, a value that is not a string among them;
+--             the detail is the answer as text
+function injection.answer(answer, epoch)
+  if answer == nil then
+    return 'nil', 'nil'
+  end
+  if answer == 'Invalid state name' then
+    return 'invalid', answer
+  end
+  if type(answer) ~= 'string' or answer:sub(1, #OK) ~= OK then
+    return 'noprefix', text(answer)
+  end
+  local body = answer:sub(#OK + 1)
+  if body:sub(1, #LOADED) == LOADED then
+    local read = body:sub(#LOADED + 1)
+    return read == tostring(epoch) and 'loaded' or 'epoch', read
+  end
+  if body:sub(1, #FAILED) == FAILED then
+    return 'failed', body:sub(#FAILED + 1)
+  end
+  return 'unknown', body
+end
+
 -- Every DCS callback the bridge uses, registered once at start. DCS keeps a
 -- registered table for the life of the process, so the set carries every
 -- name any part of the bridge will need. ADR 0061.
@@ -1070,14 +1109,14 @@ function driver.inject(epoch)
     log.error('injection did not run: ' .. answer)
     return false
   end
-  local loaded = 'OK|loaded '
-  if answer == loaded .. tostring(epoch) then
+  local case, detail = injection.answer(answer, epoch)
+  if case == 'loaded' then
     log.info('injected ' .. path .. ': ' .. answer)
     return true
   end
-  if type(answer) == 'string' and answer:sub(1, #loaded) == loaded then
+  if case == 'epoch' then
     log.error('the sim driver set no epoch: sent ' .. tostring(epoch) .. ', read back '
-      .. answer:sub(#loaded + 1) .. ': not loaded')
+      .. detail .. ': not loaded')
     return false
   end
   log.info('injection returned: ' .. text(answer))

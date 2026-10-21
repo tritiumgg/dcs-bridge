@@ -254,6 +254,30 @@ do
   print('ok  a raise answers failed, and a sim driver that sets nothing answers no epoch')
 end
 
+-- Each answer the server state can give falls in one case, with the detail
+-- its log line carries. A value that is not a string has no prefix.
+do
+  local driver = install()
+  local shown = {}
+  local cases = {
+    { 'OK|loaded 7', 'loaded', '7' },
+    { 'OK|loaded nil', 'epoch', 'nil' },
+    { 'OK|failed: boom', 'failed', 'boom' },
+    { 'OK|x', 'unknown', 'x' },
+    { nil, 'nil', 'nil' },
+    { 'Invalid state name', 'invalid', 'Invalid state name' },
+    { 'anything else', 'noprefix', 'anything else' },
+    { shown, 'noprefix', tostring(shown) },
+  }
+  for i = 1, #cases do
+    local answer, case, detail = cases[i][1], cases[i][2], cases[i][3]
+    local got, said = driver.injection.answer(answer, 7)
+    assert(got == case and said == detail, tostring(answer) .. ' fell in ' .. tostring(got)
+      .. ' with ' .. tostring(said) .. ', expected ' .. case .. ' with ' .. detail)
+  end
+  print('ok  each answer falls in its own case')
+end
+
 -- A value in the parameters that does not cross refuses the chunk, naming
 -- where it is.
 do
