@@ -21,92 +21,11 @@ local MODULE = ...
 assert(MODULE, 'usage: lua tests/lua/hookstart.lua <module path>')
 
 package.path = arg[0]:match('^(.*)/[^/]+$') .. '/support/?.lua;' .. package.path
-local dcs = require('dcs')
+local hook = require('hook')
 
-local ROOT = dcs.root()
-local DRIVER = 'Mods/services/DCSBridge/lua/HookDriver.lua'
-local DLL = 'Mods/services/DCSBridge/bin/lua-dcsbridge.dll'
-local GEN = 'Mods/services/DCSBridge/lua/HookDriver.gen.lua'
-local SCHEMA = 'Mods/services/DCSBridge/schema.pb'
-
--- The hash of abc, which the golden generated files carry.
-local ABC = 'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad'
-
-local scratch = {}
-
-local function read(path)
-  local f = io.open(path, 'rb')
-  if not f then
-    return nil
-  end
-  local text = f:read('*a')
-  f:close()
-  return text
-end
-
-local function write(path, text)
-  assert(os.execute("mkdir -p '" .. path:match('^(.*)/[^/]+$') .. "'") == 0)
-  local f = assert(io.open(path, 'wb'))
-  f:write(text)
-  f:close()
-end
-
--- A write directory with Logs/, the hook driver, the generator's golden
--- HookDriver.gen.lua and a schema.pb holding abc, whose hash the golden
--- carries, in it, and the config file when given. A path in
--- omit is left out. Returns the driver and the directory.
-local function install(config, omit)
-  omit = omit or {}
-  local dir = dcs.scratch()
-  scratch[#scratch + 1] = dir
-  assert(os.execute("mkdir -p '" .. dir .. "Logs'") == 0)
-  write(dir .. DRIVER, assert(read(ROOT .. 'lua/' .. DRIVER)))
-  if not omit[GEN] then
-    write(dir .. GEN, assert(read(ROOT .. 'crates/generator/tests/golden/HookDriver.gen.lua')))
-  end
-  if not omit[SCHEMA] then
-    write(dir .. SCHEMA, 'abc')
-  end
-  if config then
-    write(dir .. 'Config/DCSBridge.lua', config)
-  end
-  lfs = dcs.lfs(dir)
-  log = dcs.log()
-  return dofile(dir .. DRIVER), dir
-end
-
--- An opener whose module records each configure and answers as the broker
--- does, without one. Its interface is the driver's unless given, its schema
--- answers the hash of abc unless given another function, and configure
--- answers nothing applied or pending unless given another answer.
-local function recording(driver, interface, schema, answer)
-  interface = interface or driver.INTERFACE
-  answer = answer or { interface = interface, applied = 0, unknown = 0, pending_restart = 0, pending = {} }
-  local calls = {}
-  local function open()
-    return {
-      interface = interface,
-      configure = function(table)
-        calls[#calls + 1] = table
-        return answer
-      end,
-      schema = schema or function(bytes)
-        assert(bytes == 'abc', 'the schema was handed as ' .. tostring(bytes))
-        return ABC
-      end,
-    }
-  end
-  return open, calls
-end
-
--- DCSBridge.log as lines, without their timestamps.
-local function lines(dir)
-  local found = {}
-  for line in assert(read(dir .. 'Logs/DCSBridge/DCSBridge.log')):gmatch('[^\n]+') do
-    found[#found + 1] = line:gsub('^%S+ %S+ ', '')
-  end
-  return found
-end
+local DLL, GEN, SCHEMA, ABC = hook.DLL, hook.GEN, hook.SCHEMA, hook.ABC
+local read, write, install, recording, lines =
+  hook.read, hook.write, hook.install, hook.recording, hook.lines
 
 -- Absent: the banner, the defaults, and one configure carrying exactly the
 -- broker's keys, each at its default, and the generated file's hash.
@@ -396,8 +315,6 @@ do
     'the last line is not the hash of schema.pb: ' .. tostring(own[#own]))
 end
 
-for _, dir in ipairs(scratch) do
-  dcs.remove(dir)
-end
+hook.remove()
 
 print('start reads the configuration after the banner and configures the broker')
