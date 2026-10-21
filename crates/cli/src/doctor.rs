@@ -4,8 +4,11 @@
 //! every check runs whatever an earlier one found, since a broken install
 //! often has more than one cause. ADR 0075.
 
-use std::fmt;
+use std::io::{self, BufReader};
 use std::path::{MAIN_SEPARATOR_STR, Path, PathBuf};
+use std::{fmt, fs};
+
+use crate::dcslog::{self, Start};
 
 /// The files a release extracts over the write directory, each of which
 /// the bridge needs to start. The paths are the write directory's, with
@@ -128,7 +131,45 @@ pub fn check(dir: &Path) -> Report {
     let mut report = Report::default();
     report.note(format!("write directory {}", dir.display()));
     placement(dir, &mut report);
+    start(dir, &mut report);
     report
+}
+
+/// DCS's own log, where the loader writes.
+const DCS_LOG: &str = "Logs/dcs.log";
+
+/// Two lines from the newest start in `dcs.log`: the banner, then whether
+/// the hook driver started. A disabled loader is one line, and no banner
+/// is one line saying the loader never ran.
+fn start(dir: &Path, report: &mut Report) {
+    let log = shown(DCS_LOG);
+    let file = match fs::File::open(dir.join(DCS_LOG)) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            report.fail(format!(
+                "no {log}: DCS has not started from this write directory"
+            ));
+            return;
+        }
+        Err(error) => {
+            report.fail(format!("cannot read {log}: {error}"));
+            return;
+        }
+    };
+    match dcslog::newest(BufReader::new(file)) {
+        Err(error) => report.fail(format!("cannot read {log}: {error}")),
+        Ok(Start::None) => report.fail(format!(
+            "no banner in {log}: DCS did not find the loader at its last start, or could not parse it"
+        )),
+        Ok(Start::Disabled(line)) => report.fail(format!("{log}: {line}")),
+        Ok(Start::Banner { banner, stop }) => {
+            report.ok(format!("{log}: {banner}"));
+            match stop {
+                None => report.ok("the hook driver started"),
+                Some(line) => report.fail(format!("{log}: {line}")),
+            }
+        }
+    }
 }
 
 /// One line per shipped file: present, or missing by name. The
@@ -175,7 +216,14 @@ pub(crate) mod tests {
         }
     }
 
-    fn marked(report: &Report, mark: Mark) -> Vec<&str> {
+    /// The lines one check adds for `dir`, alone.
+    pub(crate) fn by(check: fn(&Path, &mut Report), dir: &Path) -> Report {
+        let mut report = Report::default();
+        check(dir, &mut report);
+        report
+    }
+
+    pub(crate) fn marked(report: &Report, mark: Mark) -> Vec<&str> {
         report
             .lines
             .iter()
@@ -190,13 +238,13 @@ pub(crate) mod tests {
     fn placement_names_each_missing_file() {
         let dir = scratch("placement");
         install(&dir);
-        let report = check(&dir);
+        let report = by(placement, &dir);
         assert!(!report.failed(), "{report}");
         assert_eq!(marked(&report, Mark::Ok).len(), SHIPPED.len(), "{report}");
 
         for rel in SHIPPED {
             fs::remove_file(dir.join(rel)).unwrap();
-            let report = check(&dir);
+            let report = by(placement, &dir);
             assert_eq!(
                 marked(&report, Mark::Fail),
                 [format!("{} is missing", shown(rel))],
@@ -207,15 +255,77 @@ pub(crate) mod tests {
         fs::remove_dir_all(&dir).unwrap();
     }
 
+    /// No `dcs.log` is a failure naming it. A banner and a hook driver
+    /// that started are two `ok` lines, the banner quoted; a stop after the
+    /// banner fails, quoted. A log with no banner fails.
+    #[test]
+    fn the_newest_start_in_dcs_log_is_reported() {
+        let dir = scratch("start");
+        let report = by(start, &dir);
+        assert_eq!(
+            marked(&report, Mark::Fail),
+            [format!(
+                "no {}: DCS has not started from this write directory",
+                shown(DCS_LOG)
+            )]
+        );
+
+        fs::create_dir_all(dir.join("Logs")).unwrap();
+        let banner = "x INFO DCSBridge (Main): loading, a 1 bytes, b 2 bytes\n";
+        fs::write(dir.join(DCS_LOG), banner).unwrap();
+        let report = by(start, &dir);
+        assert!(!report.failed(), "{report}");
+        assert_eq!(
+            marked(&report, Mark::Ok),
+            [
+                format!("{}: loading, a 1 bytes, b 2 bytes", shown(DCS_LOG)),
+                "the hook driver started".into()
+            ]
+        );
+
+        let stopped = format!(
+            "{banner}x ERROR DCSBridge (Main): {}boom\n",
+            dcslog::STOPS[1]
+        );
+        fs::write(dir.join(DCS_LOG), stopped).unwrap();
+        let report = by(start, &dir);
+        assert_eq!(
+            marked(&report, Mark::Fail),
+            [format!("{}: {}boom", shown(DCS_LOG), dcslog::STOPS[1])]
+        );
+
+        let disabled = format!("{}C:\\DCS\\{LOADER}, nothing loaded", dcslog::DISABLED);
+        fs::write(
+            dir.join(DCS_LOG),
+            format!("{banner}x INFO DCSBridge (Main): {disabled}\n"),
+        )
+        .unwrap();
+        let report = by(start, &dir);
+        assert!(report.failed(), "{report}");
+        assert_eq!(
+            marked(&report, Mark::Fail),
+            [format!("{}: {disabled}", shown(DCS_LOG))]
+        );
+        assert!(marked(&report, Mark::Ok).is_empty(), "{report}");
+
+        fs::write(dir.join(DCS_LOG), "x INFO EDCORE (Main): up\n").unwrap();
+        let report = by(start, &dir);
+        assert!(
+            marked(&report, Mark::Fail)[0].starts_with("no banner"),
+            "{report}"
+        );
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
     /// The configuration is a note whether it is there or not.
     #[test]
     fn the_configuration_is_a_note_either_way() {
         let dir = scratch("config");
         install(&dir);
-        let absent = check(&dir);
+        let absent = by(placement, &dir);
         fs::create_dir_all(dir.join("Config")).unwrap();
         fs::write(dir.join(CONFIG), "").unwrap();
-        let present = check(&dir);
+        let present = by(placement, &dir);
         for report in [absent, present] {
             assert!(!report.failed(), "{report}");
             assert!(

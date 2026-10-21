@@ -15,6 +15,7 @@
 //! outside DCS and prints one line per check, so a broken one is diagnosed
 //! in one command.
 
+mod dcslog;
 mod doctor;
 #[cfg(test)]
 mod loopback;
