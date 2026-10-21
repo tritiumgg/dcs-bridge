@@ -74,7 +74,8 @@ local NAMES = { 'ERROR', 'WARN', 'INFO', 'DEBUG' }
 -- One row per line, in the shape { 'name', default, 'owner' }. A Rust test
 -- in crates/broker/src/config.rs reads the broker rows by that shape and
 -- compares each default with the broker's own, so a row split over two
--- lines fails it.
+-- lines fails it. SimDriver.lua copies the sim rows, and a Lua test
+-- compares the two by the same shape. ADR 0069.
 local KEYS = {
   -- The broker's, in the order crates/broker/src/config.rs declares them.
   { 'enabled', true, 'broker' },
