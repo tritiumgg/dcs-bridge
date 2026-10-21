@@ -1,8 +1,10 @@
 -- The Modified route's bootstrap. A dofile of the sim driver with nothing
 -- handed over reads the sim driver's keys from Config/DCSBridge.lua itself,
 -- publishes them under DCSBridge with the modified route and logs one INFO
--- line to dcs.log. A file that does not read is one ERROR line and no
--- DCSBridge. Nothing raises out of the dofile, and nothing reaches net.
+-- line to dcs.log. It holds package.loadlib and returns an opener over it,
+-- which nothing global reaches. A file that does not read is one ERROR line
+-- and no DCSBridge. Nothing raises out of the dofile, and nothing reaches
+-- net.
 -- ADR 0069.
 --
 -- Each case installs the drivers into a scratch write directory, under a
@@ -249,6 +251,81 @@ do
     assert(rawget(mission, 'DCSBridge'), config .. ' did not load the sim driver')
   end
   print('ok  a file refused for another owner\'s key still loads the sim driver')
+end
+
+-- Whether any value reachable from value is a function.
+local function reaches(value, seen)
+  if type(value) == 'function' then
+    return true
+  end
+  if type(value) ~= 'table' or seen[value] then
+    return false
+  end
+  seen[value] = true
+  for key, inner in pairs(value) do
+    if reaches(key, seen) or reaches(inner, seen) then
+      return true
+    end
+  end
+  return reaches(getmetatable(value), seen)
+end
+
+-- The bootstrap holds package.loadlib when it runs, and the opener it
+-- returns reaches that one after the name is replaced, as the sanitization
+-- block removes it. The opener is not published: nothing reachable from
+-- DCSBridge is a function.
+do
+  local original = package.loadlib
+  local calls = {}
+  local module = { opened = true }
+  package.loadlib = function(path, name)
+    calls[#calls + 1] = { path = path, name = name }
+    return function()
+      return module
+    end
+  end
+  local mission, dir, _, returned = run(nil)
+  package.loadlib = function()
+    error('the opener looked package.loadlib up after the bootstrap', 0)
+  end
+  assert(returned.n == 1 and type(returned[1]) == 'function', 'the bootstrap returned no opener')
+  assert(#calls == 0, 'the bootstrap opened the broker module')
+  assert(returned[1]() == module, 'the opener did not answer the module table')
+  assert(#calls == 1 and calls[1].path == dir .. 'Mods/services/DCSBridge/bin/lua-dcsbridge.dll'
+    and calls[1].name == 'luaopen_dcsbridge',
+    'the opener asked for ' .. tostring(calls[1] and calls[1].path) .. ' ' .. tostring(calls[1] and calls[1].name))
+  assert(not reaches(rawget(mission, 'DCSBridge'), {}), 'a function is reachable from DCSBridge')
+  -- DCSBridge is the one name the bootstrap set in the state, beside the
+  -- stub's own dofile, so neither loadlib nor the opener is published
+  -- under another name.
+  for key, value in pairs(mission) do
+    if key ~= 'dofile' then
+      assert(key == 'DCSBridge', 'the bootstrap set ' .. tostring(key) .. ' in the mission state')
+      assert(not reaches(value, {}), 'a function is reachable from ' .. tostring(key))
+    end
+  end
+  assert(rawget(mission, 'package') == nil and rawget(mission, 'loadlib') == nil,
+    'the bootstrap republished package.loadlib')
+
+  -- A loadlib that finds nothing raises from the opener, naming the path.
+  package.loadlib = function()
+    return nil, 'not found'
+  end
+  mission, dir, _, returned = run(nil)
+  package.loadlib = original
+  local ok, err = pcall(returned[1])
+  assert(not ok and err == 'the broker module did not open: ' .. dir
+    .. 'Mods/services/DCSBridge/bin/lua-dcsbridge.dll: not found', 'the opener raised ' .. tostring(err))
+
+  -- With no package.loadlib, nothing loads.
+  package.loadlib = nil
+  mission, _, _, returned = run(nil)
+  package.loadlib = original
+  local errors = said('ERROR')
+  assert(#errors == 1 and errors[1] == 'the sim driver did not load on the modified route:'
+    .. ' package.loadlib is not a function, so the broker module cannot open', 'no loadlib logged ' .. tostring(errors[1]))
+  assert(rawget(mission, 'DCSBridge') == nil and returned.n == 0, 'a bootstrap with no loadlib loaded')
+  print('ok  the bootstrap holds package.loadlib and returns an opener it does not publish')
 end
 
 -- With no lfs the bootstrap logs one ERROR line, and with no log it loads

@@ -62,6 +62,9 @@ local CONFIG = 'Config/DCSBridge.lua'
 -- does. ADR 0065, ADR 0069.
 local SIMDRIVER_D = 'DCSBridge/simdriver.d/'
 
+-- The broker module, where the release zip puts it.
+local MODULE = 'Mods/services/DCSBridge/bin/lua-dcsbridge.dll'
+
 -- A value as text, for a log line. A table whose __tostring raises would
 -- otherwise raise in the path that reports a raise.
 local function text(value)
@@ -236,11 +239,32 @@ local function listed(dir, disabled)
   return files
 end
 
--- The Modified route's load, from the operator's file, and the INFO line
--- that reports it. Raises when the file does not read; the caller contains
--- it. The epoch and the mission are nil: the hook driver allocates the
--- epoch after this file runs, and injects nothing on this route. ADR 0069.
+-- A function that opens the broker module at path through loadlib and
+-- returns the module's table, raising when it does not open. DCS's
+-- package.loadlib takes the opener's bare name, so that is the one asked
+-- for. ADR 0050.
+local function opener(loadlib, path)
+  return function()
+    local open, err = loadlib(path, 'luaopen_dcsbridge')
+    if not open then
+      error('the broker module did not open: ' .. path .. ': ' .. text(err), 0)
+    end
+    return open()
+  end
+end
+
+-- The Modified route's load, from the operator's file, the INFO line that
+-- reports it, and the opener. Raises when the file does not read or
+-- package.loadlib is missing; the caller contains it. The epoch and the
+-- mission are nil: the hook driver allocates the epoch after this file
+-- runs, and injects nothing on this route. ADR 0069.
 local function bootstrap()
+  -- Held now, while the name exists: the sanitization block removes
+  -- package from this state after this file returns.
+  local loadlib = type(package) == 'table' and package.loadlib
+  if type(loadlib) ~= 'function' then
+    error('package.loadlib is not a function, so the broker module cannot open', 0)
+  end
   local writedir = lfs.writedir()
   local path = writedir .. CONFIG
   local settings, absent = read(path)
@@ -255,16 +279,21 @@ local function bootstrap()
     settings = settings,
     files = listed(writedir .. SIMDRIVER_D, settings.sim_driver_disabled_files),
     route = 'modified',
-  }, 'the sim driver loaded on the modified route: ' .. table.concat(parts, ', ')
+  }, 'the sim driver loaded on the modified route: ' .. table.concat(parts, ', '),
+    opener(loadlib, writedir .. MODULE)
 end
 
 local params = DCSBridge_load
 DCSBridge_load = nil
 
 -- No handoff is the Modified route. A failure here is one line and no
--- DCSBridge, never a raise. ADR 0069.
+-- DCSBridge, never a raise. The opener is returned and never published:
+-- this state is every mission script's, and one reachable from a global
+-- would hand any of them the broker module the sanitization withholds.
+-- MissionScripting.lua's line drops the return value; a test reads it.
+-- ADR 0069.
 if params == nil then
-  local ok, load, line = pcall(bootstrap)
+  local ok, load, line, open = pcall(bootstrap)
   if not ok then
     say('ERROR', 'the sim driver did not load on the modified route: ' .. text(load))
     return
@@ -274,7 +303,7 @@ if params == nil then
     load = load,
   }
   say('INFO', line)
-  return
+  return open
 end
 
 if type(params) ~= 'table' then
