@@ -209,6 +209,8 @@ for _, case in ipairs({
   { 'return { recent_admin_keys = 100 }', 'recent_admin_keys is 100, below ring_in_hook_driver_records at 256' },
   { 'return { ring_in_sim_driver_records = 2048 }', 'recent_idempotency_keys is 1024, below ring_in_sim_driver_records at 2048' },
   { 'return { max_subscriptions = 65 }', 'subscription_max_evals is 64, below max_subscriptions at 65' },
+  { 'return { hook_driver_dispatch_max_commands = 0 }',
+    'hook_driver_dispatch_max_commands is 0, and it takes a whole number from 1' },
 }) do
   local driver = fresh()
   local values, reason = driver.config.read(file(case[1]))
@@ -228,10 +230,12 @@ do
       hook_driver_disabled_files = { 'a.lua', 'b.lua' },
       max_subscriptions = 128,
       subscription_max_evals = 128,
+      hook_driver_dispatch_max_commands = 1,
     }
   ]]))
   assert(values, 'a valid file was refused: ' .. tostring(notes))
   assert(values.route == 'modified' and values.max_subscriptions == 128)
+  assert(values.hook_driver_dispatch_max_commands == 1, 'a cap of 1 was not read')
 end
 do
   local driver, dir = fresh()

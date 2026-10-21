@@ -243,6 +243,12 @@ function config.validate(values)
       return name .. ' is ' .. value .. ', and it takes a whole number from 0'
     end
   end
+  -- At 0 the loop would dispatch nothing, ReloadConfig included, so no
+  -- reload could lift it again. ADR 0071.
+  if values.hook_driver_dispatch_max_commands < 1 then
+    return 'hook_driver_dispatch_max_commands is 0, and it takes a whole number from 1,'
+      .. ' since at 0 no command runs, ReloadConfig included'
+  end
   for _, pair in ipairs(PAIRS) do
     local more, less = pair[1], pair[2]
     if values[more] < values[less] then
@@ -959,8 +965,11 @@ local SIMDRIVER_D = 'DCSBridge/simdriver.d/'
 -- ADR 0070.
 local HOOKDRIVER_D = 'DCSBridge/hookdriver.d/'
 
--- The counts the hook driver keeps of its own work. ADR 0070.
-state.counters = { hook_driver_files_failed_total = 0 }
+-- The counts the hook driver keeps of its own work. ADR 0070, ADR 0071.
+state.counters = {
+  hook_driver_files_failed_total = 0,
+  hook_driver_dispatch_deferred_total = 0,
+}
 
 -- A copy of the counts, so a caller cannot move them.
 function driver.counters()
@@ -1151,6 +1160,91 @@ for _, name in ipairs(CALLBACKS) do
     if body then
       return contained(name, pcall(body, ...))
     end
+  end
+end
+
+-- The ring the broker routes the hook driver's commands to.
+local HOOK_RING = 'hook_driver'
+
+-- The handler for each command topic, by topic, called with the decoded
+-- record, the id of the connection that sent it and the topic. Created once
+-- here and never replaced, so a handler set after this file loads is the
+-- one called. ADR 0071.
+driver.handlers = {}
+
+-- The record popped past the cap, as the connection id, the topic and the
+-- bytes, dispatched first at the next invocation. ADR 0071.
+state.held = nil
+
+-- Log a record the loop drops, once per topic until the next mission load,
+-- in the set a raising callback is logged through: a hot topic sent with no
+-- handler would otherwise write a line per record. ADR 0062, ADR 0071.
+local function dropped(topic, reason)
+  if not state.raised[topic] then
+    state.raised[topic] = true
+    log.error(topic .. ' ' .. reason .. '; suppressed until the next mission load')
+  end
+end
+
+local function call(handler, decode, conn, topic, bytes)
+  handler(decode(bytes), conn, topic)
+end
+
+-- Decode one record and hand it to its topic's handler. A missing handler
+-- or decoder, a record that does not decode and a handler that raises each
+-- drop the record and go to the next one. Nothing is answered.
+local function handle(record)
+  local conn, topic, bytes = record[1], record[2], record[3]
+  local handler = driver.handlers[topic]
+  if not handler then
+    dropped(topic, 'has no handler: dropped')
+    return
+  end
+  local decode = state.gen.decode[topic]
+  if not decode then
+    dropped(topic, 'has no decoder in HookDriver.gen.lua: dropped')
+    return
+  end
+  local ran, err = pcall(call, handler, decode, conn, topic, bytes)
+  if not ran then
+    dropped(topic, 'raised: ' .. text(err))
+  end
+end
+
+-- What one poll of the hook driver ring answered, as a record, or nil.
+local function popped(conn, topic, bytes)
+  if conn == nil then
+    return nil
+  end
+  return { conn, topic, bytes }
+end
+
+-- Dispatch at most hook_driver_dispatch_max_commands records: the one held
+-- from the last invocation first, then each one the ring answers. At the
+-- cap the ring is popped once more, since the module cannot look without
+-- popping, and a record there is held and counted as one deferral. A ring
+-- that held exactly the cap counts nothing, because no work waited. A poll
+-- that raises raises here, and the callback that called this contains it.
+-- ADR 0071.
+function driver.dispatch()
+  local cap = state.hook.hook_driver_dispatch_max_commands
+  local ran = 0
+  local record = state.held
+  state.held = nil
+  while true do
+    record = record or popped(state.shim.poll(HOOK_RING))
+    if not record then
+      return
+    end
+    if ran >= cap then
+      state.held = record
+      state.counters.hook_driver_dispatch_deferred_total =
+        state.counters.hook_driver_dispatch_deferred_total + 1
+      return
+    end
+    ran = ran + 1
+    handle(record)
+    record = nil
   end
 end
 

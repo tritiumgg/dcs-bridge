@@ -208,6 +208,30 @@ do
   assert(driver.enabled() == false, 'a reload with the file gone moved the switch')
 end
 
+-- A reload to a dispatch cap of 0 is refused, since no ReloadConfig could
+-- lift it, and the running cap stays: three records dispatch two and two.
+-- ADR 0071.
+do
+  local driver, dir = install('return { hook_driver_dispatch_max_commands = 2 }')
+  local open, calls, _, _, ring = recording(driver)
+  driver.open = open
+  driver.start({ banner = 'the banner' })
+  rewrite(dir, 'return { hook_driver_dispatch_max_commands = 0 }')
+  local ok, reason = driver.reload()
+  assert(not ok and reason:find('hook_driver_dispatch_max_commands is 0', 1, true),
+    'a cap of 0 reloaded: ' .. tostring(reason))
+  assert(#calls == 1, 'a refused cap was configured')
+  local ran = 0
+  driver.handlers['dcsbridge.hook.ReloadConfig'] = function()
+    ran = ran + 1
+  end
+  for i = 1, 3 do
+    ring[i] = { 1, 'dcsbridge.hook.ReloadConfig', '' }
+  end
+  driver.dispatch()
+  assert(ran == 2, ran .. ' records dispatched under the running cap of 2')
+end
+
 -- A reload before the start has nothing to keep in force, and raises.
 do
   local driver = install()

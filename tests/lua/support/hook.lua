@@ -89,12 +89,18 @@ end
 -- The fourth holds the name of each configure, schema and registration
 -- call in order, and by each registration call's name the table it was
 -- handed. A registration answers the count of rows in its table.
+--
+-- The fifth is the hook driver ring: a list of records, each a connection
+-- id, a topic and the bytes, that poll pops from the front, with polls
+-- counting every call. poll answers nil when the list is empty, and raises
+-- when the list's raise is set.
 function hook.recording(driver, interface, schema, answer)
   interface = interface or driver.INTERFACE
   answer = answer or { interface = interface, applied = 0, unknown = 0, pending_restart = 0, pending = {} }
   local calls = {}
   local ticks = { answer = true }
   local order = {}
+  local ring = { polls = 0 }
   local function registers(name)
     return function(rows)
       order[#order + 1] = name
@@ -133,9 +139,21 @@ function hook.recording(driver, interface, schema, answer)
       routes = registers('routes'),
       caps = registers('caps'),
       replies = registers('replies'),
+      poll = function(target)
+        assert(target == 'hook_driver', 'the hook driver polled ' .. tostring(target))
+        ring.polls = ring.polls + 1
+        if ring.raise then
+          error(ring.raise, 0)
+        end
+        local record = table.remove(ring, 1)
+        if not record then
+          return nil
+        end
+        return record[1], record[2], record[3]
+      end,
     }
   end
-  return open, calls, ticks, order
+  return open, calls, ticks, order, ring
 end
 
 -- DCSBridge.log as lines, without their timestamps.
