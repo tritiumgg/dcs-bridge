@@ -18,7 +18,7 @@ is just deleted. Write entries as one or two lines, never paragraphs.
 
 ## In progress
 
-Nothing. 4.8 is built; 4.9 is next.
+Nothing. 4.9 is built; 4.10 is next.
 
 *One task at most. Say what is done, what is not, and where to resume. Say what
 is committed and what is only in the working tree. Say what is knowingly
@@ -26,28 +26,25 @@ broken. Empty this when the task closes.*
 
 ## Just finished
 
+- **4.9** — `absent` (no `net` or `net.dostring_in`) and `noprefix` with an unpositioned string answer are policy refusals: one ERROR line per `autoexec.cfg` line, the union with the operator's file read under a stub environment, then a latch `driver.enabled()` consults until DCS restarts; `unreached` and a positioned answer do not fire; agent-verified under stock Lua, the live refusal is the maintainer's (PR #102 "With DCS"). PR #102, ADR 0067, 0068.
 - **4.8** — `injection.answer` sorts the `"server"` answer by shape into `loaded`, `epoch`, `failed`, `unknown`, `nil`, `invalid` and `noprefix`; each case but `loaded` logs one ERROR line of its own; `driver.inject` answers the case as a second value, `skipped`, `unprepared` or `unreached` before an answer; nothing disables; agent-verified under stock Lua, the live refusal text is the maintainer's (PR #101 "With DCS"). PR #101, ADR 0066.
 - **4.7** — `onMissionLoadEnd` ticks, counts the load as its epoch and injects `SimDriver.lua` into `"server"` only while enabled and on the stock route; one `DCSBridge_load` literal carries epoch, mission, sim keys and `simdriver.d`; grammar read from disk; chunk refused above `bridge_return_max_bytes`; `OK|loaded <epoch>` read back from `DCSBridge`; agent-verified under stock Lua, the live injection is the maintainer's (PR #100 "With DCS"). PR #100, ADR 0064, 0065.
-- **4.6** — `shim.tick` answers the effective `enabled`; the `onSimulationFrame` body ticks first on every frame, enabled or not, and takes the switch from the answer, a nil keeping it; start and reload take the file's value; one INFO line per move; `driver.enabled()` is the gate, named on plan rows 4.7, 4.12, 6.1 and 8.1; agent-verified under stock Lua and Rust, the live `SetEnabled` round trip is the maintainer's (PR #99 "With DCS"). PR #99, ADR 0063.
 
 *The last three at most, one line each. Git log holds the rest.*
 
 ## Next
 
-**Task 4.9** — a policy refusal disables the hook driver and logs the union
-`autoexec.cfg`, paste-ready, with no retry loop. Starts from the case name
-`driver.inject` answers second in `HookDriver.lua` (ADR 0066): which of
-`noprefix`, `nil`, `invalid` and `unreached` count as a policy refusal is
-4.9's decision, measured at a live install first, since a `noprefix` string
-may also be a chunk fault. The current DCS build may not enforce the gate,
-so the policy case may not be observable; PR #101's "With DCS" records it.
-`driver.enabled()` is the switch it turns (ADR 0063); the cfg text is the
-README's two Stock route lines. Agent-verifiable under stock Lua with
-`net.refusal`; the live refusal text and the pasted fix are the maintainer's.
+**Task 4.10** — Route B: a `dofile` of the sim driver from `MissionScripting.lua`
+before the sanitization block, capturing `package.loadlib`; the sim driver reads
+the sim-driver-tier keys itself at bootstrap. Done when the same `SimDriver.lua`
+runs with `net.dostring_in` unavailable. The hook driver's modified route already
+injects nothing (ADR 0065). Agent-verifiable under stock Lua for the bootstrap
+file; the edited `MissionScripting.lua` at a live install is the maintainer's.
+Settles the README's "The exact line to add is not final".
 
 ## After that
 
-- **4.10** onward through Phase 4; 3.5 waits behind 7.6.
+- **4.11** onward through Phase 4; 3.5 waits behind 7.6.
 
 ## Carries forward
 
