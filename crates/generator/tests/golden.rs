@@ -2,7 +2,7 @@
 //! compared byte for byte with the copies under `tests/golden`.
 //!
 //! The adopter's schema is `tests/proto/fixture/adopter.proto`. The shipped
-//! one has no repeated field, reply or hook-side record, and the adopter's
+//! one has no repeated field, reply or hook-side event, and the adopter's
 //! has each, so its copies show what the shipped ones cannot.
 //!
 //! A change to the generator or to the schema shows up here as a diff a
@@ -41,9 +41,10 @@ struct Set {
 }
 
 /// Every file under `proto/`, as buf names them for generation.
-const SCHEMA: [&str; 2] = [
+const SCHEMA: [&str; 3] = [
     "dcsbridge/broker/broker.proto",
     "dcsbridge/builtin/sim/sim.proto",
+    "dcsbridge/hook/hook.proto",
 ];
 
 /// The adopter's schema, which imports the shipped tree.

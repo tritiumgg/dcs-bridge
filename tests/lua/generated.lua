@@ -66,7 +66,7 @@ shaped('HookDriver.gen.lua', hook)
 
 -- The calls only store, so none is refused before configure.
 register('SimDriver.gen.lua', sim, { 1, 0, 1, 0 })
-register('HookDriver.gen.lua', hook, { 0, 0, 0, 0 })
+register('HookDriver.gen.lua', hook, { 1, 1, 1, 0 })
 
 -- An adopter's pair loads after the shipped pair. Its sim file adds its
 -- topics to DCSBridge.code beside the shipped ones and returns a slice of
@@ -103,6 +103,8 @@ assert(sim.topics.UnitDestroyed == unit and sim.topics.RocketImpact == adopter .
 -- Both shipped files make a decode table, and the adopter's decoders sit
 -- in it after the shipped file is loaded again.
 assert(type(hook.decode) == 'table', 'the hook file has no decode table')
+local reload = hook.decode['dcsbridge.hook.ReloadConfig']('\10\1a')
+assert(reload.idempotency_key == 'a', 'ReloadConfig decoded its key as ' .. tostring(reload.idempotency_key))
 assert(type(sim.decode[adopter .. 'GetPosition']) == 'function',
   'a reload lost the adopter decoder')
 assert(type(adopter_hook.decode[adopter .. 'SetPath']) == 'function',

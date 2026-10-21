@@ -1,0 +1,25 @@
+syntax = "proto3";
+
+package dcsbridge.hook;
+
+import "dcsbridge/broker/broker.proto";
+
+// The bridge's own records the hook driver emits or handles. ADR 0021.
+//
+// Each topic here is routed to the hook driver, which loads once per DCS
+// process, so adding one costs a DCS restart rather than a mission reload.
+
+// Read Config\DCSBridge.lua again and apply its live keys. A key that takes
+// a restart is logged pending, and a file that does not read leaves the
+// running configuration in force. Its outcome is written to DCSBridge.log.
+// It reaches a disabled bridge, so a file that sets enabled = true turns
+// the bridge back on. ADR 0063.
+message ReloadConfig {
+  option (dcsbridge.broker.record_class) = RECORD_CLASS_COMMAND;
+  option (dcsbridge.broker.target) = TARGET_HOOK_DRIVER;
+  option (dcsbridge.broker.required_capability) = CAPABILITY_RELOAD;
+
+  // Names one request, so a consumer that sends it again after a lost
+  // answer asks for the same reload rather than a second one.
+  string idempotency_key = 1;
+}
