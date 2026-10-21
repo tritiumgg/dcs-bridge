@@ -20,9 +20,19 @@ pub const SHIPPED: [&str; 7] = [
     "Mods/services/DCSBridge/lua/HookDriver.gen.lua",
     "Mods/services/DCSBridge/lua/HookDriver.builtin.lua",
     "Mods/services/DCSBridge/lua/SimDriver.lua",
-    "Mods/services/DCSBridge/bin/lua-dcsbridge.dll",
+    BROKER,
     "Mods/services/DCSBridge/schema.pb",
 ];
+
+/// The broker the hook driver opens.
+pub const BROKER: &str = "Mods/services/DCSBridge/bin/lua-dcsbridge.dll";
+
+/// What the broker's interface version follows in its DLL, as
+/// `crates/lua-module` builds it. ADR 0074.
+pub const MARKER: &[u8] = b"dcsbridge-interface=";
+
+/// The line the hook driver's interface version is on, around the version.
+pub const INTERFACE_LINE: (&str, &str) = ("local INTERFACE = '", "'");
 
 /// The loader DCS runs at start. A Saved Games folder without it is one
 /// the bridge was never extracted over.
@@ -133,7 +143,79 @@ pub fn check(dir: &Path) -> Report {
     report.note(format!("write directory {}", dir.display()));
     placement(dir, &mut report);
     start(dir, &mut report);
+    interfaces(dir, &mut report);
     report
+}
+
+/// One line with both interface versions, read off the installed hook
+/// driver and broker: equal, unequal, or which one names none. The hook
+/// driver refuses a broker whose version differs from its own. ADR 0074.
+fn interfaces(dir: &Path, report: &mut Report) {
+    let (driver, broker) = match (fs::read(dir.join(DRIVER)), fs::read(dir.join(BROKER))) {
+        (Ok(driver), Ok(broker)) => (driver, broker),
+        (Err(_), _) => {
+            report.note(format!(
+                "no interface versions: {} does not read",
+                shown(DRIVER)
+            ));
+            return;
+        }
+        (_, Err(_)) => {
+            report.note(format!(
+                "no interface versions: {} does not read",
+                shown(BROKER)
+            ));
+            return;
+        }
+    };
+    let driver = driver_interface(&String::from_utf8_lossy(&driver));
+    let broker = broker_interface(&broker);
+    match (driver, broker) {
+        (Some(driver), Some(broker)) if driver == broker => report.ok(format!(
+            "interface {driver} in {} and in {}",
+            shown(DRIVER),
+            shown(BROKER)
+        )),
+        (Some(driver), Some(broker)) => report.fail(format!(
+            "{} is interface {driver} and {} is interface {broker}: they are from different builds; extract one release's zip again",
+            shown(DRIVER),
+            shown(BROKER)
+        )),
+        (driver, broker) => {
+            if driver.is_none() {
+                report.fail(format!("{} names no interface version", shown(DRIVER)));
+            }
+            if broker.is_none() {
+                report.fail(format!(
+                    "{} carries no interface version: it is from an older build, or not this project's",
+                    shown(BROKER)
+                ));
+            }
+        }
+    }
+}
+
+/// The hook driver's interface version: the first line of the shape
+/// `local INTERFACE = '...'`.
+pub fn driver_interface(text: &str) -> Option<String> {
+    let (before, after) = INTERFACE_LINE;
+    text.lines()
+        .map(|line| line.trim_end_matches('\r'))
+        .find_map(|line| line.strip_prefix(before)?.strip_suffix(after))
+        .map(str::to_owned)
+}
+
+/// The broker's interface version: the printable bytes between the marker
+/// and the NUL ending it, the first time the marker appears.
+pub fn broker_interface(bytes: &[u8]) -> Option<String> {
+    let at = bytes.windows(MARKER.len()).position(|w| w == MARKER)? + MARKER.len();
+    let rest = &bytes[at..];
+    let end = rest.iter().take(64).position(|&b| b == 0)?;
+    let version = &rest[..end];
+    if version.is_empty() || !version.iter().all(u8::is_ascii_graphic) {
+        return None;
+    }
+    String::from_utf8(version.to_vec()).ok()
 }
 
 /// DCS's own log, where the loader writes.
@@ -481,5 +563,85 @@ pub(crate) mod tests {
 
         fs::remove_dir_all(&home).unwrap();
         fs::remove_dir_all(&named).unwrap();
+    }
+
+    /// The marker is found among other bytes and read to its NUL; no
+    /// marker, no NUL within reach, or an empty or unprintable version is
+    /// none.
+    #[test]
+    fn the_broker_version_is_read_off_its_marker() {
+        let dll = b"MZ\x90\0junk\0dcsbridge-interface=5\0more dcsbridge-interface=6\0";
+        assert_eq!(broker_interface(dll).as_deref(), Some("5"));
+        assert_eq!(broker_interface(b"MZ\x90\0luaopen_dcsbridge\0"), None);
+        assert_eq!(broker_interface(b"dcsbridge-interface=5"), None);
+        assert_eq!(broker_interface(b"dcsbridge-interface=\0"), None);
+        assert_eq!(broker_interface(b"dcsbridge-interface=5\x01\0"), None);
+        assert_eq!(
+            driver_interface("local x = 1\r\nlocal INTERFACE = '5'\r\n").as_deref(),
+            Some("5")
+        );
+        assert_eq!(driver_interface("local INTERFACE = 5\n"), None);
+    }
+
+    /// Equal versions are one `ok` line naming both files; unequal ones
+    /// fail naming both versions; a broker with no marker fails as an
+    /// older build; a file that is not there is a note, since placement
+    /// has failed already.
+    #[test]
+    fn both_interface_versions_are_compared() {
+        let dir = scratch("interfaces");
+        install(&dir);
+        let write = |driver: &str, broker: &[u8]| {
+            fs::write(dir.join(DRIVER), driver).unwrap();
+            fs::write(dir.join(BROKER), broker).unwrap();
+            by(interfaces, &dir)
+        };
+
+        let report = write("local INTERFACE = '5'\n", b"\0dcsbridge-interface=5\0");
+        assert_eq!(
+            marked(&report, Mark::Ok),
+            [format!(
+                "interface 5 in {} and in {}",
+                shown(DRIVER),
+                shown(BROKER)
+            )]
+        );
+
+        let report = write("local INTERFACE = '4'\n", b"\0dcsbridge-interface=5\0");
+        let fails = marked(&report, Mark::Fail);
+        assert_eq!(fails.len(), 1, "{report}");
+        assert!(
+            fails[0].contains("is interface 4 and") && fails[0].contains("is interface 5:"),
+            "{report}"
+        );
+
+        let report = write("local INTERFACE = '5'\n", b"MZ");
+        let fails = marked(&report, Mark::Fail);
+        assert_eq!(fails.len(), 1, "{report}");
+        assert!(fails[0].contains("from an older build"), "{report}");
+
+        let report = write("local x = 1\n", b"\0dcsbridge-interface=5\0");
+        assert_eq!(
+            marked(&report, Mark::Fail),
+            [format!("{} names no interface version", shown(DRIVER))]
+        );
+
+        fs::remove_file(dir.join(DRIVER)).unwrap();
+        let report = by(interfaces, &dir);
+        assert!(!report.failed(), "{report}");
+        assert_eq!(
+            marked(&report, Mark::Note),
+            [format!(
+                "no interface versions: {} does not read",
+                shown(DRIVER)
+            )]
+        );
+
+        fs::write(dir.join(DRIVER), "local INTERFACE = '5'\n").unwrap();
+        fs::remove_file(dir.join(BROKER)).unwrap();
+        let report = by(interfaces, &dir);
+        assert!(!report.failed(), "{report}");
+        assert_eq!(marked(&report, Mark::Note).len(), 1, "{report}");
+        fs::remove_dir_all(&dir).unwrap();
     }
 }
