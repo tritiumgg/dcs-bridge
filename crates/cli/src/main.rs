@@ -11,8 +11,11 @@
 //! appends every frame a bridge sends to a file, as the wire carried it, so
 //! a session can be kept and read back with no DCS running. `replay`
 //! serves a capture to one consumer, so that consumer can be run against
-//! the session with no DCS running.
+//! the session with no DCS running. `doctor` checks an install from
+//! outside DCS and prints one line per check, so a broken one is diagnosed
+//! in one command.
 
+mod doctor;
 #[cfg(test)]
 mod loopback;
 mod ping;
@@ -54,6 +57,8 @@ enum Verb {
     Record(RecordArgs),
     /// Serve a capture to the first consumer that connects, then exit.
     Replay(ReplayArgs),
+    /// Check an install, one line per check, and exit 1 when one fails.
+    Doctor(DoctorArgs),
 }
 
 /// The address the bridge listens on.
@@ -175,6 +180,16 @@ struct ReplayArgs {
     listen: Listen,
 }
 
+#[derive(Args)]
+struct DoctorArgs {
+    /// The Saved Games directory the release was extracted over.
+    ///
+    /// Without it, `Saved Games\DCS` and `Saved Games\DCS.openbeta` under
+    /// `USERPROFILE` are checked, each that holds the loader.
+    #[arg(long, value_name = "PATH")]
+    dir: Option<PathBuf>,
+}
+
 /// The environment variable a secret is read from when no file names one.
 const TOKEN_ENV: &str = "DCSB_TOKEN";
 
@@ -192,6 +207,40 @@ fn main() -> ExitCode {
         Verb::Send(args) => send_verb(&args),
         Verb::Record(args) => record_verb(&args),
         Verb::Replay(args) => replay_verb(&args),
+        Verb::Doctor(args) => doctor_verb(&args),
+    }
+}
+
+/// Check each write directory found, print one line per check, and exit by
+/// the lines.
+///
+/// Every check passed exits 0, with any notes printed. A check that failed
+/// exits 1, after every other check has run. No write directory to check
+/// exits 2, because nothing was learned. ADR 0075.
+fn doctor_verb(args: &DoctorArgs) -> ExitCode {
+    let home = env::var_os("USERPROFILE")
+        .filter(|home| !home.is_empty())
+        .map(PathBuf::from);
+    let dirs = match doctor::write_dirs(args.dir.as_deref(), home.as_deref()) {
+        Ok(dirs) => dirs,
+        Err(error) => {
+            eprintln!("{error}");
+            return ExitCode::from(2);
+        }
+    };
+    let stdout = io::stdout();
+    let mut out = stdout.lock();
+    let mut failed = false;
+    for dir in &dirs {
+        let report = doctor::check(dir);
+        failed |= report.failed();
+        let _ = write!(out, "{report}");
+    }
+    let _ = out.flush();
+    if failed {
+        ExitCode::from(1)
+    } else {
+        ExitCode::SUCCESS
     }
 }
 
