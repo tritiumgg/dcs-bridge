@@ -1194,11 +1194,28 @@ local function call(handler, decode, conn, topic, bytes)
   handler(decode(bytes), conn, topic)
 end
 
--- Decode one record and hand it to its topic's handler. A missing handler
--- or decoder, a record that does not decode and a handler that raises each
--- drop the record and go to the next one. Nothing is answered.
+-- The one command a disabled bridge still runs, since a file that turns the
+-- bridge back on arrives through it. ADR 0063, ADR 0071.
+local RELOAD_CONFIG = 'dcsbridge.hook.ReloadConfig'
+
+-- The topics discarded since the switch last turned on, each logged once.
+-- switch empties it when the bridge is enabled again. ADR 0071.
+state.discarded = {}
+
+-- Decode one record and hand it to its topic's handler. While the bridge is
+-- disabled every topic but ReloadConfig is discarded, with one WARN per
+-- topic, since a disabled bridge ferries no command. A missing handler or
+-- decoder, a record that does not decode and a handler that raises each
+-- drop the record and go to the next one. Nothing is answered. ADR 0071.
 local function handle(record)
   local conn, topic, bytes = record[1], record[2], record[3]
+  if topic ~= RELOAD_CONFIG and not driver.enabled() then
+    if not state.discarded[topic] then
+      state.discarded[topic] = true
+      log.warn(topic .. ' discarded: bridge disabled')
+    end
+    return
+  end
   local handler = driver.handlers[topic]
   if not handler then
     dropped(topic, 'has no handler: dropped')
@@ -1351,7 +1368,8 @@ end
 -- that changes nothing writes nothing, so a caller passes every value it
 -- learns through here. While the hook driver is latched off the switch
 -- still moves, and its line says the latch holds, so a re-enable does not
--- read as a running bridge. ADR 0063, ADR 0067.
+-- read as a running bridge. Turning on lets a topic discarded while off log
+-- once more. ADR 0063, ADR 0067, ADR 0071.
 local function switch(enabled)
   if enabled ~= state.enabled then
     local line = enabled and 'bridge enabled' or 'bridge disabled'
@@ -1359,6 +1377,9 @@ local function switch(enabled)
       line = line .. ', but refused until DCS restarts'
     end
     log.info(line)
+    if enabled then
+      state.discarded = {}
+    end
   end
   state.enabled = enabled
 end
@@ -1706,6 +1727,13 @@ function driver.reload()
   -- force now, over any SetEnabled since the last read.
   switch(state.broker.enabled)
   return true, answer, pending
+end
+
+-- ReloadConfig carries nothing the reload reads. reload writes the outcome
+-- to DCSBridge.log either way, the reason included when it is refused, so
+-- the handler adds nothing. ADR 0071.
+driver.handlers[RELOAD_CONFIG] = function()
+  driver.reload()
 end
 
 return driver

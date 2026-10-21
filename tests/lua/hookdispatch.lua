@@ -5,8 +5,9 @@
 -- hook_driver_dispatch_deferred_total, so a ring that held exactly the cap
 -- counts nothing. A topic with no handler or decoder, a record that does
 -- not decode and a handler that raises drop the record with one ERROR line
--- per topic until the next mission load, and the loop goes on. ADR 0062,
--- ADR 0071.
+-- per topic until the next mission load, and the loop goes on. ReloadConfig
+-- reaches driver.reload, and is the one topic a disabled bridge runs.
+-- ADR 0062, ADR 0063, ADR 0071.
 --
 -- Each case installs the hook driver into a scratch write directory and
 -- starts it against the recording stub, whose poll pops a list the case
@@ -203,6 +204,98 @@ do
   local ran, err = pcall(driver.dispatch)
   assert(not ran and err == ring.raise, 'a raising poll answered ' .. tostring(err))
   print('ok  a poll that raises raises out of the loop')
+end
+
+-- A topic beside ReloadConfig, whose decoder a case adds to the installed
+-- HookDriver.gen.lua so its records reach their handler.
+local OTHER = 'dcsbridge.hook.Other'
+
+-- A hook driver started on the file given with its own handlers, against
+-- the recording stub, and with a handler on OTHER that counts its calls.
+-- Returns the driver, its directory, the stub's configure calls, the ring
+-- and the count.
+local function shipped(config)
+  local driver, dir = install(config)
+  local gen = dir .. hook.GEN
+  hook.write(gen, assert(hook.read(gen)):gsub('\nreturn gen\n$',
+    "\ngen.decode['" .. OTHER .. "'] = function() return {} end\nreturn gen\n"))
+  local open, calls, _, _, ring = recording(driver)
+  driver.open = open
+  driver.start({ banner = 'the banner' })
+  local other = { calls = 0 }
+  driver.handlers[OTHER] = function()
+    other.calls = other.calls + 1
+  end
+  return driver, dir, calls, ring, other
+end
+
+-- The lines DCSBridge.log holds after the first n.
+local function since(dir, n)
+  local own, found = lines(dir), {}
+  for i = n + 1, #own do
+    found[#found + 1] = own[i]
+  end
+  return found
+end
+
+-- ReloadConfig, dispatched, reads the file again: a live key reaches the
+-- broker and the answer is logged, and a file that raises changes nothing
+-- and logs one ERROR. hookreload.lua holds the rest of what a reload does.
+-- ADR 0071.
+do
+  local driver, dir, calls, ring = shipped('return { port = 0 }')
+  hook.write(dir .. 'Config/DCSBridge.lua', 'return { port = 0, handshake_timeout_ms = 250 }')
+  local before = #lines(dir)
+  ring[1] = record('a')
+  driver.dispatch()
+  assert(#calls == 2, #calls .. ' configure calls, expected the reload\'s')
+  assert(calls[2].handshake_timeout_ms == 250,
+    'handshake_timeout_ms was handed as ' .. tostring(calls[2].handshake_timeout_ms))
+  local own = since(dir, before)
+  assert(own[#own] and own[#own]:find('^INFO configured: '), 'the reload logged ' .. tostring(own[#own]))
+
+  hook.write(dir .. 'Config/DCSBridge.lua', 'local broken = nil + 1')
+  before = #lines(dir)
+  ring[1] = record('b')
+  driver.dispatch()
+  assert(#calls == 2, 'a file that raises was configured')
+  own = since(dir, before)
+  assert(#own == 1 and own[1]:find('^ERROR the configuration raised: .*arithmetic'), 'a file that raises logged ' .. tostring(own[1]))
+  print('ok  ReloadConfig reloads the file, and a file that raises changes nothing')
+end
+
+-- A disabled bridge discards every topic but ReloadConfig, with one WARN
+-- per topic, and runs a ReloadConfig that turns it back on. The next record
+-- of the discarded topic then runs, and a later disable lets the topic log
+-- once more. ADR 0063, ADR 0071.
+do
+  local driver, dir, _, ring, other = shipped('return { enabled = false }')
+  local before = #lines(dir)
+  ring[1] = { 7, OTHER, '' }
+  ring[2] = { 7, OTHER, '' }
+  driver.dispatch()
+  assert(other.calls == 0, 'a disabled bridge ran ' .. other.calls .. ' records')
+  local own = since(dir, before)
+  assert(#own == 1 and own[1] == 'WARN ' .. OTHER .. ' discarded: bridge disabled',
+    'two discarded records logged ' .. #own .. ' lines: ' .. tostring(own[1]))
+
+  hook.write(dir .. 'Config/DCSBridge.lua', 'return { enabled = true }')
+  ring[1] = record('a')
+  ring[2] = { 7, OTHER, '' }
+  driver.dispatch()
+  assert(driver.enabled() == true, 'ReloadConfig did not reach a disabled bridge')
+  assert(other.calls == 1, 'the record after the re-enable ran ' .. other.calls .. ' times')
+
+  hook.write(dir .. 'Config/DCSBridge.lua', 'return { enabled = false }')
+  before = #lines(dir)
+  ring[1] = record('b')
+  ring[2] = { 7, OTHER, '' }
+  driver.dispatch()
+  own = since(dir, before)
+  assert(own[#own] == 'WARN ' .. OTHER .. ' discarded: bridge disabled',
+    'a topic discarded again after a re-enable logged ' .. tostring(own[#own]))
+  assert(other.calls == 1, 'a disabled bridge ran a record')
+  print('ok  a disabled bridge runs ReloadConfig alone and discards the rest, logged once a topic')
 end
 
 hook.remove()
