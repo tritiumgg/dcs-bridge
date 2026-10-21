@@ -269,6 +269,22 @@ net.allow_dostring_in = {"server", "mission", "scripting", "gui", "export", "con
 Set both keys. A file with `net.allow_dostring_in` and no
 `net.allow_unsafe_api` does not enable the API.
 
+If DCS refuses the injection, or hides `net.dostring_in` because
+`net.allow_unsafe_api` lacks `"userhooks"`, DCS-Bridge turns itself off until
+DCS restarts. The mission runs on without it. Neither `SetEnabled` nor a
+reload turns it back on, and `ping` still reports the `enabled` switch.
+`Logs\DCSBridge\DCSBridge.log` holds the line
+`bridge disabled until DCS restarts`, and above it the two lines to set, one
+per ERROR line, each merged with the names your file already holds:
+
+```
+2026-10-21 18:04:12 ERROR net.allow_unsafe_api = {"userhooks"}
+2026-10-21 18:04:12 ERROR net.allow_dostring_in = {"server", "mission", "scripting", "gui", "export", "config"}
+```
+
+Copy each line from `net.` onward over the key's line in `Config\autoexec.cfg`,
+or add it where the file has no such line. Then restart DCS.
+
 ### The Modified route
 
 The Modified route edits a file in the DCS install directory. Add one `dofile`
