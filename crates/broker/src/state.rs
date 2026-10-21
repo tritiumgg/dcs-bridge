@@ -1003,15 +1003,22 @@ impl Bridge {
     /// the mission time. Two atomic loads and at most two stores; the one
     /// caller is the logic thread, so nothing races the read of the last
     /// stamp against its write.
-    pub fn tick(&self, mission_time: f64) {
-        self.tick_at(self.now_ms(), mission_time);
+    ///
+    /// Returns the kill switch's effective value. `SetEnabled` moves it on
+    /// a reader thread between two `configure`s, and this is the one call
+    /// the hook driver keeps making while disabled, so the answer is how it
+    /// learns a re-enable. Read from the same configuration load as the
+    /// interval, so it costs no further load. ADR 0063.
+    pub fn tick(&self, mission_time: f64) -> bool {
+        self.tick_at(self.now_ms(), mission_time)
     }
 
     /// `tick` with the clock supplied, so a test drives the throttle.
-    fn tick_at(&self, now_ms: u64, mission_time: f64) {
+    fn tick_at(&self, now_ms: u64, mission_time: f64) -> bool {
         self.mission_time
             .store(mission_time.to_bits(), Ordering::Relaxed);
-        let interval = self.config().heartbeat_interval_ms;
+        let config = self.config();
+        let interval = config.heartbeat_interval_ms;
         let due = match self.heartbeat.load(Ordering::Relaxed) {
             0 => true,
             stamped => now_ms.saturating_sub(stamped - 1) >= interval,
@@ -1019,6 +1026,7 @@ impl Bridge {
         if due {
             self.heartbeat.store(now_ms + 1, Ordering::Relaxed);
         }
+        config.enabled
     }
 
     /// The mission time the last `tick` published, or zero before the
@@ -1068,7 +1076,11 @@ impl Bridge {
     /// Read on the reader thread, and it touches nothing the logic thread
     /// holds.
     pub fn liveness(&self) -> Liveness {
-        let now = self.now_ms();
+        self.liveness_at(self.now_ms())
+    }
+
+    /// `liveness` with the clock supplied, so a test judges an age it set.
+    fn liveness_at(&self, now: u64) -> Liveness {
         let last_heard_ms = match self.heartbeat.load(Ordering::Relaxed) {
             0 => None,
             stamped => Some(now.saturating_sub(stamped - 1)),
@@ -2970,6 +2982,57 @@ mod tests {
         assert!(
             !bridge.liveness().alive,
             "the load's end kept the loading threshold"
+        );
+    }
+
+    /// `SetEnabled` turns the bridge off with no restart and no
+    /// `configure`: a `Pong` then reads a live sim and a disabled bridge,
+    /// and the next tick tells the hook driver. A re-enable needs no
+    /// dispatch loop either, since nothing here runs one. The clock is the
+    /// test's: at 1500 the stamp from 0 is past the 1000 ms threshold, so
+    /// only the tick taken while disabled, at 900, keeps the sim alive.
+    #[test]
+    fn set_enabled_reaches_the_next_tick_and_the_pong_with_no_configure() {
+        let bridge = Bridge::new(15);
+        bridge.swap(Config {
+            dcs_alive_threshold_ms: 1000,
+            heartbeat_interval_ms: 0,
+            ..Config::default()
+        });
+        assert!(bridge.tick_at(0, 1.0), "the default switch read off");
+        assert!(
+            !bridge.liveness_at(1500).alive,
+            "a stamp older than the threshold read alive"
+        );
+
+        bridge.set_enabled(false);
+        let liveness = bridge.liveness_at(900);
+        assert!(liveness.alive, "a disable read as a dead sim");
+        assert!(!liveness.enabled, "a disable did not reach the Pong");
+        assert!(
+            !bridge.tick_at(900, 2.0),
+            "a disable did not reach the tick"
+        );
+        let liveness = bridge.liveness_at(1500);
+        assert_eq!(
+            liveness.last_heard_ms,
+            Some(600),
+            "the tick while disabled did not stamp"
+        );
+        assert!(
+            liveness.alive,
+            "a tick while disabled did not keep the sim alive"
+        );
+        assert!(!liveness.enabled, "the Pong read the bridge on");
+
+        bridge.set_enabled(true);
+        assert!(
+            bridge.liveness_at(1500).enabled,
+            "a re-enable did not reach the Pong"
+        );
+        assert!(
+            bridge.tick_at(1600, 3.0),
+            "a re-enable did not reach the tick"
         );
     }
 

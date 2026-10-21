@@ -800,6 +800,12 @@ mod schema {
 /// broker's, so the caller cannot skip the heartbeat without skipping the
 /// clock. The hook driver keeps calling this while the bridge is disabled,
 /// so a disabled bridge reads as disabled and never as a dead sim.
+///
+/// It answers the kill switch's effective value, which `SetEnabled` can
+/// move between two `configure`s, so the call the hook driver cannot stop
+/// making is the one that tells it a re-enable arrived. An extra return
+/// value leaves a caller that ignores it where it was, so the interface
+/// does not move. ADR 0063.
 #[cfg(any(unix, feature = "dcs-lua"))]
 mod tick {
     use core::ffi::{c_int, c_void};
@@ -841,9 +847,10 @@ mod tick {
                 );
                 unreachable!("luaL_error does not return")
             }
-            bridge.tick(mission_time);
+            let enabled = bridge.tick(mission_time);
+            lua::lua_pushboolean(state, c_int::from(enabled));
         }
-        0
+        1
     }
 }
 
