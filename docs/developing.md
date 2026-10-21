@@ -10,7 +10,7 @@ follows. This file holds what is left.
 |---|---|---|---|---|
 | 1 | Broker | Rust | `Mods\services\DCSBridge\bin\lua-dcsbridge.dll` | DCS process |
 | 2 | Hook driver | Lua 5.1 | `Scripts\Hooks\DCSBridge.lua` loader, `Mods\services\DCSBridge\lua\HookDriver.lua` payload | DCS process |
-| 3 | Sim driver | Lua 5.1 | Injected into the `"server"` state | One mission |
+| 3 | Sim driver | Lua 5.1 | `Mods\services\DCSBridge\lua\SimDriver.lua`, injected into the `"server"` state | One mission |
 | 4 | Generator | Rust | Build machine | Build time |
 
 Everything outside the Lua files is Rust. The broker uses no garbage collector
