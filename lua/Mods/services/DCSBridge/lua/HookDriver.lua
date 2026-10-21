@@ -882,6 +882,12 @@ local MODULE = lfs.writedir() .. 'Mods/services/DCSBridge/bin/lua-dcsbridge.dll'
 -- from, beside this file in the release zip. ADR 0055.
 local GEN = lfs.writedir() .. 'Mods/services/DCSBridge/lua/HookDriver.gen.lua'
 
+-- The hook driver's shipped built-ins, beside this file in the release zip
+-- and first in its extension chain. hook_driver_disabled_files names it to
+-- skip it. ADR 0070.
+local BUILTIN_NAME = 'HookDriver.builtin.lua'
+local BUILTIN = lfs.writedir() .. 'Mods/services/DCSBridge/lua/' .. BUILTIN_NAME
+
 -- The compiled schema the broker serves to consumers, from the same build
 -- as the generated file. ADR 0056.
 local SCHEMA = lfs.writedir() .. 'Mods/services/DCSBridge/schema.pb'
@@ -1482,8 +1488,19 @@ function driver.start(ctx)
   end
   -- After the bind, since a file that fails is contained and never stops
   -- the start, and before the start is marked finished, so no callback
-  -- body runs while the files load. ADR 0070.
-  chain(injection.files(lfs.writedir() .. HOOKDRIVER_D, state.hook.hook_driver_disabled_files))
+  -- body runs while the files load. The built-ins file is listed by name,
+  -- and a missing one is counted like any file that does not load: the
+  -- bridge runs without its handlers. ADR 0070.
+  local disabled = state.hook.hook_driver_disabled_files
+  local paths = injection.files(lfs.writedir() .. HOOKDRIVER_D, disabled)
+  local skip = false
+  for _, name in ipairs(disabled) do
+    skip = skip or name == BUILTIN_NAME
+  end
+  if not skip then
+    table.insert(paths, 1, BUILTIN)
+  end
+  chain(paths)
   -- Last, so the callbacks run their bodies only behind a start that
   -- finished. A stop added to start goes above this line. ADR 0061.
   state.started = true

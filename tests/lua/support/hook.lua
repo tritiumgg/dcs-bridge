@@ -7,6 +7,7 @@ local dcs = require('dcs')
 
 local hook = {
   DRIVER = 'Mods/services/DCSBridge/lua/HookDriver.lua',
+  BUILTIN = 'Mods/services/DCSBridge/lua/HookDriver.builtin.lua',
   DLL = 'Mods/services/DCSBridge/bin/lua-dcsbridge.dll',
   GEN = 'Mods/services/DCSBridge/lua/HookDriver.gen.lua',
   SCHEMA = 'Mods/services/DCSBridge/schema.pb',
@@ -36,16 +37,20 @@ function hook.write(path, text)
   f:close()
 end
 
--- A write directory with Logs/, the hook driver, the sim driver, the
--- generator's golden HookDriver.gen.lua and a schema.pb holding abc, whose
--- hash the golden carries, in it, and the config file when given. A path
--- in omit is left out. Returns the driver and the directory.
+-- A write directory with Logs/, the hook driver and its built-ins file, the
+-- sim driver, the generator's golden HookDriver.gen.lua and a schema.pb
+-- holding abc, whose hash the golden carries, in it, and the config file
+-- when given. A path in omit is left out. Returns the driver and the
+-- directory.
 function hook.install(config, omit)
   omit = omit or {}
   local dir = dcs.scratch()
   scratch[#scratch + 1] = dir
   assert(os.execute("mkdir -p '" .. dir .. "Logs'") == 0)
   hook.write(dir .. hook.DRIVER, assert(hook.read(ROOT .. 'lua/' .. hook.DRIVER)))
+  if not omit[hook.BUILTIN] then
+    hook.write(dir .. hook.BUILTIN, assert(hook.read(ROOT .. 'lua/' .. hook.BUILTIN)))
+  end
   local sim = hook.read(ROOT .. 'lua/' .. hook.SIM)
   if sim and not omit[hook.SIM] then
     hook.write(dir .. hook.SIM, sim)

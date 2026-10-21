@@ -1,0 +1,6 @@
+-- The hook driver's built-in handlers, loaded at DCS start after
+-- HookDriver.gen.lua and before the files in DCSBridge/hookdriver.d/. It
+-- holds no handlers and registers nothing. A release restores this file,
+-- so an edit does not last: hook_driver_disabled_files in
+-- Config/DCSBridge.lua skips it, and a file in hookdriver.d adds to it.
+-- ADR 0070.

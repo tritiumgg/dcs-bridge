@@ -1,10 +1,10 @@
--- The hook driver's extension chain: after the schema is handed over, every
--- *.lua in DCSBridge/hookdriver.d/ runs as a bare chunk, the *.gen.lua files
--- first and each part in name order, less the names
--- hook_driver_disabled_files lists. A file that does not compile or raises
--- is one ERROR line and one count in hook_driver_files_failed_total, the
--- rest load and the start finishes. An absent directory writes nothing.
--- ADR 0070.
+-- The hook driver's extension chain: after the schema is handed over, the
+-- shipped HookDriver.builtin.lua, then every *.lua in DCSBridge/hookdriver.d/,
+-- the *.gen.lua files first and each part in name order, each run as a bare
+-- chunk, less the names hook_driver_disabled_files lists. A file that is
+-- missing, does not compile or raises is one ERROR line and one count in
+-- hook_driver_files_failed_total, the rest load and the start finishes. An
+-- absent directory writes nothing. ADR 0070.
 --
 -- Each case installs the hook driver into a scratch write directory and
 -- runs its start against the recording stub, under a stock Lua 5.1 with
@@ -184,6 +184,52 @@ do
   local found = errors(dir)
   assert(#found == 0, 'a disabled file wrote ' .. table.concat(found, ' | '))
   print('ok  a disabled name in the directory is skipped and not counted')
+end
+
+-- The shipped built-ins file runs before the directory, ahead of its
+-- *.gen.lua files too.
+do
+  local driver, dir = install()
+  write(dir .. hook.BUILTIN, marks('builtin'))
+  write(dir .. D .. 'a.gen.lua', marks('a'))
+  assert(start(driver), 'the start did not finish')
+
+  assert(table.concat(CHAIN, ' ') == 'builtin a', 'the chain ran ' .. table.concat(CHAIN, ' '))
+  assert(driver.counters().hook_driver_files_failed_total == 0, 'a clean chain counted a file')
+  print('ok  the built-ins file runs before the directory')
+end
+
+-- hook_driver_disabled_files naming the built-ins file skips it with no
+-- line and no count.
+do
+  local driver, dir = install("return { hook_driver_disabled_files = { 'HookDriver.builtin.lua' } }")
+  write(dir .. hook.BUILTIN, marks('builtin'))
+  write(dir .. D .. 'a.lua', marks('a'))
+  assert(start(driver), 'the start did not finish')
+
+  assert(table.concat(CHAIN, ' ') == 'a', 'the chain ran ' .. table.concat(CHAIN, ' '))
+  local counted = driver.counters().hook_driver_files_failed_total
+  assert(counted == 0, counted .. ' files counted, expected 0')
+  local found = errors(dir)
+  assert(#found == 0, 'a disabled built-ins file wrote ' .. table.concat(found, ' | '))
+  print('ok  a disabled built-ins file is skipped and not counted')
+end
+
+-- A missing built-ins file is one ERROR line naming it and one count, the
+-- directory still loads, and the start finishes.
+do
+  local driver, dir = install(nil, { [hook.BUILTIN] = true })
+  write(dir .. D .. 'a.lua', marks('a'))
+  assert(start(driver), 'the start did not finish without the built-ins file')
+
+  assert(table.concat(CHAIN, ' ') == 'a', 'the chain ran ' .. table.concat(CHAIN, ' '))
+  local counted = driver.counters().hook_driver_files_failed_total
+  assert(counted == 1, counted .. ' files counted, expected 1')
+  local found = errors(dir)
+  assert(#found == 1
+    and found[1]:find('ERROR extension file skipped: ' .. dir .. hook.BUILTIN .. ': ', 1, true) == 1,
+    'the ERROR lines were ' .. table.concat(found, ' | '))
+  print('ok  a missing built-ins file is counted and the start finishes')
 end
 
 -- counters answers a copy, so a caller cannot move the count.
