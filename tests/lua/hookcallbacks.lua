@@ -1,8 +1,11 @@
 -- The hook driver's reach into DCS: every call through one accessor, which
--- never raises. ADR 0060.
+-- never raises, and one callback table registered at start, before the
+-- configure that binds, whose callbacks run no body until start finishes.
+-- ADR 0060, ADR 0061.
 --
 -- Each case installs the hook driver into a scratch write directory, under a
--- stock Lua 5.1 with lfs, DCS's log and the DCS namespace stubbed.
+-- stock Lua 5.1 with lfs, DCS's log and the DCS namespace stubbed, and runs
+-- the callbacks DCS was handed the way DCS would.
 --
 -- Run it through tools/luatest.sh, which builds the module and finds it.
 
@@ -13,7 +16,7 @@ package.path = arg[0]:match('^(.*)/[^/]+$') .. '/support/?.lua;' .. package.path
 local dcs = require('dcs')
 local hook = require('hook')
 
-local install = hook.install
+local install, recording, lines = hook.install, hook.recording, hook.lines
 
 -- The accessor returns true and every value the function returns, a
 -- trailing nil counted.
@@ -87,6 +90,158 @@ do
     end
   end
   print('ok  the driver reaches DCS through the accessor alone')
+end
+
+-- Every callback the bridge uses, in no order.
+local NAMES = {
+  'onSimulationFrame', 'onSimulationStop', 'onSimulationPause', 'onSimulationResume',
+  'onMissionLoadBegin', 'onMissionLoadEnd', 'onPlayerConnect', 'onPlayerDisconnect',
+  'onPlayerStart', 'onPlayerStop', 'onPlayerChangeSlot', 'onPlayerChangeCoalition',
+  'onPlayerTryConnect', 'onPlayerTryChangeSlot', 'onPlayerTrySendChat', 'onChatMessage',
+}
+
+-- A hook driver started against the recording stub. Returns the driver,
+-- its directory, the stub's calls and the table DCS was handed.
+local function started(config)
+  local driver, dir = install(config)
+  local open, calls = recording(driver)
+  driver.open = open
+  driver.start({ banner = 'the banner' })
+  assert(#DCS.registered == 1, #DCS.registered .. ' tables registered, expected 1')
+  return driver, dir, calls, DCS.registered[1]
+end
+
+-- A clean start registers one table holding every callback and no other
+-- key, before the configure that binds.
+do
+  local driver = install()
+  local open, calls = recording(driver)
+  driver.open = open
+  local configured
+  local record = DCS.setUserCallbacks
+  DCS.setUserCallbacks = function(callbacks)
+    configured = #calls
+    record(callbacks)
+  end
+  driver.start({ banner = 'the banner' })
+
+  assert(#DCS.registered == 1, #DCS.registered .. ' tables registered, expected 1')
+  assert(configured == 0, 'the callbacks were registered after ' .. tostring(configured) .. ' configure calls')
+  assert(#calls == 1, #calls .. ' configure calls, expected 1')
+  local callbacks, n = DCS.registered[1], 0
+  for name, fn in pairs(callbacks) do
+    n = n + 1
+    assert(type(fn) == 'function', name .. ' is a ' .. type(fn))
+  end
+  for _, name in ipairs(NAMES) do
+    assert(callbacks[name], name .. ' was not registered')
+  end
+  assert(n == #NAMES, n .. ' callbacks registered, expected ' .. #NAMES)
+  print('ok  a start registers every callback once, before configure')
+end
+
+-- A file that does not read stops the start before anything is registered.
+do
+  local driver = install('return 1')
+  driver.open = recording(driver)
+  assert(not pcall(driver.start, { banner = 'the banner' }), 'a bad file started')
+  assert(#DCS.registered == 0, #DCS.registered .. ' tables registered behind a bad file')
+  print('ok  a file that does not read registers nothing')
+end
+
+-- A registration DCS refuses stops the start with an ERROR line naming it,
+-- and nothing is configured, so nothing binds.
+do
+  local driver, dir = install()
+  local open, calls = recording(driver)
+  driver.open = open
+  DCS.setUserCallbacks = function()
+    error('refused', 0)
+  end
+  local ok, err = pcall(driver.start, { banner = 'the banner' })
+  local expected = 'the callbacks were not registered: DCS.setUserCallbacks raised: refused'
+  assert(not ok and err == expected, 'the start answered ' .. tostring(err))
+  assert(#calls == 0, #calls .. ' configure calls behind a refused registration')
+  local own = lines(dir)
+  assert(own[#own] == 'ERROR ' .. expected, 'the last line is ' .. tostring(own[#own]))
+  print('ok  a refused registration stops the start before configure')
+end
+
+-- A start that stops at configure leaves the table registered, and its
+-- callbacks call no body and return nothing.
+do
+  local driver = install()
+  driver.open = function()
+    return {
+      interface = driver.INTERFACE,
+      configure = function()
+        error('the broker refused', 0)
+      end,
+    }
+  end
+  local ran = false
+  driver.callbacks.onSimulationFrame = function()
+    ran = true
+    return 1
+  end
+  assert(not pcall(driver.start, { banner = 'the banner' }), 'a refused configure started')
+  assert(#DCS.registered == 1, #DCS.registered .. ' tables registered, expected 1')
+  local n = select('#', DCS.registered[1].onSimulationFrame(0))
+  assert(not ran, 'a body ran behind a start that stopped')
+  assert(n == 0, n .. ' values returned behind a start that stopped')
+  print('ok  a start that stops after registering calls no body')
+end
+
+-- A start that stops at the schema, after configure, leaves the callbacks
+-- calling no body too, so the flag is set after the last stop.
+do
+  local driver = install()
+  driver.open = recording(driver, nil, function()
+    error('the schema is too large', 0)
+  end)
+  local ran = false
+  driver.callbacks.onSimulationFrame = function()
+    ran = true
+    return 1
+  end
+  assert(not pcall(driver.start, { banner = 'the banner' }), 'a refused schema started')
+  assert(#DCS.registered == 1, #DCS.registered .. ' tables registered, expected 1')
+  local n = select('#', DCS.registered[1].onSimulationFrame(0))
+  assert(not ran, 'a body ran behind a start that stopped at the schema')
+  assert(n == 0, n .. ' values returned behind a start that stopped at the schema')
+  print('ok  a start that stops at the schema calls no body')
+end
+
+-- After a clean start a body's values reach DCS exactly, and a name with no
+-- body returns nothing, so an onPlayerTry* callback passes the event on.
+do
+  local driver, _, _, callbacks = started()
+  driver.callbacks.onPlayerTryConnect = function(addr, name)
+    return false, 'no ' .. name
+  end
+  local n = select('#', callbacks.onPlayerTryConnect('127.0.0.1', 'pilot', 'ucid', 2))
+  local allowed, reason = callbacks.onPlayerTryConnect('127.0.0.1', 'pilot', 'ucid', 2)
+  assert(n == 2 and allowed == false and reason == 'no pilot',
+    'the callback returned ' .. n .. ' values: ' .. tostring(allowed) .. ', ' .. tostring(reason))
+  n = select('#', callbacks.onPlayerTrySendChat(2, 'hello', -1))
+  assert(n == 0, n .. ' values returned by a callback with no body')
+  print('ok  a body returns its values and a missing body returns nothing')
+end
+
+-- A body set after the file loads and before start is the one that runs:
+-- the table is created once and start does not replace it.
+do
+  local driver = install()
+  local seen
+  driver.callbacks.onSimulationFrame = function(t)
+    seen = t
+  end
+  local open = recording(driver)
+  driver.open = open
+  driver.start({ banner = 'the banner' })
+  DCS.registered[1].onSimulationFrame(42)
+  assert(seen == 42, 'the body set before start saw ' .. tostring(seen))
+  print('ok  a body set before start is the one called')
 end
 
 hook.remove()

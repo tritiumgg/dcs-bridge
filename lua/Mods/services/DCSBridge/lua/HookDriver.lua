@@ -585,6 +585,49 @@ local driver = {
 -- for the calls that come after it.
 local state = {}
 
+-- Every DCS callback the bridge uses, registered once at start. DCS keeps a
+-- registered table for the life of the process, so the set carries every
+-- name any part of the bridge will need. ADR 0061.
+local CALLBACKS = {
+  'onSimulationFrame',
+  'onSimulationStop',
+  'onSimulationPause',
+  'onSimulationResume',
+  'onMissionLoadBegin',
+  'onMissionLoadEnd',
+  'onPlayerConnect',
+  'onPlayerDisconnect',
+  'onPlayerStart',
+  'onPlayerStop',
+  'onPlayerChangeSlot',
+  'onPlayerChangeCoalition',
+  'onPlayerTryConnect',
+  'onPlayerTryChangeSlot',
+  'onPlayerTrySendChat',
+  'onChatMessage',
+}
+
+-- The body each callback runs, by name, looked up at each call. Created
+-- once here and never replaced, so a body set after this file loads is the
+-- one that runs. A name with no body returns nothing, which lets an
+-- onPlayerTry* callback pass the event on. ADR 0061.
+driver.callbacks = {}
+
+-- The table handed to DCS: one function per name, which calls nothing until
+-- start has finished.
+local registered = {}
+for _, name in ipairs(CALLBACKS) do
+  registered[name] = function(...)
+    if not state.started then
+      return
+    end
+    local body = driver.callbacks[name]
+    if body then
+      return body(...)
+    end
+  end
+end
+
 -- The broker module's table. DCS's package.loadlib takes the opener's bare
 -- name, so that is the one asked for.
 function driver.open(path)
@@ -705,6 +748,13 @@ function driver.start(ctx)
   -- Read before configure for the same reason, and handed over after it,
   -- since the broker takes a schema only once configured.
   local schema = read_schema()
+  -- Registered before configure, so a refusal stops the start with nothing
+  -- bound. DCS cannot take the table back, so a start that stops later
+  -- leaves it registered, calling no body. ADR 0061.
+  local accepted, refused = dcs.call('setUserCallbacks', registered)
+  if not accepted then
+    fail('the callbacks were not registered: ' .. refused)
+  end
   -- Every broker key in one call, so the first call is the whole
   -- configuration and nothing is left at a default the file changed.
   local configured, answer = pcall(shim.configure, state.broker)
@@ -728,6 +778,9 @@ function driver.start(ctx)
     log.warn('schema ' .. sha256 .. ' but HookDriver.gen.lua was generated from '
       .. state.gen.schema_sha256)
   end
+  -- Last, so the callbacks run their bodies only behind a start that
+  -- finished. A stop added to start goes above this line. ADR 0061.
+  state.started = true
 end
 
 -- Read the file again and hand the broker its keys, which is what
