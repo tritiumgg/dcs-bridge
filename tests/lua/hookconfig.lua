@@ -239,6 +239,26 @@ do
   assert(driver.config.validate(values) == nil, 'the defaults do not pass')
 end
 
+-- With a ring size in force that is not the file's, a pair is checked
+-- against the one in force: a memory lowered with its ring reads alone,
+-- and is refused while the ring stays at 256. The values read are the
+-- file's either way. ADR 0058.
+do
+  local driver = fresh()
+  local path = file('return { ring_in_hook_driver_records = 128, recent_admin_keys = 128 }')
+  local values = assert(driver.config.read(path))
+  assert(values.ring_in_hook_driver_records == 128, 'the file value was not read')
+
+  local refused, reason = driver.config.read(path, { ring_in_hook_driver_records = 256 })
+  assert(refused == nil, 'a memory below the ring in force read')
+  assert(reason:find('recent_admin_keys is 128, below ring_in_hook_driver_records at 256', 1, true),
+    'the reason reads ' .. tostring(reason))
+
+  values = assert(driver.config.read(file('return { ring_in_hook_driver_records = 64 }'),
+    { ring_in_hook_driver_records = 256 }))
+  assert(values.ring_in_hook_driver_records == 64, 'the value in force replaced the file value')
+end
+
 -- Split by owner: the broker's table holds its 30 keys and no table but
 -- tokens, and each other key sits under its own owner.
 do

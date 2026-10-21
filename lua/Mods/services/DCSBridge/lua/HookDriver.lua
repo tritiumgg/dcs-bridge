@@ -196,7 +196,12 @@ end
 -- each { level = 'info' or 'warn', message = ... }. The caller logs them, so
 -- they are written at the level the file sets. Or nil and the reason the
 -- file does not read. ADR 0051.
-function config.read(path)
+--
+-- held, when given, maps keys to the values in force where those are not
+-- the file's: the inbound ring sizes after the first configure. The checks
+-- run with them in place, so a memory is held as deep as the ring it
+-- covers really is, and the values returned are still the file's. ADR 0058.
+function config.read(path, held)
   local values = defaults()
 
   -- Only ENOENT means absent. Its number is 2 on every platform, where the
@@ -255,7 +260,17 @@ function config.read(path)
       values[name] = value
     end
   end
-  local invalid = config.validate(values)
+  local checked = values
+  if held then
+    checked = {}
+    for name, value in pairs(values) do
+      checked[name] = value
+    end
+    for name, value in pairs(held) do
+      checked[name] = value
+    end
+  end
+  local invalid = config.validate(checked)
   if invalid then
     return nil, path .. ': ' .. invalid
   end
