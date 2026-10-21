@@ -999,6 +999,23 @@ local function switch(enabled)
   state.enabled = enabled
 end
 
+-- Tick the broker with the model time and take the switch from its answer.
+-- Returns true, or false and the reason when the clock does not read, and
+-- then no tick is taken. ADR 0063.
+local function hear()
+  local read, time = dcs.call('getModelTime')
+  if not read then
+    return false, time
+  end
+  local enabled = state.shim.tick(time)
+  -- A module older than the answer returns nothing. The switch then keeps
+  -- the value the file gave it rather than reading the bridge as off.
+  if type(enabled) == 'boolean' then
+    switch(enabled)
+  end
+  return true
+end
+
 -- The per-frame body, which the runtime owns (ADR 0061). The tick is its
 -- first statement, ahead of every consumer added to this body, so a
 -- consumer that raises cannot stop the heartbeat and make Pong report a
@@ -1007,15 +1024,9 @@ end
 -- A clock that does not read raises, so the containment logs it once per
 -- mission load and no tick is taken. ADR 0063.
 driver.callbacks.onSimulationFrame = function()
-  local read, time = dcs.call('getModelTime')
-  if not read then
-    error(time, 0)
-  end
-  local enabled = state.shim.tick(time)
-  -- A module older than the answer returns nothing. The switch then keeps
-  -- the value the file gave it rather than reading the bridge as off.
-  if type(enabled) == 'boolean' then
-    switch(enabled)
+  local heard, reason = hear()
+  if not heard then
+    error(reason, 0)
   end
 end
 
