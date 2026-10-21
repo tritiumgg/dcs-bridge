@@ -569,20 +569,13 @@ fn schema_verb(args: &SchemaArgs) -> ExitCode {
 /// nothing was learned.
 fn ping_verb(args: &PingArgs) -> ExitCode {
     let addr = &args.addr.addr;
-    let mut stream = match TcpStream::connect(addr) {
-        Ok(stream) => stream,
+    let reader = match ping::ask(addr, ANSWER_WAIT) {
+        Ok(reader) => reader,
         Err(error) => {
-            eprintln!("cannot connect to {addr}: {error}");
+            eprintln!("{error}");
             return ExitCode::from(2);
         }
     };
-    if let Err(error) = stream.write_all(&ping::ping_frame()) {
-        eprintln!("cannot send a ping to {addr}: {error}");
-        return ExitCode::from(2);
-    }
-    // The wait is wall-clock over the whole answer rather than one read:
-    // the frame is complete or the time is up, whichever comes first.
-    let reader = wire::Deadline::new(stream, ANSWER_WAIT);
 
     let stdout = io::stdout();
     let mut out = stdout.lock();

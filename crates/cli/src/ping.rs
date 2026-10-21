@@ -8,6 +8,8 @@
 //! one of the two messages a connection may send before authenticating.
 
 use std::io::{self, Read, Write};
+use std::net::TcpStream;
+use std::time::Duration;
 
 use prost::Message;
 
@@ -33,6 +35,20 @@ pub struct Pong {
 /// The one frame `ping` sends: an empty `Ping`, numbered 1.
 pub fn ping_frame() -> Vec<u8> {
     wire::frame(1, topic::PING, Vec::new())
+}
+
+/// Connect to `addr` and send the `Ping`, returning the stream to read the
+/// answer from for at most `wait`. The error is the line to print.
+///
+/// The wait is wall-clock over the whole answer rather than one read: the
+/// frame is complete or the time is up, whichever comes first.
+pub fn ask(addr: &str, wait: Duration) -> Result<wire::Deadline, String> {
+    let mut stream =
+        TcpStream::connect(addr).map_err(|error| format!("cannot connect to {addr}: {error}"))?;
+    stream
+        .write_all(&ping_frame())
+        .map_err(|error| format!("cannot send a ping to {addr}: {error}"))?;
+    Ok(wire::Deadline::new(stream, wait))
 }
 
 /// Read frames from `reader` until a `Pong` arrives, print its three fields
