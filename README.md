@@ -121,7 +121,7 @@ Nothing sends `ReloadConfig` yet; the hook driver's command loop is planned.
 The hook driver reads the file at DCS start, loads the broker, and hands it
 its settings with `shim.configure`. Nothing listens until that first call,
 which binds the address and sizes the queues. A later call, on
-`ReloadConfig`, changes the keys marked live, such as the timeouts and the tokens; a change to the
+`ReloadConfig`, changes the keys marked live, such as the timeouts, the tokens and `enabled`; a change to the
 address, the port, the connection cap or a queue size waits for a DCS
 restart. `DCSBridge.log` names each such key with the value in force and the
 file's, on a line ending `waits for a DCS restart`. `route` and
@@ -163,9 +163,20 @@ the whole set of topics it wants; each message replaces the last, and
 this install registered that the token can see. `topic_filter_max_topics`,
 256 by default, bounds one list and is a live key.
 
+The `enabled` key is the switch that turns the bridge off and on with no
+restart. With `enabled = false` in the file, the bridge starts disabled. A
+disabled bridge keeps listening and answering `ping`, which reports
+`bridge_enabled=false`. A consumer whose token grants `reload` moves the
+switch live with `dcsb send dcsbridge.broker.SetEnabled`: with no fields it
+disables the bridge, and with `--hex 0801` it enables it again. A
+`ReloadConfig` moves it as it moves any live key. A `SetEnabled` lasts until
+the file is read again, at a reload or a DCS restart. Each change writes one
+line to `DCSBridge.log`, `bridge disabled` or `bridge enabled`.
+
 The loader has an `ENABLED` flag on its first lines, in
 `Scripts\Hooks\DCSBridge.lua`. Set it to `false` to keep the bridge installed
-but inactive. A change takes a DCS restart. The loader then writes one line
+but not loaded at all: nothing listens, and `ping` gets no answer. A change
+takes a DCS restart. The loader then writes one line
 to `dcs.log` saying it is disabled, and nothing else. A release overwrites
 the loader, so set the flag again after an upgrade.
 
@@ -316,6 +327,8 @@ dcsb send dcsbridge.builtin.sim.SetFlag --hex 082a
                                    Send one record, its bytes given as hex.
 dcsb send dcsbridge.builtin.sim.SetFlag --file record.bin --wait 2
                                    Send the file's bytes and print what answers.
+dcsb send dcsbridge.broker.SetEnabled
+                                   Disable the bridge; --hex 0801 enables it.
 dcsb record session.bin            Append each record the bridge sends to a file.
 dcsb replay session.bin            Serve that file to one consumer, with no DCS.
 dcsb tail --addr 127.0.0.1:7743    Read the replayed session.
@@ -347,7 +360,9 @@ set holds at most `max_lifecycle_topics` topics, and a boundary record over
 dcs_last_heard_ms=312 bridge_enabled=true`, and exits 1 when the sim is not
 alive, so a script can ask too. The sim is alive when the hook driver's
 per-frame call reached the bridge within `dcs_alive_threshold_ms`, and a dash
-in place of the age means it never has.
+in place of the age means it never has. That call keeps running while the
+bridge is disabled, so a disabled bridge reports `dcs_alive=true` and
+`bridge_enabled=false` rather than a dead sim.
 
 `schema` authenticates like `tail`, fetches the schema the bridge serves, and
 writes it to the file named on the command line, replacing one that exists.
