@@ -112,14 +112,22 @@ than a table, or holds a value the bridge refuses stops the bridge for that
 DCS run. The reason is in `Logs\DCSBridge\DCSBridge.log` and in
 `Logs\dcs.log`. Fix the file and restart DCS.
 
+On `ReloadConfig` the same faults change nothing: the configuration in force
+stays, and the reason is in `DCSBridge.log`. A file that is gone at reload
+also changes nothing, rather than putting the defaults in force and dropping
+every token.
+Nothing sends `ReloadConfig` yet; the hook driver's command loop is planned.
+
 The hook driver reads the file at DCS start, loads the broker, and hands it
 its settings with `shim.configure`. Nothing listens until that first call,
 which binds the address and sizes the queues. A later call, on
 `ReloadConfig`, changes the keys marked live, such as the timeouts and the tokens; a change to the
 address, the port, the connection cap or a queue size waits for a DCS
-restart, and the call reports it as pending. Each connection has a queue per
-record class, so a flood of records a consumer can afford to lose pushes out
-none of the others. Their sizes are `ring_out_lossy_records`,
+restart. `DCSBridge.log` names each such key with the value in force and the
+file's, on a line ending `waits for a DCS restart`. `route` and
+`hook_driver_disabled_files` wait for a restart the same way. Each connection
+has a queue per record class, so a flood of records a consumer can afford to
+lose pushes out none of the others. Their sizes are `ring_out_lossy_records`,
 `ring_out_durable_records` and `ring_out_lifecycle_records`.
 
 The hook driver reads `Mods\services\DCSBridge\schema.pb` before that first
