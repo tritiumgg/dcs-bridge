@@ -107,6 +107,50 @@ function dcs.DCS()
   return namespace
 end
 
+-- DCS's net namespace, holding dostring_in over two stub states, 'server'
+-- and 'mission'. Each state is its own global table, reading through to the
+-- real one for the base library, so a global a chunk sets stays in its
+-- state. calls holds each { state, chunk, answer } in order. refusal, when
+-- a test sets it, is the answer to every call, as a policy refusal is. A
+-- name with no state answers nil, as DCS answers an unknown name.
+--
+-- Each state carries its own dofile. Stock dofile compiles the file against
+-- the real global table whatever the caller's, so a file it ran would set
+-- its globals outside the state.
+function dcs.net()
+  local states = {}
+  local net = { calls = {}, states = states }
+  for _, name in ipairs({ 'server', 'mission' }) do
+    local state = setmetatable({}, { __index = _G })
+    state.dofile = function(path)
+      local chunk = assert(loadfile(path))
+      setfenv(chunk, state)
+      return chunk()
+    end
+    states[name] = state
+  end
+  net.dostring_in = function(target, chunk)
+    local answer
+    if net.refusal ~= nil then
+      answer = net.refusal
+    elseif states[target] then
+      -- DCS answers a chunk that does not compile or raises with the
+      -- message, as a string.
+      local fn, err = loadstring(chunk)
+      if fn then
+        setfenv(fn, states[target])
+        local ok, result = pcall(fn)
+        answer = ok and result or tostring(result)
+      else
+        answer = err
+      end
+    end
+    net.calls[#net.calls + 1] = { state = target, chunk = chunk, answer = answer }
+    return answer
+  end
+  return net
+end
+
 -- The repository root with a trailing slash, from the path the test script
 -- was run by.
 function dcs.root()
