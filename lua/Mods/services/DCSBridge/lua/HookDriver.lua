@@ -589,19 +589,30 @@ local function read_schema()
   return bytes
 end
 
--- The broker's answer to a configure, then one WARN for each key it left
--- pending. A pending key keeps its value in force, so without the line an
--- operator who edited it sees nothing change and nothing say why.
+-- One WARN for each key in a pending list, the broker's or the hook
+-- driver's own, in one shape. A pending key keeps its value in force, so
+-- without the line an operator who edited it sees nothing change and
+-- nothing say why. ADR 0057.
+local function waits(pending)
+  for _, key in ipairs(pending) do
+    log.warn(tostring(key.key) .. ': effective ' .. shown(key.effective)
+      .. ', file ' .. shown(key.file) .. ', waits for a DCS restart')
+  end
+end
+
+-- The broker's answer to a configure, then the keys it left pending.
 local function report(answer)
   log.info('configured: interface ' .. tostring(answer.interface)
     .. ', applied ' .. tostring(answer.applied)
     .. ', unknown ' .. tostring(answer.unknown)
     .. ', pending_restart ' .. tostring(answer.pending_restart))
-  for _, key in ipairs(answer.pending or {}) do
-    log.warn(tostring(key.key) .. ': effective ' .. shown(key.effective)
-      .. ', file ' .. shown(key.file) .. ', waits for a DCS restart')
-  end
+  waits(answer.pending or {})
 end
+
+-- The inbound ring sizes. The first configure allocates both rings and no
+-- later one resizes them, so the sizes it was handed are the ones in force
+-- until DCS restarts. ADR 0058.
+local RINGS = { 'ring_in_sim_driver_records', 'ring_in_hook_driver_records' }
 
 -- Called once by the loader, which wrote ctx.banner to dcs.log already and
 -- logs anything this raises there. The banner comes first, at the default
@@ -617,6 +628,10 @@ function driver.start(ctx)
   end
   local split = config.split(values)
   state.broker, state.hook, state.sim = split.broker, split.hook, split.sim
+  state.rings = {}
+  for _, name in ipairs(RINGS) do
+    state.rings[name] = state.broker[name]
+  end
 
   log.configure(state.hook)
   for _, note in ipairs(notes) do
@@ -666,6 +681,44 @@ function driver.start(ctx)
     log.warn('schema ' .. sha256 .. ' but HookDriver.gen.lua was generated from '
       .. state.gen.schema_sha256)
   end
+end
+
+-- Read the file again and hand the broker its keys, which is what
+-- ReloadConfig asks for. A file that does not read changes nothing: the
+-- reason is logged and returned. Nothing is stored until the broker has
+-- taken its table, so the running configuration is the previous one until
+-- then. The hook driver's restart-tier keys stay at the values in force
+-- (ADR 0057), and the pairs are checked against the ring sizes in force
+-- (ADR 0058).
+--
+-- Returns true, the broker's answer and the hook driver's own pending
+-- keys, or false and the reason.
+function driver.reload()
+  if not state.shim then
+    error('reload before the hook driver started', 2)
+  end
+  local values, notes = config.read(CONFIG, state.rings)
+  if not values then
+    log.error(notes)
+    return false, notes
+  end
+  local split = config.split(values)
+  local pending, hook = config.pending(state.hook, split.hook)
+  -- Checked again by the broker, which keeps nothing from a later call.
+  -- ADR 0052.
+  split.broker.schema_sha256 = state.gen.schema_sha256
+  local answer = state.shim.configure(split.broker)
+
+  -- sim_driver_path and the sim driver's keys are stored here and take
+  -- effect at the next injection, which reads them.
+  state.broker, state.hook, state.sim = split.broker, hook, split.sim
+  log.configure(state.hook)
+  for _, note in ipairs(notes) do
+    log[note.level](note.message)
+  end
+  report(answer)
+  waits(pending)
+  return true, answer, pending
 end
 
 return driver
