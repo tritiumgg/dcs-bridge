@@ -3,7 +3,8 @@
 -- takes the switch from the tick's answer, so a disable and a re-enable
 -- arrive with no reload and no command path. Each move logs one INFO line.
 -- A module that answers nothing leaves the switch where it was, and a clock
--- that does not read is one contained ERROR and no tick. ADR 0063.
+-- that does not read is one contained ERROR and no tick. A policy refusal's
+-- latch holds the bridge off under any switch. ADR 0063, ADR 0067.
 --
 -- Each case installs the hook driver into a scratch write directory, under a
 -- stock Lua 5.1 with lfs, DCS's log and the DCS namespace stubbed, starts it
@@ -119,6 +120,42 @@ do
     .. 'DCS.getModelTime is not a function; suppressed until the next mission load',
     #found .. ' ERROR lines with no clock: ' .. tostring(found[1]))
   print('ok  a clock that does not read is one ERROR and no tick')
+end
+
+-- A latched hook driver stays off whatever moves the switch: a tick that
+-- answers on and a reload of a file that says enabled. The switch moves
+-- under it, and its line says the latch holds. The latch is logged once,
+-- and a second latch keeps the first reason. ADR 0067.
+do
+  local driver, dir, ticks, frame = started()
+  driver.latch('the first reason')
+  driver.latch('the second reason')
+  assert(driver.enabled() == false, 'a latched hook driver read on')
+  local found = matching(dir, 'until DCS restarts')
+  assert(#found == 1 and found[1] == 'INFO bridge disabled until DCS restarts: the first reason',
+    #found .. ' latch lines: ' .. tostring(found[1]))
+
+  for _ = 1, 100 do
+    frame()
+  end
+  assert(driver.enabled() == false, 'a tick answering on cleared the latch')
+  ticks.answer = false
+  frame()
+  ticks.answer = true
+  frame()
+  assert(driver.enabled() == false, 'a tick answering off then on cleared the latch')
+
+  write(dir .. 'Config/DCSBridge.lua', 'return { enabled = true }')
+  assert(driver.reload())
+  assert(driver.enabled() == false, 'a reload to enabled = true cleared the latch')
+
+  found = matching(dir, 'until DCS restarts')
+  assert(#found == 3
+    and found[2] == 'INFO bridge disabled, but refused until DCS restarts'
+    and found[3] == 'INFO bridge enabled, but refused until DCS restarts',
+    #found .. ' lines naming the latch, expected the latch, off and on')
+  assert(#matching(dir, '^ERROR ') == 0, 'a latched hook driver logged an ERROR')
+  print('ok  a latch holds the hook driver off whatever moves the switch')
 end
 
 -- The real module. The file starts the bridge off and the first frame's tick

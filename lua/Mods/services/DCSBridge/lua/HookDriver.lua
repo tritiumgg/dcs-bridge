@@ -785,11 +785,29 @@ local state = {}
 -- default is. ADR 0063.
 state.enabled = true
 
--- The kill switch in effect. Every path that injects, drains, ferries
--- commands or evaluates consults it, so a disabled bridge stops them all
--- while the per-frame tick runs on. ADR 0063.
+-- Why the hook driver turned itself off for the life of the process, or
+-- nil. Apart from the kill switch, so nothing that moves the switch clears
+-- it: autoexec.cfg, the file a policy refusal waits on, is read only when
+-- DCS starts. ADR 0067.
+state.refused = nil
+
+-- Whether the bridge runs: the operator's kill switch is on and no policy
+-- refusal has latched the hook driver off. Every path that injects, drains,
+-- ferries commands or evaluates consults this and not the switch, so either
+-- one stops them all while the per-frame tick runs on. ADR 0063, ADR 0067.
 function driver.enabled()
-  return state.enabled
+  return state.enabled and state.refused == nil
+end
+
+-- Latch the hook driver off until DCS restarts, with one INFO line naming
+-- reason. A second call keeps the first reason and logs nothing, so the
+-- line is written once. ADR 0067.
+function driver.latch(reason)
+  if state.refused ~= nil then
+    return
+  end
+  state.refused = reason
+  log.info('bridge disabled until DCS restarts: ' .. reason)
 end
 
 -- The sim driver's extension directory, which the hook driver lists for it.
@@ -1031,10 +1049,16 @@ end
 
 -- Hold the kill switch at enabled, with one INFO line when it moves. A call
 -- that changes nothing writes nothing, so a caller passes every value it
--- learns through here. ADR 0063.
+-- learns through here. While the hook driver is latched off the switch
+-- still moves, and its line says the latch holds, so a re-enable does not
+-- read as a running bridge. ADR 0063, ADR 0067.
 local function switch(enabled)
   if enabled ~= state.enabled then
-    log.info(enabled and 'bridge enabled' or 'bridge disabled')
+    local line = enabled and 'bridge enabled' or 'bridge disabled'
+    if state.refused ~= nil then
+      line = line .. ', but refused until DCS restarts'
+    end
+    log.info(line)
   end
   state.enabled = enabled
 end
