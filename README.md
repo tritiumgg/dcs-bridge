@@ -129,7 +129,11 @@ On `ReloadConfig` the same faults change nothing: the configuration in force
 stays, and the reason is in `DCSBridge.log`. A file that is gone at reload
 also changes nothing, rather than putting the defaults in force and dropping
 every token.
-Nothing sends `ReloadConfig` yet; the hook driver's command loop is planned.
+
+A consumer whose token grants `reload` asks for a reload with
+`dcsb send dcsbridge.hook.ReloadConfig`, at the main menu or in a mission.
+Its outcome is in `DCSBridge.log`, the same lines a start writes.
+An answer to the consumer that sent it is planned.
 
 The hook driver reads the file at DCS start, loads the broker, and hands it
 its settings with `shim.configure`. Nothing listens until that first call,
@@ -139,6 +143,9 @@ address, the port, the connection cap or a queue size waits for a DCS
 restart. `DCSBridge.log` names each such key with the value in force and the
 file's, on a line ending `waits for a DCS restart`. `route` and
 `hook_driver_disabled_files` wait for a restart the same way.
+Each time DCS calls the hook driver it runs at most
+`hook_driver_dispatch_max_commands` commands, 8 by default, and the rest
+wait for the next call. It is a live key.
 `hook_driver_disabled_files` lists hook driver files to skip by name, such
 as `HookDriver.builtin.lua` or a file in `DCSBridge\hookdriver.d\`. Each connection
 has a queue per record class, so a flood of records a consumer can afford to
@@ -184,7 +191,10 @@ disabled bridge keeps listening and answering `ping`, which reports
 `bridge_enabled=false`. A consumer whose token grants `reload` moves the
 switch live with `dcsb send dcsbridge.broker.SetEnabled`: with no fields it
 disables the bridge, and with `--hex 0801` it enables it again. A
-`ReloadConfig` moves it as it moves any live key. A `SetEnabled` lasts until
+`ReloadConfig` moves it as it moves any live key, and a disabled bridge
+still runs one. Every other command sent to the hook driver while it is
+disabled is dropped, and `DCSBridge.log` names each such topic once on a
+`WARN` line ending `discarded: bridge disabled`. A `SetEnabled` lasts until
 the file is read again, at a reload or a DCS restart. Each change writes one
 line to `DCSBridge.log`, `bridge disabled` or `bridge enabled`.
 
@@ -383,6 +393,8 @@ dcsb send dcsbridge.builtin.sim.SetFlag --file record.bin --wait 2
                                    Send the file's bytes and print what answers.
 dcsb send dcsbridge.broker.SetEnabled
                                    Disable the bridge; --hex 0801 enables it.
+dcsb send dcsbridge.hook.ReloadConfig
+                                   Read Config\DCSBridge.lua again.
 dcsb record session.bin            Append each record the bridge sends to a file.
 dcsb replay session.bin            Serve that file to one consumer, with no DCS.
 dcsb tail --addr 127.0.0.1:7743    Read the replayed session.

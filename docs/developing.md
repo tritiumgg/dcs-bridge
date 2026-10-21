@@ -103,7 +103,9 @@ the step does not run it as a test.
 `HookDriver.builtin.lua` and then `DCSBridge/hookdriver.d/` after the schema
 is handed to the broker. `hook_driver_files_failed_total` is held by the hook
 driver and is not published yet, so the test reads it through
-`driver.counters()` (ADR 0070).
+`driver.counters()` (ADR 0070). `tests/lua/hookdispatch.lua` runs the
+dispatch loop against a stub whose `poll` pops a list the test fills, and
+reads `hook_driver_dispatch_deferred_total` the same way (ADR 0071).
 
 ### Windows
 
