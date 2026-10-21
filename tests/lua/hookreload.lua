@@ -9,7 +9,10 @@
 -- it against a module stub that records each configure, then rewrites the
 -- file and reloads, under a stock Lua 5.1 with lfs and DCS's log stubbed.
 --
--- Run it through tools/luatest.sh.
+-- Run it through tools/luatest.sh, which builds the module and finds it.
+
+local MODULE = ...
+assert(MODULE, 'usage: lua tests/lua/hookreload.lua <module path>')
 
 package.path = arg[0]:match('^(.*)/[^/]+$') .. '/support/?.lua;' .. package.path
 local hook = require('hook')
@@ -185,6 +188,55 @@ do
   local ran, err = pcall(driver.reload)
   assert(not ran and err:find('before the hook driver started', 1, true),
     'a reload before the start ran: ' .. tostring(err))
+end
+
+-- The real module, the only case here that opens it: the broker is one per
+-- process. A reload that lowers a ring size and the frame cap answers the
+-- same applied count and listener as the start, since applied counts the
+-- live keys the table names, reports the ring size pending in the answer
+-- and the log, and puts the frame cap in force: a 200-byte string outgrows
+-- a 64-byte buffer. load.lua says why both spellings are tried.
+do
+  local driver, dir = install('return { port = 0 }')
+  local shim, first
+  driver.open = function()
+    for _, name in ipairs({ 'luaopen_dcsbridge', '_luaopen_dcsbridge' }) do
+      local opener = package.loadlib(MODULE, name)
+      if opener then
+        shim = opener()
+        local configure = shim.configure
+        shim.configure = function(table)
+          local answer = configure(table)
+          first = first or answer
+          return answer
+        end
+        return shim
+      end
+    end
+    error('no opener in ' .. MODULE, 0)
+  end
+  driver.start({ banner = 'the banner' })
+
+  rewrite(dir, 'return { port = 0, ring_out_lossy_records = 64, max_frame_bytes = 64 }')
+  local ok, answer = driver.reload()
+  assert(ok, 'the reload was refused: ' .. tostring(answer))
+  assert(answer.applied == first.applied,
+    'the reload applied ' .. tostring(answer.applied) .. ', the start ' .. tostring(first.applied))
+  assert(answer.listening == first.listening, 'the reload rebound the listener')
+  assert(answer.pending_restart == 1 and answer.pending[1].key == 'ring_out_lossy_records'
+    and answer.pending[1].effective == 3584 and answer.pending[1].file == 64,
+    'the ring size is not pending')
+  local own = lines(dir)
+  assert(own[#own] == 'WARN ring_out_lossy_records: effective 3584, file 64, waits for a DCS restart',
+    'the pending ring size is not a warning: ' .. tostring(own[#own]))
+  assert(own[#own - 1]:find(', pending_restart 1$'), 'the answer is not logged: ' .. tostring(own[#own - 1]))
+
+  shim.classes({ ['dcsbridge.builtin.sim.UnitDestroyed'] = 'durable' })
+  shim.caps({ ['dcsbridge.builtin.sim.UnitDestroyed'] = 'read' })
+  shim.begin('dcsbridge.builtin.sim.UnitDestroyed')
+  local put, err = pcall(shim.string, 1, string.rep('x', 200))
+  assert(not put and tostring(err):find('outgrew its buffer', 1, true),
+    'the lowered frame cap is not in force: ' .. tostring(err))
 end
 
 hook.remove()
