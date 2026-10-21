@@ -684,8 +684,8 @@ function driver.start(ctx)
 end
 
 -- Read the file again and hand the broker its keys, which is what
--- ReloadConfig asks for. A file that does not read changes nothing: the
--- reason is logged and returned. Nothing is stored until the broker has
+-- ReloadConfig asks for. A file that does not read, or a table the broker
+-- refuses, changes nothing: the reason is logged and returned. Nothing is stored until the broker has
 -- taken its table, so the running configuration is the previous one until
 -- then. The hook driver's restart-tier keys stay at the values in force
 -- (ADR 0057), and the pairs are checked against the ring sizes in force
@@ -707,7 +707,14 @@ function driver.reload()
   -- Checked again by the broker, which keeps nothing from a later call.
   -- ADR 0052.
   split.broker.schema_sha256 = state.gen.schema_sha256
-  local answer = state.shim.configure(split.broker)
+  -- The broker applies a table whole or refuses it whole, so a refusal
+  -- leaves both sides on the previous configuration.
+  local configured, answer = pcall(state.shim.configure, split.broker)
+  if not configured then
+    answer = tostring(answer)
+    log.error(answer)
+    return false, answer
+  end
 
   -- sim_driver_path and the sim driver's keys are stored here and take
   -- effect at the next injection, which reads them.

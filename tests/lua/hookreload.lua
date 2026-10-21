@@ -134,6 +134,35 @@ for _, case in ipairs({
     case[1] .. ': the log after the refusal reads ' .. tostring(own[#own]))
 end
 
+-- A table the broker refuses: one ERROR line naming the refusal, and the
+-- log level the start set still in force.
+do
+  local driver, dir = install()
+  local open, calls = recording(driver)
+  local shim
+  driver.open = function()
+    shim = open()
+    return shim
+  end
+  driver.start({ banner = 'the banner' })
+  local configure = shim.configure
+  shim.configure = function(table)
+    configure(table)
+    error('configure refused: `handshake_timeout_ms` must be a whole number', 0)
+  end
+
+  local before = #lines(dir)
+  rewrite(dir, "return { handshake_timeout_ms = 0.5, log_level = 'debug', route = 'modified' }")
+  local ok, reason = driver.reload()
+  assert(not ok and reason == 'configure refused: `handshake_timeout_ms` must be a whole number',
+    'the refusal reads ' .. tostring(reason))
+  assert(#calls == 2, #calls .. ' configure calls, expected the refused one')
+  driver.log.debug('after the refusal')
+  local own = lines(dir)
+  assert(#own == before + 1 and own[#own] == 'ERROR ' .. reason,
+    'the log after the refusal reads ' .. tostring(own[#own]))
+end
+
 -- A reload before the start has nothing to keep in force, and raises.
 do
   local driver = install()
