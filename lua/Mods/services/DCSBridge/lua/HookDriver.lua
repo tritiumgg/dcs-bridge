@@ -516,7 +516,11 @@ local function rotate()
   end
 end
 
+-- One call is one physical line. A message that carries line breaks, such
+-- as a traceback or an error a file raised, would otherwise leave lines
+-- with no stamp or level, which a reader filtering on either never sees.
 local function write(level, message)
+  message = (string.gsub(string.gsub(message, '\r?\n', ' | '), '\r', ' | '))
   if level > logger.level or not logger.dir then
     return
   end

@@ -100,6 +100,23 @@ do
     'a debug line was dropped at debug')
 end
 
+-- A message with line breaks is one line, each break shown as ' | ', so no
+-- line in the file lacks its stamp and level.
+do
+  local driver, dir = fresh()
+  driver.log.open(dir)
+  driver.log.error('a\nb\r\nc\rd')
+  driver.log.info('after')
+  local live = read(dir .. '/DCSBridge.log')
+  local n = 0
+  for line in live:gmatch('[^\n]+') do
+    n = n + 1
+    assert(line:find('^%d%d%d%d%-%d%d%-%d%d %d%d:%d%d:%d%d %u+ '), 'a line has no stamp: ' .. line)
+  end
+  assert(n == 2, n .. ' lines, expected 2')
+  assert(live:find('ERROR a | b | c | d\n', 1, true), 'the breaks were not replaced: ' .. live)
+end
+
 -- A key configure is not given keeps its value, and an unknown level raises.
 do
   local driver, dir = fresh()
