@@ -76,6 +76,65 @@ pub fn newest(mut reader: impl BufRead) -> io::Result<Start> {
     }
 }
 
+/// A file as the banner names it: its size and its modification time,
+/// UTC to the second, or missing.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Identity {
+    Missing,
+    Present { size: u64, modified: String },
+}
+
+impl std::fmt::Display for Identity {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Identity::Missing => write!(f, "missing"),
+            Identity::Present { size, modified } => {
+                write!(f, "{size} bytes, modified {modified}")
+            }
+        }
+    }
+}
+
+/// The identity the banner gives the file whose write-directory path is
+/// `rel`. The path is found by its own text, since the write directory
+/// before it is the user's and can hold any character the separators can.
+pub fn identity(banner: &str, rel: &str) -> Option<Identity> {
+    let after = &banner[banner.find(rel)? + rel.len()..];
+    let after = after.strip_prefix(' ')?;
+    if after.starts_with("missing") {
+        return Some(Identity::Missing);
+    }
+    let (size, after) = after.split_once(' ')?;
+    let modified = after.strip_prefix("bytes, modified ")?.get(..19)?;
+    Some(Identity::Present {
+        size: size.parse().ok()?,
+        modified: modified.to_owned(),
+    })
+}
+
+/// `secs` since the Unix epoch as `YYYY-MM-DD HH:MM:SS` UTC, the way the
+/// loader's `os.date('!%Y-%m-%d %H:%M:%S')` writes a modification time.
+pub fn utc(secs: u64) -> String {
+    let (days, rest) = (secs / 86_400, secs % 86_400);
+    // Days to a civil date in the proleptic Gregorian calendar, counted in
+    // 400-year eras from 0000-03-01 so the leap day falls at an era's end.
+    let z = days + 719_468;
+    let era = z / 146_097;
+    let doe = z % 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + u64::from(month <= 2);
+    format!(
+        "{year:04}-{month:02}-{day:02} {:02}:{:02}:{:02}",
+        rest / 3600,
+        rest % 3600 / 60,
+        rest % 60
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -191,5 +250,44 @@ mod tests {
         };
         assert_eq!(banner, "loading, C:\\Users\\J\u{fffd}rg\\x 1 bytes");
         assert_eq!(stop.as_deref(), Some("the hook driver did not load: boom"));
+    }
+
+    /// Each file's identity is read after its own path, present or
+    /// missing, and a path the banner does not hold is none.
+    #[test]
+    fn the_banner_names_each_file_by_size_and_time() {
+        let banner = banner();
+        assert_eq!(
+            identity(&banner, "Scripts/Hooks/DCSBridge.lua"),
+            Some(Identity::Present {
+                size: 1520,
+                modified: "2026-10-20 09:00:00".into()
+            })
+        );
+        assert_eq!(
+            identity(&banner, "Mods/services/DCSBridge/lua/HookDriver.lua")
+                .unwrap()
+                .to_string(),
+            "70000 bytes, modified 2026-10-20 09:00:00"
+        );
+        let missing = "loading, C:\\DCS\\Scripts/Hooks/DCSBridge.lua 9 bytes, modified \
+            2026-10-20 09:00:00, C:\\DCS\\Mods/services/DCSBridge/lua/HookDriver.lua missing";
+        assert_eq!(
+            identity(missing, "Mods/services/DCSBridge/lua/HookDriver.lua"),
+            Some(Identity::Missing)
+        );
+        assert_eq!(identity(&banner, "Scripts/Hooks/Other.lua"), None);
+    }
+
+    /// The formatter agrees with `date -u` at the epoch, on a leap day, on
+    /// a century that is not a leap year, and at the last second of 9999.
+    #[test]
+    fn utc_formats_as_the_loader_does() {
+        assert_eq!(utc(0), "1970-01-01 00:00:00");
+        assert_eq!(utc(951_782_400), "2000-02-29 00:00:00");
+        assert_eq!(utc(1_700_000_000), "2023-11-14 22:13:20");
+        assert_eq!(utc(4_107_542_399), "2100-02-28 23:59:59");
+        assert_eq!(utc(4_107_542_400), "2100-03-01 00:00:00");
+        assert_eq!(utc(253_402_300_799), "9999-12-31 23:59:59");
     }
 }

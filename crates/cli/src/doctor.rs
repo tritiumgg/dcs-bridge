@@ -6,9 +6,10 @@
 
 use std::io::{self, BufReader};
 use std::path::{MAIN_SEPARATOR_STR, Path, PathBuf};
+use std::time::UNIX_EPOCH;
 use std::{fmt, fs};
 
-use crate::dcslog::{self, Start};
+use crate::dcslog::{self, Identity, Start};
 
 /// The files a release extracts over the write directory, each of which
 /// the bridge needs to start. The paths are the write directory's, with
@@ -164,11 +165,58 @@ fn start(dir: &Path, report: &mut Report) {
         Ok(Start::Disabled(line)) => report.fail(format!("{log}: {line}")),
         Ok(Start::Banner { banner, stop }) => {
             report.ok(format!("{log}: {banner}"));
+            same_build(dir, &banner, report);
             match stop {
                 None => report.ok("the hook driver started"),
                 Some(line) => report.fail(format!("{log}: {line}")),
             }
         }
+    }
+}
+
+/// One line saying whether the loader and the hook driver are the files
+/// the banner names. A difference means the install changed after DCS last
+/// started, so what the log says is about other files.
+fn same_build(dir: &Path, banner: &str, report: &mut Report) {
+    let mut changed = Vec::new();
+    for rel in [LOADER, DRIVER] {
+        let Some(logged) = dcslog::identity(banner, rel) else {
+            report.fail(format!("the banner does not name {}", shown(rel)));
+            return;
+        };
+        let installed = installed(&dir.join(rel));
+        if installed != logged {
+            changed.push(format!(
+                "{} is {installed} and the banner names it {logged}",
+                shown(rel)
+            ));
+        }
+    }
+    if changed.is_empty() {
+        report.ok("the banner names the installed loader and hook driver");
+    } else {
+        report.fail(format!(
+            "{}: it changed since DCS last started",
+            changed.join("; ")
+        ));
+    }
+}
+
+/// `path`'s identity as the loader would write it.
+fn installed(path: &Path) -> Identity {
+    let Ok(metadata) = fs::metadata(path) else {
+        return Identity::Missing;
+    };
+    // A time before the epoch, or one the file system does not keep,
+    // reads as the epoch, and so as a file changed since the banner.
+    let secs = metadata
+        .modified()
+        .ok()
+        .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+        .map_or(0, |since| since.as_secs());
+    Identity::Present {
+        size: metadata.len(),
+        modified: dcslog::utc(secs),
     }
 }
 
@@ -214,6 +262,24 @@ pub(crate) mod tests {
             fs::create_dir_all(path.parent().unwrap()).unwrap();
             fs::write(&path, rel).unwrap();
         }
+    }
+
+    /// The banner the loader would write for the loader and hook driver
+    /// under `dir`, after setting both files' times to a known second.
+    fn banner(dir: &Path) -> String {
+        let at = UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+        let mut names = Vec::new();
+        for rel in [LOADER, DRIVER] {
+            let path = dir.join(rel);
+            let file = fs::File::options().write(true).open(&path).unwrap();
+            file.set_modified(at).unwrap();
+            let size = fs::metadata(&path).unwrap().len();
+            names.push(format!(
+                "{}{MAIN_SEPARATOR_STR}{rel} {size} bytes, modified 2023-11-14 22:13:20",
+                dir.display()
+            ));
+        }
+        format!("loading, {}", names.join(", "))
     }
 
     /// The lines one check adds for `dir`, alone.
@@ -270,15 +336,18 @@ pub(crate) mod tests {
             )]
         );
 
+        install(&dir);
+        let text = banner(&dir);
+        let banner = format!("x INFO DCSBridge (Main): {text}\n");
         fs::create_dir_all(dir.join("Logs")).unwrap();
-        let banner = "x INFO DCSBridge (Main): loading, a 1 bytes, b 2 bytes\n";
-        fs::write(dir.join(DCS_LOG), banner).unwrap();
+        fs::write(dir.join(DCS_LOG), &banner).unwrap();
         let report = by(start, &dir);
         assert!(!report.failed(), "{report}");
         assert_eq!(
             marked(&report, Mark::Ok),
             [
-                format!("{}: loading, a 1 bytes, b 2 bytes", shown(DCS_LOG)),
+                format!("{}: {text}", shown(DCS_LOG)),
+                "the banner names the installed loader and hook driver".into(),
                 "the hook driver started".into()
             ]
         );
@@ -313,6 +382,35 @@ pub(crate) mod tests {
         assert!(
             marked(&report, Mark::Fail)[0].starts_with("no banner"),
             "{report}"
+        );
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A hook driver replaced after DCS started is named with both sizes
+    /// and times, and the loader, unchanged, is not.
+    #[test]
+    fn a_file_changed_since_the_banner_is_named() {
+        let dir = scratch("changed");
+        install(&dir);
+        let banner = banner(&dir);
+        fs::write(dir.join(DRIVER), "a longer hook driver").unwrap();
+        let mut report = Report::default();
+        same_build(&dir, &banner, &mut report);
+        let fails = marked(&report, Mark::Fail);
+        assert_eq!(fails.len(), 1, "{report}");
+        assert!(fails[0].starts_with(&shown(DRIVER)), "{report}");
+        assert!(
+            fails[0].contains("20 bytes")
+                && fails[0].contains("the banner names it 42 bytes, modified 2023-11-14 22:13:20"),
+            "{report}"
+        );
+        assert!(!fails[0].contains(&shown(LOADER)), "{report}");
+
+        let mut report = Report::default();
+        same_build(&dir, "loading, nothing", &mut report);
+        assert_eq!(
+            marked(&report, Mark::Fail),
+            [format!("the banner does not name {}", shown(LOADER))]
         );
         fs::remove_dir_all(&dir).unwrap();
     }
