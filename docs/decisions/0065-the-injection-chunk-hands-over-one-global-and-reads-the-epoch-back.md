@@ -56,7 +56,9 @@ global the sim driver set: `OK|loaded <epoch>`.
   last line can read the epoch from, and changes that line in the same
   commit.
 - **The literal.** A value crosses as Lua source the chunk compiles back to
-  the same value. Strings are written with `%q`, numbers with `%.17g`, and
+  the same value. Strings are written with `%q`, with a carriage return
+  escaped after it, since Lua 5.1.0's `%q` leaves one bare and the lexer
+  refuses a bare one inside a string. Numbers are written with `%.17g`, and
   table keys in sorted order, numbers before strings, so one table always
   gives one text. A function, userdata, thread, a key that is neither a
   string nor a whole number, an infinity, a NaN or a cycle is refused, and

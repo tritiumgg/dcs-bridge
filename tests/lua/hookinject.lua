@@ -95,4 +95,121 @@ do
   print('ok  the sim driver publishes what the chunk handed it, and needs it')
 end
 
+-- Whether two values are the same, tables by their contents.
+local function same(a, b)
+  if type(a) ~= 'table' or type(b) ~= 'table' then
+    return a == b
+  end
+  for key, value in pairs(a) do
+    if not same(value, b[key]) then
+      return false
+    end
+  end
+  for key in pairs(b) do
+    if a[key] == nil then
+      return false
+    end
+  end
+  return true
+end
+
+-- The value literal's source compiles back to, with no global in reach.
+local function compiled(source)
+  local chunk = assert(loadstring('return ' .. source))
+  setfenv(chunk, {})
+  return chunk()
+end
+
+-- A nested table crosses whole: strings whatever bytes they hold, numbers
+-- to the last bit, booleans, list and string keys, and a table two keys
+-- share.
+do
+  local driver = install()
+  local shared = { 1, 2 }
+  local value = {
+    quoted = 'a "quote", a \\ and a \'',
+    lines = 'one\ntwo\r\nthree',
+    zero = 'a\0b',
+    high = '\255\128',
+    third = 1 / 3,
+    big = 2 ^ 53,
+    negative = -0.5,
+    yes = true,
+    no = false,
+    list = { 'a', 'b', { deep = { deeper = 'c' } } },
+    [1] = 'first',
+    [-4] = 'negative key',
+    ['not a name'] = 1,
+    left = shared,
+    right = shared,
+  }
+  local source = assert(driver.injection.literal(value, 'value'))
+  assert(same(compiled(source), value), 'the value did not cross whole: ' .. source)
+  print('ok  a nested table crosses as source and compiles back the same')
+end
+
+-- One table gives one text, whatever order its keys went in.
+do
+  local driver = install()
+  local a, b = {}, {}
+  for i = 1, 50 do
+    a['k' .. i] = i
+    a[i] = i
+  end
+  for i = 50, 1, -1 do
+    b[i] = i
+    b['k' .. i] = i
+  end
+  assert(driver.injection.literal(a, 'a') == driver.injection.literal(b, 'b'),
+    'two insertion orders gave two texts')
+  print('ok  one table gives one text')
+end
+
+-- A hundred tables nested inside one another cross, and compile inside
+-- the chunk's own wrapping. A hundred and one are refused, naming the
+-- table past the bound, before the chunk fails to compile.
+do
+  local driver = install()
+  local function nest(n)
+    local value = {}
+    for _ = 2, n do
+      value = { n = value }
+    end
+    return value
+  end
+  local source = assert(driver.injection.literal(nest(100), 'options'))
+  assert(loadstring('DCSBridge_load = {settings={options=' .. source .. '}}'),
+    'a hundred nested tables did not compile inside the chunk')
+  local refused, reason = driver.injection.literal(nest(101), 'options')
+  local deepest = 'options' .. string.rep('.n', 100)
+  assert(refused == nil, 'a hundred and one nested tables crossed')
+  assert(reason == deepest .. ' nests more than 100 tables deep, which does not cross as source',
+    'the refusal was ' .. tostring(reason))
+  print('ok  a table nested past the bound is refused, naming its path')
+end
+
+-- A value that does not compile back is refused, naming its path.
+do
+  local driver = install()
+  local cycle = {}
+  cycle.inner = { back = cycle }
+  local cases = {
+    { { builtin = { resync = function() end } }, 'options.builtin.resync is a function' },
+    { { [1.5] = 'x' }, 'options has a number key 1.5' },
+    { { [true] = 'x' }, 'options has a boolean key true' },
+    { { n = 0 / 0 }, 'options.n is ' },
+    { { n = math.huge }, 'options.n is inf' },
+    { { ['a b'] = { c = -math.huge } }, 'options["a b"].c is -inf' },
+    { cycle, 'options.inner.back holds a table that holds it' },
+    { { co = coroutine.create(function() end) }, 'options.co is a thread' },
+  }
+  for _, case in ipairs(cases) do
+    local source, reason = driver.injection.literal(case[1], 'options')
+    assert(source == nil, 'a value with no literal gave ' .. tostring(source))
+    assert(reason:find(case[2], 1, true) == 1,
+      'the refusal was ' .. reason .. ', expected ' .. case[2])
+  end
+  print('ok  a value that does not cross is refused, naming its path')
+end
+
 hook.remove()

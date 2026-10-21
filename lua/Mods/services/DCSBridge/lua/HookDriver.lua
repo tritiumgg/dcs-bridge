@@ -570,6 +570,111 @@ function log.open(dir)
   prune(dir)
 end
 
+-- Sim driver injection. dostring_in passes no arguments, so every value
+-- the sim driver is handed crosses as source text inside the chunk. ADR 0065.
+local injection = {}
+
+-- A string as a quoted literal. Lua 5.1.0's %q leaves a carriage return
+-- bare, and the lexer refuses one inside a string, so it is escaped here.
+-- A backslash before it is already doubled, so the escape stands alone.
+local function quoted(s)
+  return (string.format('%q', s):gsub('\r', '\\r'))
+end
+
+-- A key's place after path, for a refusal that names where a value is.
+local function step(path, key)
+  if type(key) == 'string' and key:find('^[%a_][%w_]*$') then
+    return path .. '.' .. key
+  end
+  if type(key) == 'string' then
+    return path .. '[' .. quoted(key) .. ']'
+  end
+  return path .. '[' .. tostring(key) .. ']'
+end
+
+-- A number that is a whole number, which excludes the infinities and NaN.
+local function whole(n)
+  return type(n) == 'number' and n == math.floor(n) and n ~= math.huge and n ~= -math.huge
+end
+
+-- Numbers before strings, each ascending, so a table's keys are written in
+-- one order whatever order they were inserted in.
+local function before(a, b)
+  if type(a) ~= type(b) then
+    return type(a) == 'number'
+  end
+  return a < b
+end
+
+-- The deepest a table nests in one literal. Lua 5.1 refuses to compile a
+-- chunk nested past about 200 syntax levels, and the chunk wraps each
+-- literal in a few of its own, so the bound sits well under that.
+local NESTING = 100
+
+-- value as source, appended to out, or the reason it has none. open holds
+-- the tables on the path to value, so a cycle is refused and a table two
+-- keys share is written twice. depth counts them.
+local function written(value, path, open, out, depth)
+  local kind = type(value)
+  if kind == 'string' then
+    out[#out + 1] = quoted(value)
+  elseif kind == 'number' then
+    if value ~= value or value == math.huge or value == -math.huge then
+      return path .. ' is ' .. tostring(value) .. ', which does not cross as source'
+    end
+    -- Seventeen significant digits give back the same double.
+    out[#out + 1] = string.format('%.17g', value)
+  elseif kind == 'boolean' then
+    out[#out + 1] = tostring(value)
+  elseif kind == 'table' then
+    if open[value] then
+      return path .. ' holds a table that holds it, which does not cross as source'
+    end
+    if depth >= NESTING then
+      return path .. ' nests more than ' .. NESTING .. ' tables deep, which does not cross as source'
+    end
+    open[value] = true
+    local keys = {}
+    for key in pairs(value) do
+      if type(key) ~= 'string' and not whole(key) then
+        return path .. ' has a ' .. type(key) .. ' key ' .. text(key)
+          .. ', and a key that crosses is a string or a whole number'
+      end
+      keys[#keys + 1] = key
+    end
+    table.sort(keys, before)
+    out[#out + 1] = '{'
+    for _, key in ipairs(keys) do
+      if type(key) == 'string' then
+        out[#out + 1] = '[' .. quoted(key) .. ']='
+      else
+        out[#out + 1] = '[' .. string.format('%.17g', key) .. ']='
+      end
+      local refused = written(value[key], step(path, key), open, out, depth + 1)
+      if refused then
+        return refused
+      end
+      out[#out + 1] = ','
+    end
+    out[#out + 1] = '}'
+    open[value] = nil
+  else
+    return path .. ' is a ' .. kind .. ', which does not cross as source'
+  end
+end
+
+-- value as Lua source that compiles back to the same value, or nil and the
+-- reason it does not cross, naming the path to the value that refused.
+-- path names value itself.
+function injection.literal(value, path)
+  local out = {}
+  local refused = written(value, path, {}, out, 0)
+  if refused then
+    return nil, refused
+  end
+  return table.concat(out)
+end
+
 -- The broker module, where the release zip puts it.
 local MODULE = lfs.writedir() .. 'Mods/services/DCSBridge/bin/lua-dcsbridge.dll'
 
@@ -601,6 +706,7 @@ local driver = {
   GRAMMAR_VERSION = GRAMMAR_VERSION,
   config = config,
   dcs = dcs,
+  injection = injection,
   log = log,
 }
 
