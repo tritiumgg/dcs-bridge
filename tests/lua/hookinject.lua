@@ -10,6 +10,7 @@ local MODULE = ...
 assert(MODULE, 'usage: lua tests/lua/hookinject.lua <module path>')
 
 package.path = arg[0]:match('^(.*)/[^/]+$') .. '/support/?.lua;' .. package.path
+local dcs = require('dcs')
 local hook = require('hook')
 
 local install = hook.install
@@ -50,6 +51,48 @@ do
   net.refusal = 'refused'
   assert(net.dostring_in('server', 'return 1') == 'refused', 'a refusal did not answer')
   print('ok  an unknown state, a raise and a refusal each answer as DCS does')
+end
+
+-- Each of the two drivers declares one grammar line of the shape injection
+-- reads, and they declare the same value.
+do
+  local root = dcs.root() .. 'lua/'
+  local found = {}
+  for _, path in ipairs({ hook.DRIVER, hook.SIM }) do
+    local values = {}
+    for line in assert(io.open(root .. path, 'rb')):lines() do
+      local value = line:match("^local GRAMMAR_VERSION = '([^']*)'$")
+      if value then
+        values[#values + 1] = value
+      end
+    end
+    assert(#values == 1, path .. ' declares ' .. #values .. ' grammar lines, expected 1')
+    found[#found + 1] = values[1]
+  end
+  assert(found[1] == found[2], 'the hook driver is grammar ' .. found[1]
+    .. ' and the sim driver is grammar ' .. found[2])
+  print('ok  both drivers declare one grammar, the same one')
+end
+
+-- The sim driver takes the parameters the chunk set, clears their name and
+-- publishes them under DCSBridge. Run without them, it raises and sets
+-- nothing.
+do
+  local driver, dir = install()
+  local server = net.states.server
+  local params = { epoch = 7 }
+  server.DCSBridge_load = params
+  server.dofile(dir .. hook.SIM)
+  assert(server.DCSBridge.load == params, 'the sim driver published ' .. tostring(server.DCSBridge.load))
+  assert(server.DCSBridge.grammar == driver.GRAMMAR_VERSION,
+    'the sim driver published grammar ' .. tostring(server.DCSBridge.grammar))
+  assert(rawget(server, 'DCSBridge_load') == nil, 'the sim driver left DCSBridge_load set')
+
+  local mission = net.states.mission
+  local ok, err = pcall(mission.dofile, dir .. hook.SIM)
+  assert(not ok and err:find('DCSBridge_load is not a table'), 'a bare dofile answered ' .. tostring(err))
+  assert(rawget(mission, 'DCSBridge') == nil, 'a bare dofile published DCSBridge')
+  print('ok  the sim driver publishes what the chunk handed it, and needs it')
 end
 
 hook.remove()

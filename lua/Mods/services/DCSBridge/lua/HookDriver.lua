@@ -588,10 +588,17 @@ local SCHEMA = lfs.writedir() .. 'Mods/services/DCSBridge/schema.pb'
 -- two cannot move apart unnoticed. ADR 0054.
 local INTERFACE = '5'
 
+-- The grammar of what this file hands the sim driver. SimDriver.lua
+-- declares its own on a line of this shape, and injection reads that line
+-- from disk and refuses a file whose value differs. A test compares the two
+-- lines. ADR 0065.
+local GRAMMAR_VERSION = '1'
+
 -- The table this file returns. start reaches open through it, so a test
 -- that replaces open runs start with no module at MODULE. ADR 0050.
 local driver = {
   INTERFACE = INTERFACE,
+  GRAMMAR_VERSION = GRAMMAR_VERSION,
   config = config,
   dcs = dcs,
   log = log,
