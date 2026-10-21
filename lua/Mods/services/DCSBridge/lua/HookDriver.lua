@@ -740,6 +740,133 @@ function injection.files(dir, disabled)
   return files
 end
 
+-- The autoexec.cfg lines that let the hook driver inject, built as the
+-- union of what the file holds and what the bridge asks for. ADR 0068.
+local policy = {}
+
+-- The two keys under net that gate dostring_in, and the names the bridge
+-- asks for under each, in the order its lines write them. ADR 0046.
+policy.KEYS = {
+  { 'allow_unsafe_api', { 'userhooks' } },
+  { 'allow_dostring_in', { 'server', 'mission', 'scripting', 'gui', 'export', 'config' } },
+}
+
+-- A value every index and every call answers with itself, and every
+-- assignment into leaves as it was. autoexec.cfg is DCS's file and may call
+-- DCS's functions or read its globals; against this it runs on to its two
+-- keys.
+local STUB = setmetatable({}, {
+  __index = function(stub)
+    return stub
+  end,
+  __call = function(stub)
+    return stub
+  end,
+  __newindex = function() end,
+})
+
+-- The base functions that touch no state, and the libraries a file may
+-- build a list with, each a copy, so nothing the file does reaches this
+-- state's own.
+local PURE = {
+  'assert', 'error', 'ipairs', 'next', 'pairs', 'pcall', 'select', 'tonumber',
+  'tostring', 'type', 'unpack',
+}
+local LIBRARIES = { 'math', 'string', 'table' }
+
+-- The environment one run of the file sees: its own net table, the pure
+-- functions and library copies, and STUB for every other name.
+local function sandbox()
+  local env = {}
+  for _, name in ipairs(PURE) do
+    env[name] = _G[name]
+  end
+  for _, name in ipairs(LIBRARIES) do
+    local copy = {}
+    for key, value in pairs(_G[name]) do
+      copy[key] = value
+    end
+    env[name] = copy
+  end
+  env[NET] = {}
+  return setmetatable(env, {
+    __index = function()
+      return STUB
+    end,
+  })
+end
+
+-- The file at path run, and the names it sets under each key, as a table
+-- from key name to list. Or nil, the reason it does not read, and true when
+-- that reason is that the file is absent. A file that replaces net with a
+-- table of its own is read from that table.
+function policy.read(path)
+  local f, reason, errno = io.open(path, 'rb')
+  if not f then
+    if errno == 2 then
+      return nil, 'no ' .. path, true
+    end
+    return nil, path .. ' does not open: ' .. tostring(reason)
+  end
+  -- A directory opens on some platforms and then reads nothing, not even
+  -- an empty string.
+  local source, unread = f:read('*a')
+  f:close()
+  if type(source) ~= 'string' then
+    return nil, path .. ' does not read: ' .. tostring(unread)
+  end
+  -- The byte-order mark and the chunk name, as config.read has them.
+  source = source:gsub('^\239\187\191', '')
+  local chunk, err = loadstring(source, '@' .. path)
+  if not chunk then
+    return nil, path .. ' does not compile: ' .. tostring(err)
+  end
+  local env = sandbox()
+  setfenv(chunk, env)
+  local ran, raised = pcall(chunk)
+  if not ran then
+    return nil, path .. ' raised: ' .. text(raised)
+  end
+  local found = rawget(env, NET)
+  local lists = {}
+  if type(found) == 'table' then
+    for _, key in ipairs(policy.KEYS) do
+      local list = rawget(found, key[1])
+      if type(list) == 'table' then
+        lists[key[1]] = list
+      end
+    end
+  end
+  return lists
+end
+
+-- One line per key, each a whole statement an operator pastes over the
+-- key's line or adds: the names lists holds under the key, in order, then
+-- each name the bridge asks for that it lacks. lists is what policy.read
+-- returned, or nil for none. An entry that is not a string names no state
+-- and is left out.
+function policy.lines(lists)
+  lists = lists or {}
+  local lines = {}
+  for _, key in ipairs(policy.KEYS) do
+    local names, seen = {}, {}
+    local function add(name)
+      if type(name) == 'string' and not seen[name] then
+        seen[name] = true
+        names[#names + 1] = quoted(name)
+      end
+    end
+    for _, name in ipairs(lists[key[1]] or {}) do
+      add(name)
+    end
+    for _, name in ipairs(key[2]) do
+      add(name)
+    end
+    lines[#lines + 1] = NET .. '.' .. key[1] .. ' = {' .. table.concat(names, ', ') .. '}'
+  end
+  return lines
+end
+
 -- The broker module, where the release zip puts it.
 local MODULE = lfs.writedir() .. 'Mods/services/DCSBridge/bin/lua-dcsbridge.dll'
 
@@ -773,6 +900,7 @@ local driver = {
   dcs = dcs,
   injection = injection,
   log = log,
+  policy = policy,
 }
 
 -- What start read, split by owner, and the broker module once it opened,
