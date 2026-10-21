@@ -182,13 +182,13 @@ do
     }
   end
   local ran = false
-  driver.callbacks.onSimulationFrame = function()
+  driver.callbacks.onSimulationPause = function()
     ran = true
     return 1
   end
   assert(not pcall(driver.start, { banner = 'the banner' }), 'a refused configure started')
   assert(#DCS.registered == 1, #DCS.registered .. ' tables registered, expected 1')
-  local n = select('#', DCS.registered[1].onSimulationFrame(0))
+  local n = select('#', DCS.registered[1].onSimulationPause(0))
   assert(not ran, 'a body ran behind a start that stopped')
   assert(n == 0, n .. ' values returned behind a start that stopped')
   print('ok  a start that stops after registering calls no body')
@@ -202,13 +202,13 @@ do
     error('the schema is too large', 0)
   end)
   local ran = false
-  driver.callbacks.onSimulationFrame = function()
+  driver.callbacks.onSimulationPause = function()
     ran = true
     return 1
   end
   assert(not pcall(driver.start, { banner = 'the banner' }), 'a refused schema started')
   assert(#DCS.registered == 1, #DCS.registered .. ' tables registered, expected 1')
-  local n = select('#', DCS.registered[1].onSimulationFrame(0))
+  local n = select('#', DCS.registered[1].onSimulationPause(0))
   assert(not ran, 'a body ran behind a start that stopped at the schema')
   assert(n == 0, n .. ' values returned behind a start that stopped at the schema')
   print('ok  a start that stops at the schema calls no body')
@@ -235,13 +235,13 @@ end
 do
   local driver = install()
   local seen
-  driver.callbacks.onSimulationFrame = function(t)
+  driver.callbacks.onSimulationPause = function(t)
     seen = t
   end
   local open = recording(driver)
   driver.open = open
   driver.start({ banner = 'the banner' })
-  DCS.registered[1].onSimulationFrame(42)
+  DCS.registered[1].onSimulationPause(42)
   assert(seen == 42, 'the body set before start saw ' .. tostring(seen))
   print('ok  a body set before start is the one called')
 end
@@ -257,24 +257,26 @@ local function errors(dir)
   return found
 end
 
--- A per-frame raise reaches DCS on no call, writes one line to
--- DCSBridge.log, and writes nothing to dcs.log.
+-- A body that raises on every call, as a per-frame one would, reaches DCS
+-- on no call, writes one line to DCSBridge.log, and writes nothing to
+-- dcs.log. A name with no runtime body carries it, since the frame's body
+-- has one owner. ADR 0061.
 do
   local driver, dir, _, callbacks = started()
-  driver.callbacks.onSimulationFrame = function()
+  driver.callbacks.onSimulationPause = function()
     error('deliberate', 0)
   end
   local before = #log.lines
   for _ = 1, 1000 do
-    local n = select('#', callbacks.onSimulationFrame())
+    local n = select('#', callbacks.onSimulationPause())
     assert(n == 0, n .. ' values returned by a raising body')
   end
   local found = errors(dir)
   assert(#found == 1, #found .. ' ERROR lines over 1000 raises, expected 1')
-  assert(found[1] == 'ERROR onSimulationFrame raised: deliberate; suppressed until the next mission load',
+  assert(found[1] == 'ERROR onSimulationPause raised: deliberate; suppressed until the next mission load',
     'the line was ' .. found[1])
   assert(#log.lines == before, (#log.lines - before) .. ' lines written to dcs.log')
-  print('ok  a per-frame raise is contained and logged once, outside dcs.log')
+  print('ok  a raise on every call is contained and logged once, outside dcs.log')
 end
 
 -- A raising onPlayerTry* body returns nothing, so the event passes on, and
@@ -303,16 +305,16 @@ end
 -- reaching DCS.
 do
   local driver, dir, _, callbacks = started()
-  driver.callbacks.onSimulationFrame = function()
+  driver.callbacks.onSimulationPause = function()
     error(setmetatable({}, { __tostring = function() error('again') end }))
   end
   for _ = 1, 3 do
-    local n = select('#', callbacks.onSimulationFrame())
+    local n = select('#', callbacks.onSimulationPause())
     assert(n == 0, n .. ' values returned by a body raising an unprintable value')
   end
   local found = errors(dir)
   assert(#found == 1, #found .. ' ERROR lines for an unprintable raise, expected 1')
-  assert(found[1]:find('^ERROR onSimulationFrame raised: '), found[1])
+  assert(found[1]:find('^ERROR onSimulationPause raised: '), found[1])
   print('ok  a raise that does not convert to text is logged once')
 end
 
@@ -325,11 +327,11 @@ do
     tried = tried + 1
     error('the log is gone', 0)
   end
-  driver.callbacks.onSimulationFrame = function()
+  driver.callbacks.onSimulationPause = function()
     error('deliberate', 0)
   end
   local ok, n = pcall(function()
-    return select('#', callbacks.onSimulationFrame())
+    return select('#', callbacks.onSimulationPause())
   end)
   assert(ok, 'a raising logger raised into DCS: ' .. tostring(n))
   assert(n == 0, n .. ' values returned behind a raising logger')
@@ -340,15 +342,15 @@ end
 -- The next mission load lets a raise log once more, and only once.
 do
   local driver, dir, _, callbacks = started()
-  driver.callbacks.onSimulationFrame = function()
+  driver.callbacks.onSimulationPause = function()
     error('deliberate', 0)
   end
   for _ = 1, 1000 do
-    callbacks.onSimulationFrame()
+    callbacks.onSimulationPause()
   end
   callbacks.onMissionLoadEnd()
   for _ = 1, 1000 do
-    callbacks.onSimulationFrame()
+    callbacks.onSimulationPause()
   end
   local found = errors(dir)
   assert(#found == 2, #found .. ' ERROR lines across a mission load, expected 2')
