@@ -711,12 +711,12 @@ function injection.chunk(path, params)
   }, '\n')
 end
 
--- The sim driver's extension files in dir, a directory path with a trailing
+-- Either driver's extension files in dir, a directory path with a trailing
 -- slash: every *.lua it holds as a full path, the *.gen.lua files first and
 -- each part in name order, less each name in disabled. A directory that is
 -- absent or does not list is no files, and logs nothing, since most
--- installs have none. SimDriver.builtin.lua is not here: the sim driver
--- loads it by name and reads the disabled list itself. ADR 0065.
+-- installs have none. The shipped built-ins files are not here: each driver
+-- loads its own by name. ADR 0065, ADR 0070.
 function injection.files(dir, disabled)
   local skip = {}
   for _, name in ipairs(disabled) do
@@ -948,6 +948,42 @@ end
 
 -- The sim driver's extension directory, which the hook driver lists for it.
 local SIMDRIVER_D = 'DCSBridge/simdriver.d/'
+
+-- The hook driver's own extension directory, which start lists and loads.
+-- ADR 0070.
+local HOOKDRIVER_D = 'DCSBridge/hookdriver.d/'
+
+-- The counts the hook driver keeps of its own work. ADR 0070.
+state.counters = { hook_driver_files_failed_total = 0 }
+
+-- A copy of the counts, so a caller cannot move them.
+function driver.counters()
+  local copy = {}
+  for name, value in pairs(state.counters) do
+    copy[name] = value
+  end
+  return copy
+end
+
+-- Run each file in paths, in order, as a bare chunk with no argument under
+-- the global environment, as DCS runs a Scripts/Hooks file. A file that
+-- does not load or raises is one ERROR line and one count, and the rest
+-- still run: one operator's file must not keep the bridge from starting.
+-- ADR 0070.
+local function chain(paths)
+  for _, path in ipairs(paths) do
+    local chunk, err = loadfile(path)
+    local ran = chunk ~= nil
+    if ran then
+      ran, err = pcall(chunk)
+    end
+    if not ran then
+      state.counters.hook_driver_files_failed_total =
+        state.counters.hook_driver_files_failed_total + 1
+      log.error('extension file skipped: ' .. path .. ': ' .. text(err))
+    end
+  end
+end
 
 -- The grammar the file at path declares, read by the one-line shape both
 -- drivers write it in, or nil and the reason there is none.
@@ -1444,6 +1480,10 @@ function driver.start(ctx)
     log.warn('schema ' .. sha256 .. ' but HookDriver.gen.lua was generated from '
       .. state.gen.schema_sha256)
   end
+  -- After the bind, since a file that fails is contained and never stops
+  -- the start, and before the start is marked finished, so no callback
+  -- body runs while the files load. ADR 0070.
+  chain(injection.files(lfs.writedir() .. HOOKDRIVER_D, state.hook.hook_driver_disabled_files))
   -- Last, so the callbacks run their bodies only behind a start that
   -- finished. A stop added to start goes above this line. ADR 0061.
   state.started = true
