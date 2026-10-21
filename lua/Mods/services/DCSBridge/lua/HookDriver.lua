@@ -5,6 +5,50 @@
 -- different thing, so this one is reached under this name only.
 local dcslog = log
 
+-- A value as text, for a log line. A table whose __tostring raises would
+-- otherwise raise in the path that reports a raise.
+local function text(value)
+  local ok, shown = pcall(tostring, value)
+  if ok and type(shown) == 'string' then
+    return shown
+  end
+  return 'a value that does not convert to text'
+end
+
+-- The namespace DCS's hook functions live under. ED is renaming it, and
+-- every call in this file reaches it through dcs.call, so the rename is an
+-- edit to this line alone. ADR 0060.
+local NAMESPACE = 'DCS'
+
+local dcs = {}
+
+-- pcall's answer as dcs.call returns it, every result kept, a trailing nil
+-- included.
+local function settled(name, ok, ...)
+  if not ok then
+    return false, NAMESPACE .. '.' .. name .. ' raised: ' .. text((...))
+  end
+  return true, ...
+end
+
+-- The namespace's function name called with the arguments, alone and under
+-- pcall. Returns true and its results, or false and the reason: the
+-- namespace or the function is missing, or what the call raised. It never
+-- raises. The namespace is looked up at each call, so a table DCS replaces
+-- after this file loads is the one reached. Both lookups are raw, so a
+-- metatable whose __index raises cannot raise through here.
+function dcs.call(name, ...)
+  local namespace = rawget(_G, NAMESPACE)
+  if type(namespace) ~= 'table' then
+    return false, 'no ' .. NAMESPACE .. ' namespace'
+  end
+  local fn = rawget(namespace, name)
+  if type(fn) ~= 'function' then
+    return false, NAMESPACE .. '.' .. name .. ' is not a function'
+  end
+  return settled(name, pcall(fn, ...))
+end
+
 local LEVELS = { error = 1, warn = 2, info = 3, debug = 4 }
 local NAMES = { 'ERROR', 'WARN', 'INFO', 'DEBUG' }
 
@@ -533,6 +577,7 @@ local INTERFACE = '5'
 local driver = {
   INTERFACE = INTERFACE,
   config = config,
+  dcs = dcs,
   log = log,
 }
 
