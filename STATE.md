@@ -18,7 +18,7 @@ is just deleted. Write entries as one or two lines, never paragraphs.
 
 ## In progress
 
-Nothing. 4.5 is built; 4.6 is next.
+Nothing. 4.6 is built; 4.7 is next.
 
 *One task at most. Say what is done, what is not, and where to resume. Say what
 is committed and what is only in the working tree. Say what is knowingly
@@ -26,25 +26,25 @@ broken. Empty this when the task closes.*
 
 ## Just finished
 
+- **4.6** — `shim.tick` answers the effective `enabled`; the `onSimulationFrame` body ticks first on every frame, enabled or not, and takes the switch from the answer, a nil keeping it; start and reload take the file's value; one INFO line per move; `driver.enabled()` is the gate, named on plan rows 4.7, 4.12, 6.1 and 8.1; agent-verified under stock Lua and Rust, the live `SetEnabled` round trip is the maintainer's (PR #99 "With DCS"). PR #99, ADR 0063.
 - **4.5** — every `DCS.*` call through `dcs.call`, alone and guarded; sixteen callbacks registered once before `configure`, inert until start's last line; each body under `pcall`, a raise logged once per name to `DCSBridge.log` until the next `onMissionLoadEnd`, nothing to `dcs.log`; agent-verified under stock Lua with a stubbed `DCS`, the live raise is the maintainer's (PR #98 "With DCS"). PR #98, ADR 0060 to 0062.
 - **4.4** — `driver.reload` re-reads the file and hands every broker key again; a file that does not read, is gone, or that the broker refuses keeps the running table and logs ERROR; `route` and `hook_driver_disabled_files` held and logged pending like the broker's keys; pairs checked against the ring sizes in force; agent-verified under stock Lua, the real module and a Rust ring-capacity test; nothing calls it until 4.12. PR #97, ADR 0057 to 0059.
-- **4.3** — interface compared before `configure`; `HookDriver.gen.lua` and `schema.pb` read before the bind, a missing one stops the start; the gen hash rides `configure` and `shim.classes` takes a sim hash, a mismatch counted and a warning; the zip carries the gen file; agent-verified under stock Lua and Rust tests, the live handshake hash and interface stop are the maintainer's (PR #96 "With DCS"). PR #96, ADR 0052 to 0056.
 
 *The last three at most, one line each. Git log holds the rest.*
 
 ## Next
 
-**Task 4.6** — kill switch: `enabled` at load, by `ReloadConfig` and by
-`SetEnabled`; the hook driver stops injection, drain, ferrying and eval and
-keeps calling `shim.tick`; the broker's `SetEnabled` answer and
-`bridge_enabled` in `Pong` landed in Phase 2. Starts from `driver.callbacks`,
-`state.started` and the registered callbacks in `HookDriver.lua`.
-Agent-verifiable under stock Lua and the Rust loopback tests; a disable and
-re-enable with no restart at a live install is the maintainer's.
+**Task 4.7** — sim driver injection from disk, escaped with `%q`, carrying
+the epoch id, the mission name, the sim-driver-tier settings, `options` and
+the enabled extension file list; the chunk measured against
+`bridge_return_max_bytes` and `GRAMMAR_VERSION` compared first. Starts from
+`driver.enabled()`, `state.sim` and `sim_driver_path` in `HookDriver.lua`;
+injection is the first path the switch gates. Agent-verifiable under stock
+Lua with a stubbed `net.dostring_in`; the live injection is the maintainer's.
 
 ## After that
 
-- **4.7** onward through Phase 4; 3.5 waits behind 7.6.
+- **4.8** onward through Phase 4; 3.5 waits behind 7.6.
 
 ## Carries forward
 
