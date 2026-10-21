@@ -176,6 +176,38 @@ mod lua {
 /// It is an opaque equality, not an order. ADR 0054.
 pub const INTERFACE_VERSION: &str = "5";
 
+/// What `dcsb doctor` finds the interface version by in the DLL's bytes,
+/// since it runs outside DCS and cannot open the module. The version on
+/// its own is too short to find. ADR 0074.
+const MARKER_PREFIX: &[u8] = b"dcsbridge-interface=";
+
+/// The prefix, the version, and a NUL ending it, since whatever the linker
+/// places after the marker can be printable.
+const MARKER_LEN: usize = MARKER_PREFIX.len() + INTERFACE_VERSION.len() + 1;
+
+/// The marker, built from [`INTERFACE_VERSION`] so the two cannot drift.
+/// `luaopen_dcsbridge` pushes its interface from these bytes, so the
+/// version on disk is the one the hook driver compares, and the linker
+/// cannot drop it.
+#[used]
+static INTERFACE_MARKER: [u8; MARKER_LEN] = marker();
+
+const fn marker() -> [u8; MARKER_LEN] {
+    let version = INTERFACE_VERSION.as_bytes();
+    let mut out = [0; MARKER_LEN];
+    let mut i = 0;
+    while i < MARKER_PREFIX.len() {
+        out[i] = MARKER_PREFIX[i];
+        i += 1;
+    }
+    let mut j = 0;
+    while j < version.len() {
+        out[i + j] = version[j];
+        j += 1;
+    }
+    out
+}
+
 /// Open the bridge in `state`, leaving one table on the stack.
 ///
 /// The table is this state's own and the bridge behind it is the process's.
@@ -221,10 +253,11 @@ pub unsafe extern "C" fn luaopen_dcsbridge(state: *mut core::ffi::c_void) -> cor
         );
         // -1 is the version string just pushed, so the table is at -2.
         lua::lua_setfield(state, -2, c"version".as_ptr());
+        let interface = &INTERFACE_MARKER[MARKER_PREFIX.len()..MARKER_LEN - 1];
         lua::lua_pushlstring(
             state,
-            INTERFACE_VERSION.as_ptr().cast::<core::ffi::c_char>(),
-            INTERFACE_VERSION.len(),
+            interface.as_ptr().cast::<core::ffi::c_char>(),
+            interface.len(),
         );
         lua::lua_setfield(state, -2, c"interface".as_ptr());
 
@@ -1803,6 +1836,18 @@ mod tests {
             found,
             [super::INTERFACE_VERSION],
             "{path} is not written against this module's interface"
+        );
+    }
+
+    /// The marker reads `dcsbridge-interface=` and the version, ended by a
+    /// NUL, and the slice `luaopen_dcsbridge` pushes is the version alone.
+    #[test]
+    fn the_marker_carries_the_interface_version() {
+        let expected = format!("dcsbridge-interface={}\0", super::INTERFACE_VERSION);
+        assert_eq!(super::INTERFACE_MARKER, expected.as_bytes());
+        assert_eq!(
+            &super::INTERFACE_MARKER[super::MARKER_PREFIX.len()..super::MARKER_LEN - 1],
+            super::INTERFACE_VERSION.as_bytes()
         );
     }
 }

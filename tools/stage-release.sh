@@ -97,6 +97,16 @@ else
     exit 1
 fi
 
+# dcsb doctor reads the broker's interface version from a marker in the DLL's
+# bytes, and a DLL without one reads as an older build. ADR 0074.
+if LC_ALL=C grep -qa 'dcsbridge-interface=' "$OUT/lua-dcsbridge.dll"; then
+    printf 'lua-dcsbridge.dll carries its interface marker\n'
+else
+    printf 'lua-dcsbridge.dll carries no dcsbridge-interface= marker.\n' >&2
+    printf 'Check INTERFACE_MARKER in crates/lua-module.\n' >&2
+    exit 1
+fi
+
 # DCS loads the broker with package.loadlib and an explicit path, asking for
 # luaopen_dcsbridge by name. A DLL that exports nothing stages exactly like a
 # correct one, and the next thing to notice would be DCS itself, at the far end
