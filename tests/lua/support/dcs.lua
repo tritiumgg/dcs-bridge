@@ -89,6 +89,19 @@ function dcs.log()
   }
 end
 
+-- DCS's hook namespace, holding the one function the hook driver calls at
+-- start. setUserCallbacks keeps each table it is handed in registered, so a
+-- test can call what DCS would.
+function dcs.DCS()
+  local registered = {}
+  return {
+    registered = registered,
+    setUserCallbacks = function(callbacks)
+      registered[#registered + 1] = callbacks
+    end,
+  }
+end
+
 -- The repository root with a trailing slash, from the path the test script
 -- was run by.
 function dcs.root()

@@ -5,8 +5,8 @@
 --
 -- Each case installs the two files into a scratch write directory, the way
 -- the release zip lays them out, and runs the loader the way DCS does, under
--- a stock Lua 5.1 with lfs and DCS's log stubbed. Run it through
--- tools/luatest.sh.
+-- a stock Lua 5.1 with lfs, DCS's log and the DCS namespace stubbed. Run it
+-- through tools/luatest.sh.
 
 package.path = arg[0]:match('^(.*)/[^/]+$') .. '/support/?.lua;' .. package.path
 local dcs = require('dcs')
@@ -49,6 +49,7 @@ local function install(files, edit)
   end
   lfs = dcs.lfs(dir)
   log = dcs.log()
+  DCS = dcs.DCS()
   return dir
 end
 

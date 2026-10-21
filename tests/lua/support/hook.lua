@@ -57,6 +57,7 @@ function hook.install(config, omit)
   end
   lfs = dcs.lfs(dir)
   log = dcs.log()
+  DCS = dcs.DCS()
   return dofile(dir .. hook.DRIVER), dir
 end
 
