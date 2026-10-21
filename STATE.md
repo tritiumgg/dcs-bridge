@@ -18,7 +18,7 @@ is just deleted. Write entries as one or two lines, never paragraphs.
 
 ## In progress
 
-Nothing. 4.10 is built; 4.11 is next.
+Nothing. 4.11 is built; 4.12 is next.
 
 *One task at most. Say what is done, what is not, and where to resume. Say what
 is committed and what is only in the working tree. Say what is knowingly
@@ -26,24 +26,27 @@ broken. Empty this when the task closes.*
 
 ## Just finished
 
+- **4.11** — after the schema line `start` runs `HookDriver.builtin.lua` (shipped, registers nothing), then `hookdriver.d` (`*.gen.lua` first, name order) as bare chunks; a missing, uncompilable or raising file logs one ERROR and counts in `hook_driver_files_failed_total`, held in the hook driver; `hook_driver_disabled_files` drops names from both; an absent directory is silent; plan row 5.13 holds the hook-side surface; agent-verified under stock Lua, ED's `lfs.dir` on a missing directory is the maintainer's (PR #104 "With DCS"). PR #104, ADR 0070.
 - **4.10** — with no `DCSBridge_load` the sim driver bootstraps itself: reads its 21 sim keys from `Config/DCSBridge.lua` with the hook driver's checks, lists `simdriver.d`, publishes `route = 'modified'`, logs one INFO or ERROR line to `dcs.log`, never raises; holds `package.loadlib` and returns an opener it never publishes; the shipped line is `pcall(dofile, ...)`; agent-verified under stock Lua, the edited `MissionScripting.lua` is the maintainer's (PR #103 "With DCS"). PR #103, ADR 0069.
 - **4.9** — `absent` (no `net` or `net.dostring_in`) and `noprefix` with an unpositioned string answer are policy refusals: one ERROR line per `autoexec.cfg` line, the union with the operator's file read under a stub environment, then a latch `driver.enabled()` consults until DCS restarts; `unreached` and a positioned answer do not fire; agent-verified under stock Lua, the live refusal is the maintainer's (PR #102 "With DCS"). PR #102, ADR 0067, 0068.
-- **4.8** — `injection.answer` sorts the `"server"` answer by shape into `loaded`, `epoch`, `failed`, `unknown`, `nil`, `invalid` and `noprefix`; each case but `loaded` logs one ERROR line of its own; `driver.inject` answers the case as a second value, `skipped`, `unprepared` or `unreached` before an answer; nothing disables; agent-verified under stock Lua, the live refusal text is the maintainer's (PR #101 "With DCS"). PR #101, ADR 0066.
 
 *The last three at most, one line each. Git log holds the rest.*
 
 ## Next
 
-**Task 4.11** — Hook-driver-side extension chain after `HookDriver.gen.lua`:
-`HookDriver.builtin.lua`, then `hookdriver.d\` in name order, with
-`hook_driver_disabled_files` honored and a raising file skipped and counted in
-`hook_driver_files_failed_total` (ADR 0055). Done when a raising file in
-`hookdriver.d\` is skipped and counted, the rest load, and an absent directory
-is silent. Agent-verifiable under stock Lua with a stub write directory.
+**Task 4.12** — Hook driver dispatch loop: ring poll in five callbacks,
+`hook_driver_dispatch_max_commands` per invocation, `hook_driver_dispatch_deferred_total`,
+nothing between `onMissionLoadBegin` and `onMissionLoadEnd`; registers the tables of
+`state.gen` without a second load (ADR 0055); adds the hook-package `ReloadConfig` record
+with `CAPABILITY_RELOAD` dispatched to `driver.reload`; poll and ferrying gated on
+`driver.enabled()`, `ReloadConfig` excepted (ADR 0063). Done when a hook-targeted command
+dispatches at the menu, a burst above the cap defers, and `ReloadConfig` moves a live key
+and logs a ring size pending at a live install. Dispatch and the cap are agent-verifiable
+under stock Lua; the live reload check is the maintainer's and pays the 4.4 carry-forward.
 
 ## After that
 
-- **4.12** onward through Phase 4; 3.5 waits behind 7.6.
+- **4.C1**, then **4.13** closes Phase 4; Phase 5 from 5.1; 3.5 waits behind 7.6.
 
 ## Carries forward
 
