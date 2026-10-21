@@ -182,6 +182,32 @@ do
     'the log after the refusal reads ' .. tostring(own[#own]))
 end
 
+-- The kill switch follows the file at a reload, with one INFO line each
+-- way, and a reload that is refused or finds the file gone leaves it.
+-- ADR 0063.
+do
+  local driver, dir = started('return { enabled = false }')
+  rewrite(dir, 'return { enabled = true }')
+  assert(driver.reload())
+  assert(driver.enabled() == true, 'a reload to enabled = true left the switch off')
+  local own = lines(dir)
+  assert(own[#own] == 'INFO bridge enabled', 'the last line is ' .. tostring(own[#own]))
+
+  rewrite(dir, 'return { enabled = false }')
+  assert(driver.reload())
+  assert(driver.enabled() == false, 'a reload to enabled = false left the switch on')
+  own = lines(dir)
+  assert(own[#own] == 'INFO bridge disabled', 'the last line is ' .. tostring(own[#own]))
+
+  rewrite(dir, 'return { enabled = true, route = 1 }')
+  assert(not driver.reload(), 'a file that does not read reloaded')
+  assert(driver.enabled() == false, 'a refused reload moved the switch')
+
+  assert(os.remove(dir .. 'Config/DCSBridge.lua'))
+  assert(not driver.reload(), 'an absent file reloaded')
+  assert(driver.enabled() == false, 'a reload with the file gone moved the switch')
+end
+
 -- A reload before the start has nothing to keep in force, and raises.
 do
   local driver = install()

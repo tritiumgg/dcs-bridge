@@ -585,6 +585,19 @@ local driver = {
 -- for the calls that come after it.
 local state = {}
 
+-- The kill switch as the hook driver last learned it: from the table it
+-- handed configure, at start and at reload, and from shim.tick, which
+-- answers what SetEnabled set. On until told otherwise, as the key's
+-- default is. ADR 0063.
+state.enabled = true
+
+-- The kill switch in effect. Every path that injects, drains, ferries
+-- commands or evaluates consults it, so a disabled bridge stops them all
+-- while the per-frame tick runs on. ADR 0063.
+function driver.enabled()
+  return state.enabled
+end
+
 -- Every DCS callback the bridge uses, registered once at start. DCS keeps a
 -- registered table for the life of the process, so the set carries every
 -- name any part of the bridge will need. ADR 0061.
@@ -721,6 +734,16 @@ local function report(answer)
   waits(answer.pending or {})
 end
 
+-- Hold the kill switch at enabled, with one INFO line when it moves. A call
+-- that changes nothing writes nothing, so a caller passes every value it
+-- learns through here. ADR 0063.
+local function switch(enabled)
+  if enabled ~= state.enabled then
+    log.info(enabled and 'bridge enabled' or 'bridge disabled')
+  end
+  state.enabled = enabled
+end
+
 -- The inbound ring sizes. The first configure allocates both rings and no
 -- later one resizes them, so the sizes it was handed are the ones in force
 -- until DCS restarts. ADR 0058.
@@ -785,6 +808,7 @@ function driver.start(ctx)
   end
   state.shim = shim
   report(answer)
+  switch(state.broker.enabled)
 
   -- The one stop after the bind. The broker then listens with no schema:
   -- its handshake carries no hash and GetSchema answers an error. ADR 0056.
@@ -853,6 +877,9 @@ function driver.reload()
   end
   report(answer)
   waits(pending)
+  -- The broker swaps its table whole, so the file's value is the one in
+  -- force now, over any SetEnabled since the last read.
+  switch(state.broker.enabled)
   return true, answer, pending
 end
 

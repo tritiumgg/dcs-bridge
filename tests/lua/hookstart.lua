@@ -281,6 +281,26 @@ do
   assert(own[#own] == 'ERROR ' .. err, 'the refusal is not logged: ' .. tostring(own[#own]))
 end
 
+-- The kill switch is the file's from the start: off with one INFO line
+-- after the broker's answer, and on by default with no line. ADR 0063.
+do
+  local driver, dir = install('return { enabled = false }')
+  driver.open = recording(driver)
+  driver.start({ banner = 'the banner' })
+  assert(driver.enabled() == false, 'a file with enabled = false started on')
+  local own = lines(dir)
+  assert(own[#own - 1] == 'INFO bridge disabled',
+    'the line before the hash is not the switch: ' .. tostring(own[#own - 1]))
+
+  driver, dir = install()
+  driver.open = recording(driver)
+  driver.start({ banner = 'the banner' })
+  assert(driver.enabled() == true, 'the defaults started off')
+  for _, line in ipairs(lines(dir)) do
+    assert(not line:find('bridge %a+abled'), 'a start that stays on logged ' .. line)
+  end
+end
+
 -- The real module, asked for at the shipped path and opened at the
 -- harness's. Port 0 lets the system pick, so the run collides with nothing.
 -- Its interface matches the driver's, it counts schema_sha256 as nothing
