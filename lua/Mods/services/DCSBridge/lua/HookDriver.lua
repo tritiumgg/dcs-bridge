@@ -30,26 +30,26 @@ local dcs = {}
 -- included.
 local function settled(namespace, name, ok, ...)
   if not ok then
-    return false, namespace .. '.' .. name .. ' raised: ' .. text((...))
+    return false, namespace .. '.' .. name .. ' raised: ' .. text((...)), 'raised'
   end
   return true, ...
 end
 
 -- The function name in the global table namespace, called with the
--- arguments, alone and under pcall. Returns true and its results, or false
--- and the reason: the namespace or the function is missing, or what the
--- call raised. It never raises. The namespace is looked up at each call, so
--- a table DCS replaces after this file loads is the one reached. Both
--- lookups are raw, so a metatable whose __index raises cannot raise through
--- here.
+-- arguments, alone and under pcall. Returns true and its results, or false,
+-- the reason and its kind: absent when the namespace or the function is
+-- missing, raised with what the call raised. It never raises. The namespace
+-- is looked up at each call, so a table DCS replaces after this file loads
+-- is the one reached. Both lookups are raw, so a metatable whose __index
+-- raises cannot raise through here.
 local function reach(namespace, name, ...)
   local found = rawget(_G, namespace)
   if type(found) ~= 'table' then
-    return false, 'no ' .. namespace .. ' namespace'
+    return false, 'no ' .. namespace .. ' namespace', 'absent'
   end
   local fn = rawget(found, name)
   if type(fn) ~= 'function' then
-    return false, namespace .. '.' .. name .. ' is not a function'
+    return false, namespace .. '.' .. name .. ' is not a function', 'absent'
   end
   return settled(namespace, name, pcall(fn, ...))
 end
@@ -60,7 +60,7 @@ function dcs.call(name, ...)
 end
 
 -- The chunk run in the named Lua state, through reach. Returns true and
--- what the state answered, or false and the reason. ADR 0064.
+-- what the state answered, or false, the reason and its kind. ADR 0064.
 function dcs.dostring(target, chunk)
   return reach(NET, 'dostring_in', target, chunk)
 end
@@ -1108,11 +1108,13 @@ local UNLOADED = {
 -- Inject the sim driver for epoch. Returns true when the sim driver's
 -- global reads back the epoch sent, and false otherwise, with one line
 -- logged either way, and as a second value the case: an answer case of
--- injection.answer, or skipped, unprepared or unreached for a call that
--- got no answer. The code that acts on a refusal branches on the name.
--- Only while the bridge is enabled, and only on the stock route: the
--- modified route loads the sim driver from MissionScripting.lua, so an
--- injection there would load it twice. ADR 0063, ADR 0065, ADR 0066.
+-- injection.answer, or one for a call that got no answer: skipped,
+-- unprepared, absent when net or its dostring_in is missing, as it is to a
+-- hook script the policy hides it from, and unreached when the call raised.
+-- The code that acts on a refusal branches on the name. Only while the
+-- bridge is enabled, and only on the stock route: the modified route loads
+-- the sim driver from MissionScripting.lua, so an injection there would
+-- load it twice. ADR 0063, ADR 0065, ADR 0066, ADR 0067.
 function driver.inject(epoch)
   if not driver.enabled() then
     log.info('injection skipped: bridge disabled')
@@ -1132,10 +1134,10 @@ function driver.inject(epoch)
   if not chunk then
     return false, 'unprepared'
   end
-  local ran, answer = dcs.dostring(TARGET, chunk)
+  local ran, answer, kind = dcs.dostring(TARGET, chunk)
   if not ran then
     log.error('injection did not run: ' .. answer)
-    return false, 'unreached'
+    return false, kind == 'absent' and 'absent' or 'unreached'
   end
   local case, detail = injection.answer(answer, epoch)
   if case == 'loaded' then

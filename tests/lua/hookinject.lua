@@ -598,8 +598,9 @@ do
 end
 
 -- A call that gets no answer names why: a skipped load, a refusal before
--- the call, or a call that did not run. A net that is gone is one ERROR
--- line, and nothing raises into DCS.
+-- the call, a net or dostring_in that is not there, or a call that raised.
+-- Each call that did not run is one ERROR line, and nothing raises into
+-- DCS.
 do
   local driver = started('return { route = "modified" }')
   local loaded, name = driver.inject(1)
@@ -620,13 +621,28 @@ do
   loaded, name = driver.inject(1)
   assert(loaded == false and name == 'unprepared', 'a grammar mismatch gave ' .. tostring(name))
 
-  driver, dir = started()
-  net = nil
-  loaded, name = driver.inject(1)
-  assert(loaded == false and name == 'unreached', 'an absent net gave ' .. tostring(name))
-  assert(#matching(dir, '^ERROR injection did not run: no net namespace$') == 1, 'an absent net was not logged')
-  assert(#matching(dir, 'raised') == 0, 'an injection raised')
-  print('ok  a call with no answer names why, and an absent net is one ERROR')
+  local cases = {
+    { 'absent', function()
+      net = nil
+    end, 'ERROR injection did not run: no net namespace' },
+    { 'absent', function()
+      net.dostring_in = nil
+    end, 'ERROR injection did not run: net.dostring_in is not a function' },
+    { 'unreached', function()
+      net.dostring_in = function()
+        error('deliberate', 0)
+      end
+    end, 'ERROR injection did not run: net.dostring_in raised: deliberate' },
+  }
+  for _, case in ipairs(cases) do
+    driver, dir = started()
+    case[2]()
+    loaded, name = driver.inject(1)
+    assert(loaded == false and name == case[1], case[3] .. ' gave ' .. tostring(name))
+    local found = matching(dir, '^ERROR ')
+    assert(#found == 1 and found[1] == case[3], 'the ' .. case[1] .. ' line was ' .. tostring(found[1]))
+  end
+  print('ok  a call with no answer names why, and one that did not run is one ERROR')
 end
 
 hook.remove()
