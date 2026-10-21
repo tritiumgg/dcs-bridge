@@ -22,10 +22,14 @@ local unreachable = setmetatable({}, {
 
 -- The sim driver run by a bare dofile in the mission state of a fresh
 -- install with config as Config/DCSBridge.lua, outside pcall, so a raise
--- fails the test. Returns the state, the write directory, the hook driver,
--- and what the dofile returned, packed.
-local function run(config)
+-- fails the test. before, when given, is called with the write directory
+-- first. Returns the state, the write directory, the hook driver, and what
+-- the dofile returned, packed.
+local function run(config, before)
   local driver, dir = hook.install(config)
+  if before then
+    before(dir)
+  end
   local mission = net.states.mission
   local stub = net
   net = unreachable
@@ -129,6 +133,32 @@ do
   assert(#info == 1 and info[1] == 'the sim driver loaded on the modified route: no '
     .. dir .. 'Config/DCSBridge.lua, defaults in force', 'the INFO line was ' .. tostring(info[1]))
   print('ok  an absent file is the defaults')
+end
+
+-- The bootstrap lists simdriver.d itself, in the hook driver's order: the
+-- *.lua files alone, *.gen.lua first, each part in name order, full paths,
+-- each name in sim_driver_disabled_files dropped. An absent directory is
+-- no files.
+do
+  local d
+  local mission = run('return { sim_driver_disabled_files = { "off.lua" } }', function(dir)
+    d = dir .. 'DCSBridge/simdriver.d/'
+    for _, name in ipairs({ 'b.lua', 'a.lua', 'z.gen.lua', 'notes.txt', 'off.lua', 'c.gen.lua' }) do
+      hook.write(d .. name, '')
+    end
+  end)
+  local files = rawget(mission, 'DCSBridge').load.files
+  local expected = { 'c.gen.lua', 'z.gen.lua', 'a.lua', 'b.lua' }
+  assert(#files == #expected, #files .. ' files listed, expected ' .. #expected)
+  for i, name in ipairs(expected) do
+    assert(files[i] == d .. name, 'file ' .. i .. ' is ' .. tostring(files[i]) .. ', expected ' .. name)
+  end
+
+  mission = run(nil)
+  files = rawget(mission, 'DCSBridge').load.files
+  assert(type(files) == 'table' and #files == 0, 'an absent directory listed files')
+  assert(#said('ERROR') == 0, 'an absent directory logged an ERROR')
+  print('ok  the bootstrap lists simdriver.d in order, less the disabled names')
 end
 
 -- A byte-order mark is dropped, as the hook driver drops it.

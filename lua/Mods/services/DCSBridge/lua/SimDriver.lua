@@ -57,6 +57,11 @@ end
 -- The operator's file, under the write directory. ADR 0051.
 local CONFIG = 'Config/DCSBridge.lua'
 
+-- The sim driver's extension directory, under the write directory. On the
+-- Stock route the hook driver lists it; on the Modified route this file
+-- does. ADR 0065, ADR 0069.
+local SIMDRIVER_D = 'DCSBridge/simdriver.d/'
+
 -- A value as text, for a log line. A table whose __tostring raises would
 -- otherwise raise in the path that reports a raise.
 local function text(value)
@@ -198,12 +203,46 @@ local function moved(values)
   return found
 end
 
+-- The extension files in dir, a directory path with a trailing slash, as
+-- the hook driver's injection.files lists them: every *.lua as a full
+-- path, the *.gen.lua files first and each part in name order, less each
+-- name in disabled. A directory that is absent or does not list is no
+-- files and no line, since most installs have none. ADR 0065.
+local function listed(dir, disabled)
+  local skip = {}
+  for _, name in ipairs(disabled) do
+    skip[name] = true
+  end
+  local gen, rest = {}, {}
+  local ok = pcall(function()
+    for name in lfs.dir(dir) do
+      if name:find('%.lua$') and not skip[name] then
+        local part = name:find('%.gen%.lua$') and gen or rest
+        part[#part + 1] = name
+      end
+    end
+  end)
+  if not ok then
+    return {}
+  end
+  table.sort(gen)
+  table.sort(rest)
+  local files = {}
+  for _, part in ipairs({ gen, rest }) do
+    for _, name in ipairs(part) do
+      files[#files + 1] = dir .. name
+    end
+  end
+  return files
+end
+
 -- The Modified route's load, from the operator's file, and the INFO line
 -- that reports it. Raises when the file does not read; the caller contains
 -- it. The epoch and the mission are nil: the hook driver allocates the
 -- epoch after this file runs, and injects nothing on this route. ADR 0069.
 local function bootstrap()
-  local path = lfs.writedir() .. CONFIG
+  local writedir = lfs.writedir()
+  local path = writedir .. CONFIG
   local settings, absent = read(path)
   if not settings then
     error(absent, 0)
@@ -214,6 +253,7 @@ local function bootstrap()
   end
   return {
     settings = settings,
+    files = listed(writedir .. SIMDRIVER_D, settings.sim_driver_disabled_files),
     route = 'modified',
   }, 'the sim driver loaded on the modified route: ' .. table.concat(parts, ', ')
 end
