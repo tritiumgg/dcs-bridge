@@ -18,7 +18,7 @@ is just deleted. Write entries as one or two lines, never paragraphs.
 
 ## In progress
 
-Nothing. 4.9 is built; 4.10 is next.
+Nothing. 4.10 is built; 4.11 is next.
 
 *One task at most. Say what is done, what is not, and where to resume. Say what
 is committed and what is only in the working tree. Say what is knowingly
@@ -26,25 +26,24 @@ broken. Empty this when the task closes.*
 
 ## Just finished
 
+- **4.10** — with no `DCSBridge_load` the sim driver bootstraps itself: reads its 21 sim keys from `Config/DCSBridge.lua` with the hook driver's checks, lists `simdriver.d`, publishes `route = 'modified'`, logs one INFO or ERROR line to `dcs.log`, never raises; holds `package.loadlib` and returns an opener it never publishes; the shipped line is `pcall(dofile, ...)`; agent-verified under stock Lua, the edited `MissionScripting.lua` is the maintainer's (PR #103 "With DCS"). PR #103, ADR 0069.
 - **4.9** — `absent` (no `net` or `net.dostring_in`) and `noprefix` with an unpositioned string answer are policy refusals: one ERROR line per `autoexec.cfg` line, the union with the operator's file read under a stub environment, then a latch `driver.enabled()` consults until DCS restarts; `unreached` and a positioned answer do not fire; agent-verified under stock Lua, the live refusal is the maintainer's (PR #102 "With DCS"). PR #102, ADR 0067, 0068.
 - **4.8** — `injection.answer` sorts the `"server"` answer by shape into `loaded`, `epoch`, `failed`, `unknown`, `nil`, `invalid` and `noprefix`; each case but `loaded` logs one ERROR line of its own; `driver.inject` answers the case as a second value, `skipped`, `unprepared` or `unreached` before an answer; nothing disables; agent-verified under stock Lua, the live refusal text is the maintainer's (PR #101 "With DCS"). PR #101, ADR 0066.
-- **4.7** — `onMissionLoadEnd` ticks, counts the load as its epoch and injects `SimDriver.lua` into `"server"` only while enabled and on the stock route; one `DCSBridge_load` literal carries epoch, mission, sim keys and `simdriver.d`; grammar read from disk; chunk refused above `bridge_return_max_bytes`; `OK|loaded <epoch>` read back from `DCSBridge`; agent-verified under stock Lua, the live injection is the maintainer's (PR #100 "With DCS"). PR #100, ADR 0064, 0065.
 
 *The last three at most, one line each. Git log holds the rest.*
 
 ## Next
 
-**Task 4.10** — Route B: a `dofile` of the sim driver from `MissionScripting.lua`
-before the sanitization block, capturing `package.loadlib`; the sim driver reads
-the sim-driver-tier keys itself at bootstrap. Done when the same `SimDriver.lua`
-runs with `net.dostring_in` unavailable. The hook driver's modified route already
-injects nothing (ADR 0065). Agent-verifiable under stock Lua for the bootstrap
-file; the edited `MissionScripting.lua` at a live install is the maintainer's.
-Settles the README's "The exact line to add is not final".
+**Task 4.11** — Hook-driver-side extension chain after `HookDriver.gen.lua`:
+`HookDriver.builtin.lua`, then `hookdriver.d\` in name order, with
+`hook_driver_disabled_files` honored and a raising file skipped and counted in
+`hook_driver_files_failed_total` (ADR 0055). Done when a raising file in
+`hookdriver.d\` is skipped and counted, the rest load, and an absent directory
+is silent. Agent-verifiable under stock Lua with a stub write directory.
 
 ## After that
 
-- **4.11** onward through Phase 4; 3.5 waits behind 7.6.
+- **4.12** onward through Phase 4; 3.5 waits behind 7.6.
 
 ## Carries forward
 
