@@ -1001,11 +1001,15 @@ end
 
 -- Tick the broker with the model time and take the switch from its answer.
 -- Returns true, or false and the reason when the clock does not read, and
--- then no tick is taken. ADR 0063.
+-- then no tick is taken. A time that is not a finite number is a clock that
+-- does not read, since tick raises on one. ADR 0063.
 local function hear()
   local read, time = dcs.call('getModelTime')
   if not read then
     return false, time
+  end
+  if type(time) ~= 'number' or time ~= time or time == math.huge or time == -math.huge then
+    return false, NAMESPACE .. '.getModelTime answered ' .. text(time) .. ', not a finite number'
   end
   local enabled = state.shim.tick(time)
   -- A module older than the answer returns nothing. The switch then keeps
@@ -1028,6 +1032,73 @@ driver.callbacks.onSimulationFrame = function()
   if not heard then
     error(reason, 0)
   end
+end
+
+-- The state the sim driver is injected into, where dofile and pcall are
+-- known to be present.
+local TARGET = 'server'
+
+-- Inject the sim driver for epoch. Returns true when the sim driver's
+-- global reads back the epoch sent, and false otherwise, with one line
+-- logged either way. Only while the bridge is enabled, and only on the
+-- stock route: the modified route loads the sim driver from
+-- MissionScripting.lua, so an injection there would load it twice. An
+-- answer that is neither the epoch read back nor another epoch is logged
+-- as it came, for the code that sorts the answers into their cases.
+-- ADR 0063, ADR 0065.
+function driver.inject(epoch)
+  if not driver.enabled() then
+    log.info('injection skipped: bridge disabled')
+    return false
+  end
+  if state.hook.route ~= 'stock' then
+    log.info('injection skipped: route is ' .. tostring(state.hook.route)
+      .. ', where the sim driver loads itself')
+    return false
+  end
+  local read, mission = dcs.call('getMissionName')
+  if not read or type(mission) ~= 'string' then
+    log.error('the mission name does not read: ' .. text(mission) .. ': not injected')
+    return false
+  end
+  local chunk, path = injection.prepare(epoch, mission)
+  if not chunk then
+    return false
+  end
+  local ran, answer = dcs.dostring(TARGET, chunk)
+  if not ran then
+    log.error('injection did not run: ' .. answer)
+    return false
+  end
+  local loaded = 'OK|loaded '
+  if answer == loaded .. tostring(epoch) then
+    log.info('injected ' .. path .. ': ' .. answer)
+    return true
+  end
+  if type(answer) == 'string' and answer:sub(1, #loaded) == loaded then
+    log.error('the sim driver set no epoch: sent ' .. tostring(epoch) .. ', read back '
+      .. answer:sub(#loaded + 1) .. ': not loaded')
+    return false
+  end
+  log.info('injection returned: ' .. text(answer))
+  return false
+end
+
+-- Mission loads in this process. The epoch is the count, from 1, until the
+-- hook driver owns the epoch it publishes. ADR 0065.
+state.loads = 0
+
+-- The body for a mission load's end. No frame runs during a load, so the
+-- switch is taken from a tick here first, or a SetEnabled sent during the
+-- load would be seen a frame late. A clock that does not read leaves the
+-- switch where it was. ADR 0063, ADR 0065.
+driver.callbacks.onMissionLoadEnd = function()
+  local heard, reason = hear()
+  if not heard then
+    log.error(reason .. '; the switch stays ' .. (state.enabled and 'on' or 'off'))
+  end
+  state.loads = state.loads + 1
+  driver.inject(state.loads)
 end
 
 -- The inbound ring sizes. The first configure allocates both rings and no

@@ -1,5 +1,9 @@
--- Sim driver injection: the stub states a chunk runs in, and what crosses
--- into them.
+-- Sim driver injection. At a mission load's end the hook driver takes the
+-- switch from a tick, reads the sim driver's grammar from disk, hands it the
+-- load's parameters as one literal inside a chunk no larger than
+-- bridge_return_max_bytes, and reads the epoch back from the global the sim
+-- driver set. A refusal is one logged line and nothing crosses. ADR 0063,
+-- ADR 0065.
 --
 -- Each case installs the hook driver into a scratch write directory, under a
 -- stock Lua 5.1 with lfs, DCS's log, the DCS namespace and net stubbed.
@@ -404,6 +408,142 @@ do
   assert(reason:find('^settings%.options%.builtin%.resync is a function'), 'the refusal was ' .. reason)
   assert(#matching(dir, '^ERROR settings%.options%.builtin%.resync') == 1, 'the refusal was not logged')
   print('ok  a nested function in options is refused naming its path')
+end
+
+-- A mission load's end ticks the broker and injects the sim driver into
+-- the server state with epoch 1, the mission's name, every sim-driver key
+-- and the extension list, and logs the epoch read back. The next load
+-- carries epoch 2.
+do
+  local driver, dir, ticks = started()
+  hook.write(dir .. 'DCSBridge/simdriver.d/a.lua', '')
+  DCS.mission = 'Caucasus test'
+  DCS.registered[1].onMissionLoadEnd()
+  assert(#ticks == 1, #ticks .. ' ticks at a mission load, expected 1')
+  assert(#net.calls == 1 and net.calls[1].state == 'server',
+    #net.calls .. ' injections, the first into ' .. tostring(net.calls[1] and net.calls[1].state))
+  local load = net.states.server.DCSBridge.load
+  assert(load.epoch == 1 and load.mission == 'Caucasus test', 'the load carried epoch '
+    .. tostring(load.epoch) .. ' and mission ' .. tostring(load.mission))
+  local n = 0
+  for _, row in ipairs(driver.config.KEYS) do
+    if row[3] == 'sim' then
+      n = n + 1
+      assert(same(load.settings[row[1]], row[2]), row[1] .. ' crossed as ' .. tostring(load.settings[row[1]]))
+    end
+  end
+  for _ in pairs(load.settings) do
+    n = n - 1
+  end
+  assert(n == 0, 'the settings carried a key that is not the sim driver\'s')
+  assert(#load.files == 1 and load.files[1] == dir .. 'DCSBridge/simdriver.d/a.lua',
+    'the files were ' .. table.concat(load.files, ', '))
+  local found = matching(dir, '^INFO injected ')
+  assert(#found == 1 and found[1] == 'INFO injected ' .. dir .. hook.SIM .. ': OK|loaded 1',
+    'the injection line was ' .. tostring(found[1]))
+  assert(#matching(dir, '^ERROR ') == 0, 'an injection that loaded logged an ERROR')
+
+  DCS.registered[1].onMissionLoadEnd()
+  assert(net.states.server.DCSBridge.load.epoch == 2, 'the second load was not epoch 2')
+  assert(#matching(dir, ': OK|loaded 2$') == 1, 'the second load did not read epoch 2 back')
+  print('ok  a mission load injects the sim driver and reads its epoch back')
+end
+
+-- inject answers true only when the epoch reads back. A sim driver that
+-- sets no global is one ERROR line, and the load is not counted.
+do
+  local driver, dir = started()
+  assert(driver.inject(5) == true, 'an injection that read back 5 answered false')
+  hook.sim(dir, "local GRAMMAR_VERSION = '1'\nDCSBridge_load = nil\n")
+  assert(driver.inject(6) == false, 'an injection that read nothing back answered true')
+  local found = matching(dir, '^ERROR ')
+  assert(#found == 1 and found[1] == 'ERROR the sim driver set no epoch: sent 6, read back 5: not loaded',
+    'the read-back line was ' .. tostring(found[1]))
+  print('ok  a sim driver that sets no epoch is not counted as loaded')
+end
+
+-- A tick at the load's end that answers off is the switch for that load:
+-- nothing crosses, with no frame in between, and the skip is one line.
+do
+  local driver, dir, ticks = started()
+  ticks.answer = false
+  DCS.registered[1].onMissionLoadEnd()
+  assert(driver.enabled() == false, 'the load did not take the switch from its tick')
+  assert(#net.calls == 0, #net.calls .. ' injections while disabled')
+  assert(#matching(dir, '^INFO injection skipped: bridge disabled$') == 1, 'the skip was not logged')
+  print('ok  a load disabled by its own tick injects nothing')
+end
+
+-- A clock that does not read at the load's end is one ERROR line, and the
+-- load injects on the switch it held.
+do
+  local _, dir, ticks = started()
+  DCS.getModelTime = nil
+  DCS.registered[1].onMissionLoadEnd()
+  assert(#ticks == 0, 'a tick was taken with no clock')
+  local found = matching(dir, '^ERROR ')
+  assert(#found == 1 and found[1] == 'ERROR DCS.getModelTime is not a function; the switch stays on',
+    'the clock line was ' .. tostring(found[1]))
+  assert(#net.calls == 1, #net.calls .. ' injections on the held switch, expected 1')
+  print('ok  a load with no clock injects on the switch it held')
+end
+
+-- A clock that answers nil or NaN at the load's end is a clock that does
+-- not read: one ERROR line, no tick, and the load injects.
+do
+  for _, answer in ipairs({ { nil }, { 0 / 0 } }) do
+    local _, dir, ticks = started()
+    DCS.getModelTime = function()
+      return answer[1]
+    end
+    DCS.registered[1].onMissionLoadEnd()
+    assert(#ticks == 0, 'a tick was taken with a time of ' .. tostring(answer[1]))
+    local found = matching(dir, '^ERROR ')
+    assert(#found == 1 and found[1] == 'ERROR DCS.getModelTime answered ' .. tostring(answer[1])
+      .. ', not a finite number; the switch stays on', 'the clock line was ' .. tostring(found[1]))
+    assert(#net.calls == 1, #net.calls .. ' injections behind a time of ' .. tostring(answer[1]))
+  end
+  print('ok  a load whose clock answers no finite number injects on the switch it held')
+end
+
+-- The modified route loads the sim driver itself, so nothing crosses.
+do
+  local _, dir = started('return { route = "modified" }')
+  DCS.registered[1].onMissionLoadEnd()
+  assert(#net.calls == 0, #net.calls .. ' injections on the modified route')
+  local found = matching(dir, '^INFO injection skipped')
+  assert(#found == 1 and found[1] == 'INFO injection skipped: route is modified, where the sim driver loads itself',
+    'the skip line was ' .. tostring(found[1]))
+  print('ok  the modified route injects nothing')
+end
+
+-- A mission name that does not read refuses the injection with one ERROR.
+do
+  local _, dir = started()
+  DCS.getMissionName = function()
+    error('no mission', 0)
+  end
+  DCS.registered[1].onMissionLoadEnd()
+  assert(#net.calls == 0, #net.calls .. ' injections with no mission name')
+  local found = matching(dir, '^ERROR ')
+  assert(#found == 1 and found[1]
+    == 'ERROR the mission name does not read: DCS.getMissionName raised: no mission: not injected',
+    'the line was ' .. tostring(found[1]))
+  print('ok  a mission name that does not read refuses the injection')
+end
+
+-- Any other answer is logged as it came, and a net that is gone is one
+-- ERROR line. Neither raises into DCS.
+do
+  local driver, dir = started()
+  net.refusal = 'Invalid state name'
+  assert(driver.inject(1) == false, 'a refusal answered true')
+  assert(#matching(dir, '^INFO injection returned: Invalid state name$') == 1, 'the refusal was not logged')
+  net = nil
+  DCS.registered[1].onMissionLoadEnd()
+  assert(#matching(dir, '^ERROR injection did not run: no net namespace$') == 1, 'an absent net was not logged')
+  assert(#matching(dir, 'raised') == 0, 'an injection raised')
+  print('ok  another answer is logged as it came, and an absent net is one ERROR')
 end
 
 hook.remove()
