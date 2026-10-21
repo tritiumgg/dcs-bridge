@@ -3,7 +3,7 @@
 -- configure that binds, whose callbacks run no body until start finishes.
 -- A body that raises returns nothing to DCS and is logged once per name
 -- until the next mission load, to DCSBridge.log alone. ADR 0060, ADR 0061,
--- ADR 0062.
+-- ADR 0062, ADR 0064.
 --
 -- Each case installs the hook driver into a scratch write directory, under a
 -- stock Lua 5.1 with lfs, DCS's log and the DCS namespace stubbed, and runs
@@ -79,8 +79,33 @@ do
   print('ok  a namespace whose __index raises returns false and a reason')
 end
 
--- No line of the driver names the namespace except the one that holds its
--- name, so no call goes around the accessor.
+-- The other state is reached through the same accessor: an absent net or
+-- dostring_in is a reason, and what the state answers comes back whole.
+-- ADR 0064.
+do
+  local driver = install()
+  net = nil
+  local ok, reason = driver.dcs.dostring('server', 'return 1')
+  assert(ok == false and reason == 'no net namespace',
+    'an absent net answered ' .. tostring(ok) .. ', ' .. tostring(reason))
+  net = {}
+  ok, reason = driver.dcs.dostring('server', 'return 1')
+  assert(ok == false and reason == 'net.dostring_in is not a function',
+    'an absent dostring_in answered ' .. tostring(ok) .. ', ' .. tostring(reason))
+  net = {
+    dostring_in = function(target, chunk)
+      return target .. ' ran ' .. chunk
+    end,
+  }
+  ok, reason = driver.dcs.dostring('server', 'return 1')
+  assert(ok == true and reason == 'server ran return 1',
+    'dostring_in answered ' .. tostring(ok) .. ', ' .. tostring(reason))
+  net = nil
+  print('ok  the other state is reached through the accessor')
+end
+
+-- No line of the driver names either namespace except the ones that hold
+-- their names, so no call goes around the accessor.
 do
   local path = dcs.root() .. 'lua/' .. hook.DRIVER
   local n = 0
@@ -89,9 +114,11 @@ do
     if not line:find('^%s*%-%-') then
       assert(not line:find('DCS%.%a') and not line:find('DCS%['),
         path .. ':' .. n .. ' reaches DCS around the accessor: ' .. line)
+      assert(not line:find('%f[%w_]net%.%a') and not line:find('%f[%w_]net%['),
+        path .. ':' .. n .. ' reaches net around the accessor: ' .. line)
     end
   end
-  print('ok  the driver reaches DCS through the accessor alone')
+  print('ok  the driver reaches DCS and net through the accessor alone')
 end
 
 -- Every callback the bridge uses, in no order.

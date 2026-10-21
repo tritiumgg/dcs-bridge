@@ -20,33 +20,49 @@ end
 -- edit to this line alone. ADR 0060.
 local NAMESPACE = 'DCS'
 
+-- The namespace dostring_in lives under, the one way into another Lua
+-- state. It is reached through the same accessor. ADR 0064.
+local NET = 'net'
+
 local dcs = {}
 
--- pcall's answer as dcs.call returns it, every result kept, a trailing nil
+-- pcall's answer as reach returns it, every result kept, a trailing nil
 -- included.
-local function settled(name, ok, ...)
+local function settled(namespace, name, ok, ...)
   if not ok then
-    return false, NAMESPACE .. '.' .. name .. ' raised: ' .. text((...))
+    return false, namespace .. '.' .. name .. ' raised: ' .. text((...))
   end
   return true, ...
 end
 
--- The namespace's function name called with the arguments, alone and under
--- pcall. Returns true and its results, or false and the reason: the
--- namespace or the function is missing, or what the call raised. It never
--- raises. The namespace is looked up at each call, so a table DCS replaces
--- after this file loads is the one reached. Both lookups are raw, so a
--- metatable whose __index raises cannot raise through here.
-function dcs.call(name, ...)
-  local namespace = rawget(_G, NAMESPACE)
-  if type(namespace) ~= 'table' then
-    return false, 'no ' .. NAMESPACE .. ' namespace'
+-- The function name in the global table namespace, called with the
+-- arguments, alone and under pcall. Returns true and its results, or false
+-- and the reason: the namespace or the function is missing, or what the
+-- call raised. It never raises. The namespace is looked up at each call, so
+-- a table DCS replaces after this file loads is the one reached. Both
+-- lookups are raw, so a metatable whose __index raises cannot raise through
+-- here.
+local function reach(namespace, name, ...)
+  local found = rawget(_G, namespace)
+  if type(found) ~= 'table' then
+    return false, 'no ' .. namespace .. ' namespace'
   end
-  local fn = rawget(namespace, name)
+  local fn = rawget(found, name)
   if type(fn) ~= 'function' then
-    return false, NAMESPACE .. '.' .. name .. ' is not a function'
+    return false, namespace .. '.' .. name .. ' is not a function'
   end
-  return settled(name, pcall(fn, ...))
+  return settled(namespace, name, pcall(fn, ...))
+end
+
+-- A function of DCS's hook namespace, through reach.
+function dcs.call(name, ...)
+  return reach(NAMESPACE, name, ...)
+end
+
+-- The chunk run in the named Lua state, through reach. Returns true and
+-- what the state answered, or false and the reason. ADR 0064.
+function dcs.dostring(target, chunk)
+  return reach(NET, 'dostring_in', target, chunk)
 end
 
 local LEVELS = { error = 1, warn = 2, info = 3, debug = 4 }
