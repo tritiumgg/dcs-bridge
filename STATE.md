@@ -43,7 +43,7 @@ reporting a collision. Its brief settles who verifies.
 
 ## After that
 
-- Phase 5 continues from 5.2; 3.5 waits behind 7.6.
+- Phase 5 continues from 5.3; 3.5 waits behind 7.6.
 
 ## Carries forward
 
@@ -52,10 +52,6 @@ resolved, and say where. Mark an entry only the maintainer can settle. Ten
 entries at most: an eleventh means something here is finished, or belongs in
 `docs/decisions/` or `CLAUDE.md` instead.
 
-- **Maintainer decision — the binding blacklist ships incomplete.** SPEC §4.2
-  records a seventh crasher with two unattributed candidates and no probe. Task
-  5.2 ships it anyway and task 6.3 calls into the same table. Needed before
-  Phase 5. See `docs/audit.md`.
 - **`buf breaking` has no baseline until the next release.** `v0.1.0` predates
   the schema, so `tools/schema-breaking.sh` reports that and passes. It starts
   comparing at the first tag whose tree carries `proto/`. Delete this then.
