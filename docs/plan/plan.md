@@ -138,7 +138,6 @@ the milestone before it is reached.
 | ID | Task | Done when |
 |---|---|---|
 | 5.1 | One global `DCSBridge`, its four slots built field by field, stamped `__dcsbridge = STATE_VERSION`. A table without the stamp stops the load; a table with it is epoch leftovers to release and rebuild. Sandbox level read and reported. | An operator can see which regime they are in. A foreign `_G.DCSBridge` stops the load instead of merging. A second mission load adopts its own leftovers instead of reporting a collision. |
-| 5.2 | Binding probe and blacklist per SPEC §4.2, run unconditionally. `unsafe_bindings_enabled` gates the call site instead, so it applies on the next dispatch after a reload. | A known-bad binding is refused. |
 | 5.3 | Bounded work model, seven stages, with per-stage caps and deferral counters. `subscription_max_evals` and `spot_max_updates` are present as structural caps and never bind. | A cap hit every frame is visible in `stage_deferred_total`. |
 | 5.4 | `sim_driver_buffer_max_records` with drop-oldest and a counter. | A forced 3-second frame stall bounds memory instead of growing it. |
 | 5.5 | Per-handler `pcall`, disable-for-epoch, sim driver disabled after `handler_failures_per_epoch` failures. | A raising handler stops without ending the session. The bridge keeps running. |

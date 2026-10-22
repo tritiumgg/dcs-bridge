@@ -35,9 +35,10 @@ revisits the list.
 
 **The binding blacklist.** SPEC §4.2 records a seventh crasher with two
 unattributed candidates, and says to treat the hook driver's `terrain` table as
-a crasher family until probed member by member. Its row is `UNVERIFIED`. Task
-5.2 ships the blacklist in Phase 5 and task 6.3 then calls a member of that
-table in Phase 6. No probe covers the attribution.
+a crasher family until probed member by member. Its row is `UNVERIFIED`. The
+bridge keeps no binding blacklist (ADR 0076), so the attribution question does
+not bear on the build, and task 6.3 calls a member of that table with no
+exemption to claim.
 
     tools/ledger.sh find SPEC crasher-bindings
 
