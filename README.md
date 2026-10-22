@@ -42,7 +42,8 @@ each of those moves only for its own reason.
 
 A hook driver and a broker from different builds do not start, and nothing
 listens. `Logs\DCSBridge\DCSBridge.log` and `Logs\dcs.log` name both interface
-versions. Extract the same release's zip again to fix it.
+versions, and `dcsb doctor` prints both before DCS has run. Extract the same
+release's zip again to fix it.
 
 ## Install
 
@@ -56,8 +57,9 @@ The steps below describe the intended procedure.
    Games directory.
 3. Configure the injection route. See the next section.
 4. Restart DCS.
-5. Run `dcsb doctor` to check the installation. This command is planned,
-   not built.
+5. Run `dcsb doctor` to check the installation. It names each shipped file
+   that is missing, reads the last start in `Logs\dcs.log`, compares both
+   interface versions, and asks the bridge's port whether it answers.
 
 The zip places these files.
 
@@ -83,8 +85,10 @@ missing, and the reason names the file.
 A working install writes a banner line to `Logs\dcs.log` at DCS start, under
 `DCSBridge`. It names the loader and the hook driver with each file's size
 and modification time, which is how a build is identified. The same line
-opens `Logs\DCSBridge\DCSBridge.log`. No banner means DCS did not find the
-loader or could not parse it.
+begins each start's entries in `Logs\DCSBridge\DCSBridge.log`, which every
+start appends to. No banner means DCS did not find the loader or could not
+parse it. `dcsb doctor` reads the banner and tells a missing one from a
+loader set to `ENABLED = false`.
 
 A release overwrites every file under `Mods\services\DCSBridge\`. Do not put
 your own files there. Your own extension files go under `DCSBridge\` in the
@@ -398,6 +402,8 @@ dcsb send dcsbridge.hook.ReloadConfig
 dcsb record session.bin            Append each record the bridge sends to a file.
 dcsb replay session.bin            Serve that file to one consumer, with no DCS.
 dcsb tail --addr 127.0.0.1:7743    Read the replayed session.
+dcsb doctor                        Check the install under Saved Games.
+dcsb doctor --dir D:\Games\DCS     Check the install in another directory.
 dcsb --help                        List the available commands.
 ```
 
@@ -485,8 +491,23 @@ frames as fast as it can take them. A capture that ends inside a frame
 serves the whole frames before the cut and exits 1; a file that cannot be
 opened or an address that cannot be bound exits 2.
 
-`tail`, `ping`, `schema`, `send`, `record` and `replay` are built. The
-others are planned: `doctor` and `stats`.
+`doctor` checks an install from outside DCS and prints one line per check,
+marked `ok`, `fail` or `note`. It checks the Saved Games directory `--dir`
+names, or else each of `%USERPROFILE%\Saved Games\DCS` and `DCS.openbeta`
+that holds the loader. It names each shipped file that is missing. It
+reads the last start in `Logs\dcs.log`: the banner, or the loader disabled,
+and whether the hook driver started, quoting the line that says why not. It
+compares the banner's sizes and times with the installed loader and hook
+driver, so a file changed since DCS last started is named. It prints the
+hook driver's interface version and the broker's, read from the installed
+files, so a mismatch shows before DCS runs. Last, it sends `ping` to
+`127.0.0.1:7742`, or the address `--addr` names, which a port set in
+`Config\DCSBridge.lua` needs. A sim not heard from and a bridge switched
+off are notes, not failures. It exits 0 when no check failed, 1 when one
+did, and 2 when it found no directory to check.
+
+`tail`, `ping`, `schema`, `send`, `record`, `replay` and `doctor` are
+built. `stats` is planned.
 
 ## Build from source
 
