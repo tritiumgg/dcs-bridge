@@ -3,7 +3,9 @@
 -- configure that binds, whose callbacks run no body until start finishes.
 -- A body that raises returns nothing to DCS and is logged once per name
 -- until the next mission load, to DCSBridge.log alone. Five callbacks run
--- the dispatch loop, and none does during a mission load. ADR 0060,
+-- the dispatch loop, and none does during a mission load. Every callback
+-- the driver registers is called after a clean start, and a name with no
+-- body counts as exercised when it returns nothing. ADR 0060,
 -- ADR 0061, ADR 0062, ADR 0064, ADR 0071.
 --
 -- Each case installs the hook driver into a scratch write directory, under a
@@ -256,6 +258,40 @@ do
   n = select('#', callbacks.onPlayerTrySendChat(2, 'hello', -1))
   assert(n == 0, n .. ' values returned by a callback with no body')
   print('ok  a body returns its values and a missing body returns nothing')
+end
+
+-- After a clean start every registered callback is called, and each name
+-- with no body returns nothing, which is what counts as exercised for a
+-- name whose consumer has not landed. Which names have a body is read at
+-- run time, so a body added later needs no change here. ADR 0061.
+do
+  local driver, _, _, callbacks = started()
+  -- onMissionLoadBegin goes last, since the blackout it starts would change
+  -- what the callbacks after it do.
+  local order = {}
+  for name in pairs(callbacks) do
+    if name ~= 'onMissionLoadBegin' then
+      order[#order + 1] = name
+    end
+  end
+  order[#order + 1] = 'onMissionLoadBegin'
+  local called = {}
+  for _, name in ipairs(order) do
+    local n = select('#', callbacks[name](1, 'pilot', 'ucid', 2))
+    called[name] = true
+    if driver.callbacks[name] == nil then
+      assert(n == 0, name .. ' has no body and returned ' .. n .. ' values')
+    end
+  end
+  local n = 0
+  for _ in pairs(called) do
+    n = n + 1
+  end
+  for _, name in ipairs(NAMES) do
+    assert(called[name], name .. ' was not called')
+  end
+  assert(n == #NAMES, n .. ' callbacks called, expected ' .. #NAMES)
+  print('ok  every registered callback is called and a name with no body returns nothing')
 end
 
 -- A body set after the file loads and before start is the one that runs:
