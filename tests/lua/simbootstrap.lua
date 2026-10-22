@@ -81,8 +81,8 @@ do
     return {
       drain_max_records = 128,
       max_spots = 4,
-      unsafe_bindings_enabled = true,
       sim_driver_disabled_files = { 'off.lua' },
+      mission_sim_driver_dirs = true,
       port = 9000,
       log_level = 'debug',
       route = 'modified',
@@ -105,10 +105,10 @@ do
         want = 128
       elseif row[1] == 'max_spots' then
         want = 4
-      elseif row[1] == 'unsafe_bindings_enabled' then
-        want = true
       elseif row[1] == 'sim_driver_disabled_files' then
         want = { 'off.lua' }
+      elseif row[1] == 'mission_sim_driver_dirs' then
+        want = true
       end
       assert(same(settings[row[1]], want), row[1] .. ' read as ' .. tostring(settings[row[1]]))
     end
@@ -120,8 +120,8 @@ do
   assert(rawget(mission, 'DCSBridge_load') == nil, 'the bootstrap left DCSBridge_load set')
   local info = said('INFO')
   assert(#info == 1 and info[1] == 'the sim driver loaded on the modified route: read '
-    .. dir .. 'Config/DCSBridge.lua, drain_max_records 128, max_spots 4, unsafe_bindings_enabled true,'
-    .. ' sim_driver_disabled_files', 'the INFO line was ' .. tostring(info[1]))
+    .. dir .. 'Config/DCSBridge.lua, drain_max_records 128, max_spots 4, sim_driver_disabled_files,'
+    .. ' mission_sim_driver_dirs true', 'the INFO line was ' .. tostring(info[1]))
   assert(#said('ERROR') == 0, 'a bootstrap that loaded logged an ERROR')
   print('ok  a bare dofile reads the sim keys itself and publishes a modified-route load')
 end

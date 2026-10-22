@@ -25,11 +25,12 @@ end
 
 -- Every key named once, under one of three owners, with a plain default.
 -- 79 specification rows, less the two ring rows ADR 0028 replaced with
--- three, is 80. The broker's are exactly the 30 it declares.
+-- three, less the binding gate ADR 0076 dropped, is 79. The broker's are
+-- exactly the 30 it declares.
 do
   local driver = fresh()
   local KEYS = driver.config.KEYS
-  assert(#KEYS == 80, #KEYS .. ' keys, expected 80')
+  assert(#KEYS == 79, #KEYS .. ' keys, expected 79')
 
   local seen, owners = {}, { broker = 0, hook = 0, sim = 0 }
   for _, row in ipairs(KEYS) do

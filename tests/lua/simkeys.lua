@@ -29,10 +29,10 @@ local sim = rows(ROOT .. 'SimDriver.lua', 'sim')
 -- The shape reads something in each file, so a reformat that hides every
 -- row fails here rather than comparing two empty lists.
 do
-  assert(#hook == 21, 'the hook driver declares ' .. #hook .. ' sim rows, expected 21')
+  assert(#hook == 20, 'the hook driver declares ' .. #hook .. ' sim rows, expected 20')
   assert(#rows(ROOT .. 'SimDriver.lua', 'hook') == 0 and #rows(ROOT .. 'SimDriver.lua', 'broker') == 0,
     'the sim driver declares a key it does not own')
-  print('ok  the hook driver declares 21 sim rows, and the sim driver only sim rows')
+  print('ok  the hook driver declares 20 sim rows, and the sim driver only sim rows')
 end
 
 do

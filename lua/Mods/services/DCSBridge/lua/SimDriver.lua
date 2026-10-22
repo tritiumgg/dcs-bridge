@@ -41,7 +41,6 @@ local KEYS = {
   { 'command_ack_detail_max_bytes', 256, 'sim' },
   { 'spawn_max_groups_per_command', 8, 'sim' },
   { 'handler_failures_per_epoch', 3, 'sim' },
-  { 'unsafe_bindings_enabled', false, 'sim' },
   { 'sim_driver_disabled_files', {}, 'sim' },
   { 'options', {}, 'sim' },
   { 'mission_sim_driver_dirs', false, 'sim' },

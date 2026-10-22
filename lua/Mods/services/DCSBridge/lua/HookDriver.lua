@@ -130,7 +130,6 @@ local KEYS = {
   { 'command_ack_detail_max_bytes', 256, 'sim' },
   { 'spawn_max_groups_per_command', 8, 'sim' },
   { 'handler_failures_per_epoch', 3, 'sim' },
-  { 'unsafe_bindings_enabled', false, 'sim' },
   -- Operator eval.
   { 'eval_max_files_per_poll', 1, 'hook' },
   { 'eval_max_file_bytes', 65536, 'hook' },
