@@ -8,8 +8,8 @@
 //! one of the two messages a connection may send before authenticating.
 
 use std::io::{self, Read, Write};
-use std::net::TcpStream;
-use std::time::Duration;
+use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
+use std::time::{Duration, Instant};
 
 use prost::Message;
 
@@ -38,17 +38,42 @@ pub fn ping_frame() -> Vec<u8> {
 }
 
 /// Connect to `addr` and send the `Ping`, returning the stream to read the
-/// answer from for at most `wait`. The error is the line to print.
+/// answer from. The connect and the answer share one `wait`. The error is
+/// the line to print.
 ///
-/// The wait is wall-clock over the whole answer rather than one read: the
-/// frame is complete or the time is up, whichever comes first.
+/// The wait is wall-clock over the whole exchange rather than one call: a
+/// host that drops the connection request would otherwise hold the connect
+/// for the system's own timeout, which runs to minutes.
 pub fn ask(addr: &str, wait: Duration) -> Result<wire::Deadline, String> {
-    let mut stream =
-        TcpStream::connect(addr).map_err(|error| format!("cannot connect to {addr}: {error}"))?;
+    let until = Instant::now() + wait;
+    let mut stream = addr
+        .to_socket_addrs()
+        .and_then(|addrs| connect(addrs, until))
+        .map_err(|error| format!("cannot connect to {addr}: {error}"))?;
     stream
         .write_all(&ping_frame())
         .map_err(|error| format!("cannot send a ping to {addr}: {error}"))?;
-    Ok(wire::Deadline::new(stream, wait))
+    Ok(wire::Deadline::new(
+        stream,
+        until.saturating_duration_since(Instant::now()),
+    ))
+}
+
+/// Connect to the first of `addrs` that accepts before `until`, each try
+/// bounded by what is left of it. The last error when none does.
+fn connect(addrs: impl IntoIterator<Item = SocketAddr>, until: Instant) -> io::Result<TcpStream> {
+    let mut last = io::Error::new(io::ErrorKind::InvalidInput, "the address names no host");
+    for addr in addrs {
+        let left = until.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return Err(io::ErrorKind::TimedOut.into());
+        }
+        match TcpStream::connect_timeout(&addr, left) {
+            Ok(stream) => return Ok(stream),
+            Err(error) => last = error,
+        }
+    }
+    Err(last)
 }
 
 /// Read frames from `reader` until a `Pong` arrives, print its three fields
@@ -201,5 +226,22 @@ mod tests {
 
         drop(listener);
         drop(writer);
+    }
+
+    /// The connect is bounded by the wait: with none left no address is
+    /// tried and the error is a timeout, an address list that is empty is
+    /// an error rather than a hang, and a listening address connects.
+    #[test]
+    fn the_connect_is_bounded_by_the_wait() {
+        let listening = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listening.local_addr().unwrap();
+        let past = Instant::now();
+        let error = connect([addr], past).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+
+        let error = connect([], Instant::now() + Duration::from_secs(5)).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+
+        connect([addr], Instant::now() + Duration::from_secs(5)).expect("the listener accepts");
     }
 }
