@@ -18,7 +18,7 @@ is just deleted. Write entries as one or two lines, never paragraphs.
 
 ## In progress
 
-Nothing. 4.12 is built; 4.C1 is next.
+Nothing. 4.C1 is built; 4.13 is next.
 
 *One task at most. Say what is done, what is not, and where to resume. Say what
 is committed and what is only in the working tree. Say what is knowingly
@@ -26,23 +26,21 @@ broken. Empty this when the task closes.*
 
 ## Just finished
 
+- **4.C1** — `dcsb doctor [--dir] [--addr]`: write directory from `--dir` or `USERPROFILE`'s two Saved Games names; one line per check, `ok`/`fail`/`note`, exit 0/1/2; the seven shipped files; `dcs.log`'s newest start (banner, disabled, stop quoted) and the banner's sizes and UTC times against the installed files; both interface versions from `HookDriver.lua` and a `dcsbridge-interface=` marker in the DLL; the port by `ping`; agent-verified on scratch trees, the real `dcs.log` prefix and mtime agreement are the maintainer's (PR #106 "With DCS"). PR #106, ADR 0073, 0074, 0075.
 - **4.12** — `dcsbridge.hook.ReloadConfig` (command, hook route, `reload`) dispatches to `driver.reload`; `start` registers `state.gen`'s tables after the schema line, a refusal stopping it; the loop polls from five callbacks, at most the cap, holds one record past it and counts that in `hook_driver_dispatch_deferred_total`; nothing between load begin and end or a frame; disabled, it runs `ReloadConfig` alone and discards the rest with one WARN a topic; no answer (row 7.5); agent-verified under stock Lua, the live reload and the 4.4 check are the maintainer's (PR #105 "With DCS"). PR #105, ADR 0071, 0072.
 - **4.11** — after the schema line `start` runs `HookDriver.builtin.lua` (shipped, registers nothing), then `hookdriver.d` (`*.gen.lua` first, name order) as bare chunks; a missing, uncompilable or raising file logs one ERROR and counts in `hook_driver_files_failed_total`, held in the hook driver; `hook_driver_disabled_files` drops names from both; an absent directory is silent; plan row 5.13 holds the hook-side surface; agent-verified under stock Lua, ED's `lfs.dir` on a missing directory is the maintainer's (PR #104 "With DCS"). PR #104, ADR 0070.
-- **4.10** — with no `DCSBridge_load` the sim driver bootstraps itself: reads its 21 sim keys from `Config/DCSBridge.lua` with the hook driver's checks, lists `simdriver.d`, publishes `route = 'modified'`, logs one INFO or ERROR line to `dcs.log`, never raises; holds `package.loadlib` and returns an opener it never publishes; the shipped line is `pcall(dofile, ...)`; agent-verified under stock Lua, the edited `MissionScripting.lua` is the maintainer's (PR #103 "With DCS"). PR #103, ADR 0069.
 
 *The last three at most, one line each. Git log holds the rest.*
 
 ## Next
 
-**Task 4.C1** — CLI `doctor`, first increment: install placement, hook driver load, port,
-load banner, and both interface versions. Done when a broken install is diagnosed in one
-command before any sim driver exists. Install placement and the port are agent-verifiable
-against a scratch tree and a loopback bridge; the load banner and the hook driver load
-against a real Saved Games tree are the maintainer's.
+**Task 4.13** — Run everything under the stub harness. Done when it exits 0 with no
+unexercised callback. Agent-verified under stock Lua through `tools/luatest.sh`; nothing
+is the maintainer's.
 
 ## After that
 
-- **4.13** closes Phase 4; Phase 5 from 5.1; 3.5 waits behind 7.6.
+- Phase 5 from 5.1, after 4.13 closes Phase 4; 3.5 waits behind 7.6.
 
 ## Carries forward
 
