@@ -107,6 +107,11 @@ driver and is not published yet, so the test reads it through
 dispatch loop against a stub whose `poll` pops a list the test fills, and
 reads `hook_driver_dispatch_deferred_total` the same way (ADR 0071).
 
+`tests/lua/hookcallbacks.lua` calls every callback the hook driver registers
+after a clean start, and fails naming any name with no body that returns a
+value. A name with no body counts as exercised when its function returns
+nothing (ADR 0061).
+
 ### Windows
 
 The product target is `x86_64` Windows for as long as DCS runs nowhere else,
